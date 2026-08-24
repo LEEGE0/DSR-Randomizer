@@ -4,10 +4,13 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <future>
 #include <iostream>
+#include <limits>
 #include <set>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "DSRRandomizer/ProtectionProtocol.h"
@@ -17,18 +20,25 @@ namespace {
 
 namespace fs = std::filesystem;
 using DSRRandomizer::Save::HookPlatform;
+using DSRRandomizer::Save::SaveHookCleanupStatus;
 using DSRRandomizer::Save::SaveHookConfiguration;
 using DSRRandomizer::Save::SaveHookInstallStatus;
 
+struct FixtureHookFailures {
+    std::size_t missingTarget = std::numeric_limits<std::size_t>::max();
+    std::size_t failedCreate = std::numeric_limits<std::size_t>::max();
+    std::size_t failedQueue = std::numeric_limits<std::size_t>::max();
+    std::size_t partialEnableCount = 0;
+    std::size_t failedRemove = std::numeric_limits<std::size_t>::max();
+    bool failApply = false;
+    bool failDisable = false;
+    bool failUninitialize = false;
+};
+
 class FixtureHookPlatform final : public HookPlatform {
 public:
-    explicit FixtureHookPlatform(
-        const std::size_t missingTarget = static_cast<std::size_t>(-1),
-        const std::size_t failedQueue = static_cast<std::size_t>(-1),
-        const bool failApply = false)
-        : missingTarget_(missingTarget),
-          failedQueue_(failedQueue),
-          failApply_(failApply) {}
+    explicit FixtureHookPlatform(FixtureHookFailures failures = {})
+        : failures_(failures) {}
 
     bool Initialize() noexcept override {
         initialized_ = true;
@@ -37,49 +47,96 @@ public:
 
     void* ResolveTarget(const wchar_t*, const char*) noexcept override {
         const auto index = resolveCount_++;
-        if (index == missingTarget_) {
+        if (index == failures_.missingTarget) {
             return nullptr;
         }
         return reinterpret_cast<void*>(0x10000ULL + (index * 0x100ULL));
     }
 
     bool CreateHook(void* target, void*, void** original) noexcept override {
+        if (createCount_++ == failures_.failedCreate) {
+            return false;
+        }
         created_.insert(target);
         *original = target;
         return true;
     }
 
-    bool QueueEnable(void*) noexcept override {
-        return queueCount_++ != failedQueue_;
+    bool QueueEnable(void* target) noexcept override {
+        if (queueCount_++ == failures_.failedQueue) {
+            return false;
+        }
+        queued_.push_back(target);
+        return true;
     }
 
     bool ApplyQueued() noexcept override {
         applyWasCalled_ = true;
-        return !failApply_;
+        if (failures_.failApply) {
+            const auto enabledCount = (std::min)(
+                failures_.partialEnableCount,
+                queued_.size());
+            enabled_.insert(queued_.begin(), queued_.begin() + enabledCount);
+            return false;
+        }
+        enabled_.insert(queued_.begin(), queued_.end());
+        return true;
     }
 
-    void DisableAll() noexcept override { disableWasCalled_ = true; }
+    bool DisableAll() noexcept override {
+        disableWasCalled_ = true;
+        if (failures_.failDisable) {
+            return false;
+        }
+        enabled_.clear();
+        return true;
+    }
 
-    void RemoveHook(void* target) noexcept override { created_.erase(target); }
+    bool RemoveHook(void* target) noexcept override {
+        const auto index = static_cast<std::size_t>(
+            (reinterpret_cast<std::uintptr_t>(target) - 0x10000ULL) / 0x100ULL);
+        if (index == failures_.failedRemove) {
+            return false;
+        }
+        enabled_.erase(target);
+        created_.erase(target);
+        return true;
+    }
 
-    void Uninitialize() noexcept override { initialized_ = false; }
+    bool Uninitialize() noexcept override {
+        if (failures_.failUninitialize) {
+            return false;
+        }
+        initialized_ = false;
+        queued_.clear();
+        return true;
+    }
 
     [[nodiscard]] bool WasRolledBack() const noexcept {
-        return !initialized_ && created_.empty();
+        return !initialized_ && created_.empty() && enabled_.empty();
     }
     [[nodiscard]] bool ApplyWasCalled() const noexcept { return applyWasCalled_; }
     [[nodiscard]] bool DisableWasCalled() const noexcept { return disableWasCalled_; }
+    [[nodiscard]] std::size_t CreatedCount() const noexcept { return created_.size(); }
+    [[nodiscard]] std::size_t EnabledCount() const noexcept { return enabled_.size(); }
+
+    void AllowDisable() noexcept { failures_.failDisable = false; }
+    void AllowRemove() noexcept {
+        failures_.failedRemove = std::numeric_limits<std::size_t>::max();
+    }
+    void AllowUninitialize() noexcept { failures_.failUninitialize = false; }
 
 private:
-    std::size_t missingTarget_;
-    std::size_t failedQueue_;
-    bool failApply_;
+    FixtureHookFailures failures_;
     std::size_t resolveCount_ = 0;
+    std::size_t createCount_ = 0;
     std::size_t queueCount_ = 0;
     bool initialized_ = false;
     bool applyWasCalled_ = false;
     bool disableWasCalled_ = false;
     std::set<void*> created_;
+    std::set<void*> enabled_;
+    std::vector<void*> queued_;
 };
 
 int Fail(const char* message) {
@@ -95,6 +152,31 @@ bool CreateDirectories(const fs::path& path) {
     std::error_code error;
     fs::create_directories(path, error);
     return !error;
+}
+
+bool WriteFixtureFile(
+    const fs::path& path,
+    const std::string_view contents) {
+    const HANDLE file = CreateFileW(
+        path.c_str(),
+        GENERIC_WRITE,
+        FILE_SHARE_READ,
+        nullptr,
+        CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    DWORD written = 0;
+    const BOOL succeeded = WriteFile(
+        file,
+        contents.data(),
+        static_cast<DWORD>(contents.size()),
+        &written,
+        nullptr);
+    CloseHandle(file);
+    return succeeded && written == contents.size();
 }
 
 fs::path CreateTemporaryRoot() {
@@ -175,7 +257,7 @@ SaveHookConfiguration HookConfigurationFor(const fs::path& root) {
 int VerifyHookInstallRollback(const fs::path& root) {
     const auto configuration = HookConfigurationFor(root);
 
-    FixtureHookPlatform missingTarget(3);
+    FixtureHookPlatform missingTarget(FixtureHookFailures{.missingTarget = 3});
     if (DSRRandomizer::Save::InstallSaveHooks(configuration, missingTarget)
             != SaveHookInstallStatus::InstallFailed
         || !missingTarget.WasRolledBack()
@@ -184,7 +266,16 @@ int VerifyHookInstallRollback(const fs::path& root) {
         return Fail("missing hook target did not roll back the save group");
     }
 
-    FixtureHookPlatform failedQueue(static_cast<std::size_t>(-1), 4);
+    FixtureHookPlatform failedCreate(FixtureHookFailures{.failedCreate = 3});
+    if (DSRRandomizer::Save::InstallSaveHooks(configuration, failedCreate)
+            != SaveHookInstallStatus::InstallFailed
+        || !failedCreate.WasRolledBack()
+        || failedCreate.ApplyWasCalled()
+        || DSRRandomizer::Save::SaveHooksAreInstalled()) {
+        return Fail("partial hook creation failure did not roll back the save group");
+    }
+
+    FixtureHookPlatform failedQueue(FixtureHookFailures{.failedQueue = 4});
     if (DSRRandomizer::Save::InstallSaveHooks(configuration, failedQueue)
             != SaveHookInstallStatus::InstallFailed
         || !failedQueue.WasRolledBack()
@@ -193,10 +284,10 @@ int VerifyHookInstallRollback(const fs::path& root) {
         return Fail("partial hook queue failure did not roll back the save group");
     }
 
-    FixtureHookPlatform failedApply(
-        static_cast<std::size_t>(-1),
-        static_cast<std::size_t>(-1),
-        true);
+    FixtureHookPlatform failedApply(FixtureHookFailures{
+        .partialEnableCount = 3,
+        .failApply = true,
+    });
     if (DSRRandomizer::Save::InstallSaveHooks(configuration, failedApply)
             != SaveHookInstallStatus::InstallFailed
         || !failedApply.WasRolledBack()
@@ -204,6 +295,175 @@ int VerifyHookInstallRollback(const fs::path& root) {
         || !failedApply.DisableWasCalled()
         || DSRRandomizer::Save::SaveHooksAreInstalled()) {
         return Fail("atomic hook apply failure did not disable and roll back the save group");
+    }
+
+    FixtureHookPlatform failedDisable(FixtureHookFailures{
+        .partialEnableCount = 3,
+        .failApply = true,
+        .failDisable = true,
+    });
+    if (DSRRandomizer::Save::InstallSaveHooks(configuration, failedDisable)
+            != SaveHookInstallStatus::InstallFailed
+        || DSRRandomizer::Save::SaveHooksAreInstalled()
+        || failedDisable.EnabledCount() != 3
+        || failedDisable.CreatedCount() != 8) {
+        return Fail("partial enable plus disable failure was not retained fail-closed");
+    }
+    const auto disableFailureState =
+        DSRRandomizer::Save::Testing::CurrentSaveHookLifecycle();
+    if (!disableFailureState.contextRetained
+        || !disableFailureState.denyOnly
+        || disableFailureState.ready) {
+        return Fail("disable failure cleared live hook context or reported readiness");
+    }
+    failedDisable.AllowDisable();
+    if (DSRRandomizer::Save::UninstallSaveHooks()
+            != SaveHookCleanupStatus::Success
+        || !failedDisable.WasRolledBack()) {
+        return Fail("disable failure could not be safely retried");
+    }
+
+    FixtureHookPlatform failedRemove(FixtureHookFailures{
+        .failedCreate = 5,
+        .failedRemove = 2,
+    });
+    if (DSRRandomizer::Save::InstallSaveHooks(configuration, failedRemove)
+            != SaveHookInstallStatus::InstallFailed
+        || failedRemove.CreatedCount() != 1) {
+        return Fail("remove failure did not retain the one live created hook");
+    }
+    const auto removeFailureState =
+        DSRRandomizer::Save::Testing::CurrentSaveHookLifecycle();
+    if (!removeFailureState.contextRetained
+        || !removeFailureState.denyOnly
+        || removeFailureState.ready) {
+        return Fail("remove failure cleared live hook context or reported readiness");
+    }
+    failedRemove.AllowRemove();
+    if (DSRRandomizer::Save::UninstallSaveHooks()
+            != SaveHookCleanupStatus::Success
+        || !failedRemove.WasRolledBack()) {
+        return Fail("remove failure could not be safely retried");
+    }
+
+    FixtureHookPlatform failedUninitialize(FixtureHookFailures{
+        .missingTarget = 0,
+        .failUninitialize = true,
+    });
+    if (DSRRandomizer::Save::InstallSaveHooks(configuration, failedUninitialize)
+            != SaveHookInstallStatus::InstallFailed) {
+        return Fail("uninitialize failure setup did not fail installation");
+    }
+    const auto uninitializeFailureState =
+        DSRRandomizer::Save::Testing::CurrentSaveHookLifecycle();
+    if (!uninitializeFailureState.contextRetained
+        || !uninitializeFailureState.denyOnly
+        || uninitializeFailureState.ready) {
+        return Fail("uninitialize failure cleared retained lifecycle state");
+    }
+    failedUninitialize.AllowUninitialize();
+    if (DSRRandomizer::Save::UninstallSaveHooks()
+            != SaveHookCleanupStatus::Success
+        || !failedUninitialize.WasRolledBack()) {
+        return Fail("uninitialize failure could not be safely retried");
+    }
+
+    FixtureHookPlatform teardownDisable(FixtureHookFailures{
+        .failDisable = true,
+    });
+    if (DSRRandomizer::Save::InstallSaveHooks(configuration, teardownDisable)
+            != SaveHookInstallStatus::Success
+        || DSRRandomizer::Save::UninstallSaveHooks()
+            != SaveHookCleanupStatus::Incomplete
+        || DSRRandomizer::Save::SaveHooksAreInstalled()
+        || teardownDisable.EnabledCount() != 8
+        || teardownDisable.CreatedCount() != 8) {
+        return Fail("ready hook cleanup did not retain state after disable failure");
+    }
+    const auto teardownDisableState =
+        DSRRandomizer::Save::Testing::CurrentSaveHookLifecycle();
+    if (!teardownDisableState.contextRetained
+        || !teardownDisableState.denyOnly
+        || teardownDisableState.ready) {
+        return Fail("ready hook disable failure freed context or retained readiness");
+    }
+    teardownDisable.AllowDisable();
+    if (DSRRandomizer::Save::UninstallSaveHooks()
+            != SaveHookCleanupStatus::Success
+        || !teardownDisable.WasRolledBack()) {
+        return Fail("ready hook disable failure could not be safely retried");
+    }
+
+    FixtureHookPlatform teardownRemove(FixtureHookFailures{
+        .failedRemove = 2,
+    });
+    if (DSRRandomizer::Save::InstallSaveHooks(configuration, teardownRemove)
+            != SaveHookInstallStatus::Success
+        || DSRRandomizer::Save::UninstallSaveHooks()
+            != SaveHookCleanupStatus::Incomplete
+        || teardownRemove.EnabledCount() != 0
+        || teardownRemove.CreatedCount() != 1) {
+        return Fail("ready hook cleanup did not retain the failed removal");
+    }
+    const auto teardownRemoveState =
+        DSRRandomizer::Save::Testing::CurrentSaveHookLifecycle();
+    if (!teardownRemoveState.contextRetained
+        || !teardownRemoveState.denyOnly
+        || teardownRemoveState.ready) {
+        return Fail("ready hook remove failure freed context or retained readiness");
+    }
+    teardownRemove.AllowRemove();
+    if (DSRRandomizer::Save::UninstallSaveHooks()
+            != SaveHookCleanupStatus::Success
+        || !teardownRemove.WasRolledBack()) {
+        return Fail("ready hook remove failure could not be safely retried");
+    }
+
+    FixtureHookPlatform inFlight;
+    if (DSRRandomizer::Save::InstallSaveHooks(configuration, inFlight)
+        != SaveHookInstallStatus::Success) {
+        return Fail("callback quiescence setup did not install hooks");
+    }
+    const HANDLE entered = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    const HANDLE release = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (entered == nullptr || release == nullptr) {
+        if (entered != nullptr) CloseHandle(entered);
+        if (release != nullptr) CloseHandle(release);
+        return Fail("callback quiescence events could not be created");
+    }
+    std::thread callback([&] {
+        DSRRandomizer::Save::Testing::HoldSaveHookCallback(entered, release);
+    });
+    if (WaitForSingleObject(entered, 5000) != WAIT_OBJECT_0) {
+        SetEvent(release);
+        callback.join();
+        CloseHandle(entered);
+        CloseHandle(release);
+        return Fail("callback did not enter before uninstall");
+    }
+    auto cleanup = std::async(std::launch::async, [] {
+        return DSRRandomizer::Save::UninstallSaveHooks();
+    });
+    if (cleanup.wait_for(std::chrono::milliseconds(100))
+        != std::future_status::timeout) {
+        SetEvent(release);
+        callback.join();
+        CloseHandle(entered);
+        CloseHandle(release);
+        return Fail("uninstall did not wait for the in-flight callback");
+    }
+    SetEvent(release);
+    callback.join();
+    const auto cleanupStatus = cleanup.get();
+    CloseHandle(entered);
+    CloseHandle(release);
+    const auto finalState = DSRRandomizer::Save::Testing::CurrentSaveHookLifecycle();
+    if (cleanupStatus != SaveHookCleanupStatus::Success
+        || finalState.contextRetained
+        || finalState.denyOnly
+        || finalState.ready
+        || !inFlight.WasRolledBack()) {
+        return Fail("callback quiescence cleanup freed or retained the wrong state");
     }
 
     return 0;
@@ -229,7 +489,8 @@ int RunFixture(const wchar_t* fixturePath, const wchar_t* guardPath) {
     if (!CreateDirectories(virtualProfile)
         || !CreateDirectories(realProfile)
         || !CreateDirectories(externalRoot)
-        || !CreateDirectories(escapeTarget)) {
+        || !CreateDirectories(escapeTarget)
+        || !WriteFixtureFile(dedicatedRmm, "preexisting-rmm")) {
         return Fail("unable to create fixture directories");
     }
     if (const auto rollbackResult = VerifyHookInstallRollback(root.Path());

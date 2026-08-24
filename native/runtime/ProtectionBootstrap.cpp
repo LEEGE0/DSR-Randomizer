@@ -25,7 +25,9 @@ bool ReadRequiredPath(
     return true;
 }
 
-InitStatus InitializeCore(ProtectionInitBlock* block) noexcept {
+InitStatus InitializeCore(
+    ProtectionInitBlock* block,
+    const Testing::RequiredPathReader pathReader) noexcept {
     activeFlags.store(0, std::memory_order_release);
     if (block == nullptr || block->size != sizeof(ProtectionInitBlock)) {
         return InitStatus::InvalidArgument;
@@ -52,31 +54,41 @@ InitStatus InitializeCore(ProtectionInitBlock* block) noexcept {
     }
 
     if ((block->requiredFlags & saveFlags) == saveFlags) {
-        Save::SaveHookConfiguration configuration{};
-        configuration.diagnosticMode = block->diagnosticMode != 0;
-        if (!ReadRequiredPath(
-                block->virtualDocuments,
-                kProtectionSavePathCharacters,
-                configuration.virtualDocuments)
-            || !ReadRequiredPath(
-                block->virtualLogicalSave,
-                kProtectionSavePathCharacters,
-                configuration.virtualLogicalSave)
-            || !ReadRequiredPath(
-                block->realSaveRoot,
-                kProtectionSavePathCharacters,
-                configuration.realSaveRoot)
-            || !ReadRequiredPath(
-                block->externalSaveRoot,
-                kProtectionSavePathCharacters,
-                configuration.externalSaveRoot)
-            || !ReadRequiredPath(
-                block->dedicatedRmm,
-                kProtectionSavePathCharacters,
-                configuration.dedicatedRmm)
-            || Save::InstallSaveHooks(configuration)
-                != Save::SaveHookInstallStatus::Success) {
-            Save::UninstallSaveHooks();
+        try {
+            if (pathReader == nullptr) {
+                static_cast<void>(Save::UninstallSaveHooks());
+                return InitStatus::SaveHookInstallFailed;
+            }
+            Save::SaveHookConfiguration configuration{};
+            configuration.diagnosticMode = block->diagnosticMode != 0;
+            if (!pathReader(
+                    block->virtualDocuments,
+                    kProtectionSavePathCharacters,
+                    configuration.virtualDocuments)
+                || !pathReader(
+                    block->virtualLogicalSave,
+                    kProtectionSavePathCharacters,
+                    configuration.virtualLogicalSave)
+                || !pathReader(
+                    block->realSaveRoot,
+                    kProtectionSavePathCharacters,
+                    configuration.realSaveRoot)
+                || !pathReader(
+                    block->externalSaveRoot,
+                    kProtectionSavePathCharacters,
+                    configuration.externalSaveRoot)
+                || !pathReader(
+                    block->dedicatedRmm,
+                    kProtectionSavePathCharacters,
+                    configuration.dedicatedRmm)
+                || Save::InstallSaveHooks(configuration)
+                    != Save::SaveHookInstallStatus::Success) {
+                static_cast<void>(Save::UninstallSaveHooks());
+                return InitStatus::SaveHookInstallFailed;
+            }
+        }
+        catch (...) {
+            static_cast<void>(Save::UninstallSaveHooks());
             return InitStatus::SaveHookInstallFailed;
         }
     }
@@ -136,7 +148,7 @@ InitStatus ReportHandshake(const ProtectionInitBlock& block) noexcept {
 }  // namespace
 
 InitStatus InitializeProtection(ProtectionInitBlock* block) noexcept {
-    const auto status = InitializeCore(block);
+    const auto status = InitializeCore(block, &ReadRequiredPath);
     if (status != InitStatus::Success) {
         return status;
     }
@@ -144,18 +156,28 @@ InitStatus InitializeProtection(ProtectionInitBlock* block) noexcept {
     const auto reportStatus = ReportHandshake(*block);
     if (reportStatus != InitStatus::Success) {
         activeFlags.store(0, std::memory_order_release);
-        Save::UninstallSaveHooks();
+        static_cast<void>(Save::UninstallSaveHooks());
     }
 
     return reportStatus;
 }
 
 InitStatus InitializeForTest(ProtectionInitBlock* block) noexcept {
-    return InitializeCore(block);
+    return InitializeCore(block, &ReadRequiredPath);
 }
 
 ProtectionFlags CurrentProtectionFlags() noexcept {
     return static_cast<ProtectionFlags>(activeFlags.load(std::memory_order_acquire));
 }
+
+namespace Testing {
+
+InitStatus InitializeWithPathReader(
+    ProtectionInitBlock* block,
+    const RequiredPathReader reader) noexcept {
+    return InitializeCore(block, reader);
+}
+
+}  // namespace Testing
 
 }  // namespace DSRRandomizer

@@ -11,6 +11,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -29,23 +30,83 @@ using ReplaceFileFunction = decltype(&ReplaceFileW);
 using AttributesFunction = decltype(&GetFileAttributesExW);
 using FindFirstFunction = decltype(&FindFirstFileExW);
 
-KnownFolderFunction originalKnownFolder = nullptr;
-LegacyFolderFunction originalLegacyFolder = nullptr;
-CreateFileFunction originalCreateFile = nullptr;
-DeleteFileFunction originalDeleteFile = nullptr;
-MoveFileFunction originalMoveFile = nullptr;
-ReplaceFileFunction originalReplaceFile = nullptr;
-AttributesFunction originalAttributes = nullptr;
-FindFirstFunction originalFindFirst = nullptr;
+struct HookTrampolines {
+    KnownFolderFunction knownFolder = nullptr;
+    LegacyFolderFunction legacyFolder = nullptr;
+    CreateFileFunction createFile = nullptr;
+    DeleteFileFunction deleteFile = nullptr;
+    MoveFileFunction moveFile = nullptr;
+    ReplaceFileFunction replaceFile = nullptr;
+    AttributesFunction attributes = nullptr;
+    FindFirstFunction findFirst = nullptr;
+};
+
+struct StableIdentity {
+    std::wstring path;
+    DWORD volumeSerial = 0;
+    DWORD fileIndexHigh = 0;
+    DWORD fileIndexLow = 0;
+};
+
+struct HookContext {
+    explicit HookContext(SaveHookConfiguration canonicalConfiguration)
+        : configuration(std::move(canonicalConfiguration)),
+          policy(SavePathPolicyConfiguration{
+              configuration.virtualLogicalSave,
+              configuration.realSaveRoot,
+              configuration.dedicatedRmm}) {}
+
+    SaveHookConfiguration configuration;
+    SavePathPolicy policy;
+    HookTrampolines trampolines;
+    std::vector<StableIdentity> stableIdentities;
+    std::atomic<bool> denyOnly{false};
+    std::atomic<std::uint64_t> inFlight{0};
+};
+
+struct HookLifecycle {
+    HookPlatform* platform = nullptr;
+    std::shared_ptr<HookContext> context;
+    std::array<void*, 8> targets{};
+    std::array<bool, 8> created{};
+    bool initialized = false;
+    bool mayBeEnabled = false;
+};
 
 std::mutex installMutex;
-std::unique_ptr<SavePathPolicy> activePolicy;
-SaveHookConfiguration activeConfiguration{};
-std::array<void*, 8> installedTargets{};
-std::size_t installedTargetCount = 0;
-HookPlatform* installedPlatform = nullptr;
+std::shared_mutex callbackGate;
+std::atomic<std::shared_ptr<HookContext>> activeContext;
+HookLifecycle lifecycle{};
 std::atomic<bool> hooksInstalled{false};
 std::array<std::atomic<std::uint64_t>, 4> auditCounters{};
+
+class CallbackLease final {
+public:
+    CallbackLease()
+        : gate_(callbackGate),
+          context_(activeContext.load(std::memory_order_acquire)) {
+        if (context_ != nullptr) {
+            context_->inFlight.fetch_add(1, std::memory_order_acq_rel);
+        }
+    }
+
+    ~CallbackLease() {
+        if (context_ != nullptr) {
+            context_->inFlight.fetch_sub(1, std::memory_order_acq_rel);
+        }
+    }
+
+    CallbackLease(const CallbackLease&) = delete;
+    CallbackLease& operator=(const CallbackLease&) = delete;
+
+    [[nodiscard]] const std::shared_ptr<HookContext>& Context() const noexcept {
+        return context_;
+    }
+
+private:
+    std::shared_lock<std::shared_mutex> gate_;
+    std::shared_ptr<HookContext> context_;
+};
 
 bool EqualsOrdinalIgnoreCase(
     const std::wstring_view left,
@@ -159,17 +220,20 @@ bool CanonicalizeLexical(
     return IsAsciiDrivePath(canonical);
 }
 
-HANDLE OpenForResolution(const std::wstring& path, const bool useOriginal) {
-    const auto open = useOriginal && originalCreateFile != nullptr
-        ? originalCreateFile
-        : &CreateFileW;
+HANDLE OpenWithoutFollowingReparse(
+    const std::wstring& path,
+    const CreateFileFunction open) noexcept {
+    if (open == nullptr) {
+        SetLastError(ERROR_ACCESS_DENIED);
+        return INVALID_HANDLE_VALUE;
+    }
     return open(
         path.c_str(),
         0,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr,
         OPEN_EXISTING,
-        FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
         nullptr);
 }
 
@@ -200,62 +264,139 @@ bool FinalDosPath(HANDLE handle, std::wstring& result) {
     return true;
 }
 
-bool ResolvePhysicalDosPath(
-    const std::wstring_view input,
-    const bool useOriginal,
-    std::wstring& resolved) {
-    std::wstring lexical;
-    if (!CanonicalizeLexical(input, lexical)) {
+bool HandleMatchesLexicalPath(
+    const HANDLE handle,
+    const std::wstring_view lexical) {
+    BY_HANDLE_FILE_INFORMATION information{};
+    if (!GetFileInformationByHandle(handle, &information)
+        || (information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        return false;
+    }
+    std::wstring finalPath;
+    return FinalDosPath(handle, finalPath)
+        && EqualsOrdinalIgnoreCase(finalPath, lexical);
+}
+
+bool InspectExistingComponents(
+    const std::wstring& lexical,
+    const CreateFileFunction open) {
+    if (!IsAsciiDrivePath(lexical)) {
         return false;
     }
 
-    std::vector<std::wstring> missingSegments;
-    std::wstring probe = lexical;
-    HANDLE handle = INVALID_HANDLE_VALUE;
+    std::wstring current = lexical.substr(0, 3);
+    std::size_t next = 3;
     while (true) {
-        handle = OpenForResolution(probe, useOriginal);
-        if (handle != INVALID_HANDLE_VALUE) {
-            break;
+        const HANDLE handle = OpenWithoutFollowingReparse(current, open);
+        if (handle == INVALID_HANDLE_VALUE) {
+            const auto error = GetLastError();
+            return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+        }
+        const bool safe = HandleMatchesLexicalPath(handle, current);
+        CloseHandle(handle);
+        if (!safe) {
+            return false;
+        }
+        if (next >= lexical.size()) {
+            return true;
         }
 
+        const auto separator = lexical.find(L'\\', next);
+        current = separator == std::wstring::npos
+            ? lexical
+            : lexical.substr(0, separator);
+        next = separator == std::wstring::npos
+            ? lexical.size()
+            : separator + 1;
+    }
+}
+
+enum class IdentityCaptureResult { Captured, Missing, Unsafe };
+
+IdentityCaptureResult CaptureIdentity(
+    const std::wstring& path,
+    StableIdentity& identity) {
+    const HANDLE handle = OpenWithoutFollowingReparse(path, &CreateFileW);
+    if (handle == INVALID_HANDLE_VALUE) {
         const auto error = GetLastError();
-        if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) {
-            return false;
-        }
-        const auto separator = probe.find_last_of(L'\\');
-        if (separator == std::wstring::npos || separator < 2 || probe.size() == 3) {
-            return false;
-        }
-        const auto segment = probe.substr(separator + 1);
-        if (!SegmentIsUnambiguous(segment)) {
-            return false;
-        }
-        missingSegments.push_back(segment);
-        probe.erase(separator == 2 ? 3 : separator);
+        return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND
+            ? IdentityCaptureResult::Missing
+            : IdentityCaptureResult::Unsafe;
     }
 
-    std::wstring physical;
-    const bool finalPathSucceeded = FinalDosPath(handle, physical);
+    BY_HANDLE_FILE_INFORMATION information{};
+    const bool safe = HandleMatchesLexicalPath(handle, path)
+        && GetFileInformationByHandle(handle, &information);
     CloseHandle(handle);
-    if (!finalPathSucceeded) {
+    if (!safe) {
+        return IdentityCaptureResult::Unsafe;
+    }
+    identity = {
+        path,
+        information.dwVolumeSerialNumber,
+        information.nFileIndexHigh,
+        information.nFileIndexLow,
+    };
+    return IdentityCaptureResult::Captured;
+}
+
+bool IdentityIsStable(
+    const StableIdentity& expected,
+    const CreateFileFunction open) {
+    const HANDLE handle = OpenWithoutFollowingReparse(expected.path, open);
+    if (handle == INVALID_HANDLE_VALUE) {
         return false;
     }
+    BY_HANDLE_FILE_INFORMATION information{};
+    const bool stable = HandleMatchesLexicalPath(handle, expected.path)
+        && GetFileInformationByHandle(handle, &information)
+        && information.dwVolumeSerialNumber == expected.volumeSerial
+        && information.nFileIndexHigh == expected.fileIndexHigh
+        && information.nFileIndexLow == expected.fileIndexLow;
+    CloseHandle(handle);
+    return stable;
+}
 
-    for (auto segment = missingSegments.rbegin();
-         segment != missingSegments.rend();
-         ++segment) {
-        if (physical.back() != L'\\') {
-            physical.push_back(L'\\');
-        }
-        physical.append(*segment);
+std::wstring ParentPath(const std::wstring_view path) {
+    const auto separator = path.find_last_of(L'\\');
+    if (separator == std::wstring_view::npos || separator <= 2) {
+        return {};
     }
+    return std::wstring(path.substr(0, separator));
+}
 
-    std::wstring checked;
-    if (!CanonicalizeLexical(physical, checked)) {
+bool AddStableIdentity(
+    HookContext& context,
+    const std::wstring& path,
+    const bool required) {
+    if (path.empty()) {
         return false;
     }
-    resolved = std::move(checked);
-    return true;
+    if (std::any_of(
+            context.stableIdentities.begin(),
+            context.stableIdentities.end(),
+            [&](const StableIdentity& identity) {
+                return EqualsOrdinalIgnoreCase(identity.path, path);
+            })) {
+        return true;
+    }
+
+    StableIdentity identity{};
+    const auto result = CaptureIdentity(path, identity);
+    if (result == IdentityCaptureResult::Captured) {
+        context.stableIdentities.push_back(std::move(identity));
+        return true;
+    }
+    return !required && result == IdentityCaptureResult::Missing;
+}
+
+bool StableIdentitiesMatch(const HookContext& context) {
+    return std::all_of(
+        context.stableIdentities.begin(),
+        context.stableIdentities.end(),
+        [&](const StableIdentity& identity) {
+            return IdentityIsStable(identity, context.trampolines.createFile);
+        });
 }
 
 const char* OperationName(const PathOperation operation) noexcept {
@@ -283,12 +424,13 @@ const char* CategoryName(const SaveAuditCategory category) noexcept {
 }
 
 void RecordAudit(
+    const HookContext& context,
     const PathOperation operation,
     const SaveAuditCategory category) noexcept {
     auditCounters[static_cast<std::size_t>(category)].fetch_add(
         1,
         std::memory_order_relaxed);
-    if (!activeConfiguration.diagnosticMode) {
+    if (!context.configuration.diagnosticMode) {
         return;
     }
 
@@ -308,65 +450,76 @@ struct EvaluatedPath {
     std::wstring effective;
 };
 
-EvaluatedPath Denied(const PathOperation operation, const SaveAuditCategory category) {
-    RecordAudit(operation, category);
+EvaluatedPath Denied(
+    const HookContext& context,
+    const PathOperation operation,
+    const SaveAuditCategory category) {
+    RecordAudit(context, operation, category);
     SetLastError(ERROR_ACCESS_DENIED);
     return {false, false, {}};
 }
 
-EvaluatedPath EvaluatePath(const wchar_t* path, const PathOperation operation) {
-    if (path == nullptr || activePolicy == nullptr) {
-        return Denied(operation, SaveAuditCategory::Unrelated);
+EvaluatedPath EvaluatePath(
+    const HookContext& context,
+    const wchar_t* path,
+    const PathOperation operation) {
+    if (path == nullptr || context.denyOnly.load(std::memory_order_acquire)) {
+        return Denied(context, operation, SaveAuditCategory::Unrelated);
     }
 
     constexpr std::wstring_view namedPipePrefix = L"\\\\.\\pipe\\";
     const std::wstring_view requested(path);
     if (requested.size() > namedPipePrefix.size()
         && StartsWithOrdinalIgnoreCase(requested, namedPipePrefix)) {
-        RecordAudit(operation, SaveAuditCategory::Unrelated);
+        RecordAudit(context, operation, SaveAuditCategory::Unrelated);
         return {true, false, std::wstring(requested)};
     }
 
-    std::wstring canonical;
-    if (!ResolvePhysicalDosPath(requested, true, canonical)) {
-        return Denied(operation, SaveAuditCategory::Unrelated);
+    std::wstring lexical;
+    if (!CanonicalizeLexical(requested, lexical)) {
+        return Denied(context, operation, SaveAuditCategory::Unrelated);
     }
 
-    const auto decision = activePolicy->Evaluate(operation, canonical);
+    const auto decision = context.policy.Evaluate(operation, lexical);
     if (decision.kind == PathDecisionKind::Deny) {
         return Denied(
+            context,
             operation,
-            ContainsOrdinalIgnoreCase(canonical, L".overhaul.sl2")
+            ContainsOrdinalIgnoreCase(lexical, L".overhaul.sl2")
                 ? SaveAuditCategory::DeniedOverhaul
                 : SaveAuditCategory::DeniedNormal);
     }
+
     if (decision.kind == PathDecisionKind::Allow) {
-        RecordAudit(operation, SaveAuditCategory::Unrelated);
-        return {true, false, std::move(canonical)};
+        if (IsBelow(lexical, context.configuration.virtualDocuments)
+            && (!StableIdentitiesMatch(context)
+                || !InspectExistingComponents(
+                    lexical,
+                    context.trampolines.createFile))) {
+            return Denied(context, operation, SaveAuditCategory::Unrelated);
+        }
+        RecordAudit(context, operation, SaveAuditCategory::Unrelated);
+        return {true, false, std::wstring(requested)};
     }
 
-    std::wstring currentExternalRoot;
-    std::wstring currentDedicated;
-    if (!ResolvePhysicalDosPath(
-            activeConfiguration.externalSaveRoot,
-            true,
-            currentExternalRoot)
-        || !ResolvePhysicalDosPath(
-            decision.EffectivePath(),
-            true,
-            currentDedicated)
-        || !EqualsOrdinalIgnoreCase(
-            currentExternalRoot,
-            activeConfiguration.externalSaveRoot)
-        || !EqualsOrdinalIgnoreCase(
-            currentDedicated,
-            activeConfiguration.dedicatedRmm)
-        || !IsBelow(currentDedicated, currentExternalRoot)) {
-        return Denied(operation, SaveAuditCategory::Unrelated);
+    if (!EqualsOrdinalIgnoreCase(
+            lexical,
+            context.configuration.virtualLogicalSave)
+        || !StableIdentitiesMatch(context)
+        || !InspectExistingComponents(
+            lexical,
+            context.trampolines.createFile)
+        || !InspectExistingComponents(
+            context.configuration.dedicatedRmm,
+            context.trampolines.createFile)
+        || !IsBelow(
+            context.configuration.dedicatedRmm,
+            context.configuration.externalSaveRoot)) {
+        return Denied(context, operation, SaveAuditCategory::Unrelated);
     }
 
-    RecordAudit(operation, SaveAuditCategory::DedicatedRmm);
-    return {true, true, std::move(currentDedicated)};
+    RecordAudit(context, operation, SaveAuditCategory::DedicatedRmm);
+    return {true, true, context.configuration.dedicatedRmm};
 }
 
 PathOperation OpenOperation(const DWORD desiredAccess) noexcept {
@@ -381,23 +534,43 @@ HRESULT WINAPI HookKnownFolder(
     const DWORD flags,
     const HANDLE token,
     PWSTR* path) {
-    if (IsEqualGUID(folderId, FOLDERID_Documents)) {
-        if (path == nullptr) {
-            return E_INVALIDARG;
+    try {
+        CallbackLease callback;
+        const auto& context = callback.Context();
+        if (context == nullptr
+            || context->denyOnly.load(std::memory_order_acquire)) {
+            return E_FAIL;
         }
-        const auto characters = activeConfiguration.virtualDocuments.size() + 1;
-        auto* allocated = static_cast<PWSTR>(CoTaskMemAlloc(characters * sizeof(wchar_t)));
-        if (allocated == nullptr) {
-            return E_OUTOFMEMORY;
+        if (IsEqualGUID(folderId, FOLDERID_Documents)) {
+            if (path == nullptr) {
+                return E_INVALIDARG;
+            }
+            if (!StableIdentitiesMatch(*context)
+                || !InspectExistingComponents(
+                    context->configuration.virtualDocuments,
+                    context->trampolines.createFile)) {
+                return E_FAIL;
+            }
+            const auto characters = context->configuration.virtualDocuments.size() + 1;
+            auto* allocated = static_cast<PWSTR>(
+                CoTaskMemAlloc(characters * sizeof(wchar_t)));
+            if (allocated == nullptr) {
+                return E_OUTOFMEMORY;
+            }
+            std::wmemcpy(
+                allocated,
+                context->configuration.virtualDocuments.c_str(),
+                characters);
+            *path = allocated;
+            return S_OK;
         }
-        std::wmemcpy(
-            allocated,
-            activeConfiguration.virtualDocuments.c_str(),
-            characters);
-        *path = allocated;
-        return S_OK;
+        return context->trampolines.knownFolder == nullptr
+            ? E_FAIL
+            : context->trampolines.knownFolder(folderId, flags, token, path);
     }
-    return originalKnownFolder(folderId, flags, token, path);
+    catch (...) {
+        return E_FAIL;
+    }
 }
 
 HRESULT WINAPI HookLegacyFolder(
@@ -406,18 +579,35 @@ HRESULT WINAPI HookLegacyFolder(
     const HANDLE token,
     const DWORD flags,
     const LPWSTR path) {
-    if ((folder & ~CSIDL_FLAG_MASK) == CSIDL_PERSONAL) {
-        if (path == nullptr
-            || activeConfiguration.virtualDocuments.size() >= MAX_PATH) {
+    try {
+        CallbackLease callback;
+        const auto& context = callback.Context();
+        if (context == nullptr
+            || context->denyOnly.load(std::memory_order_acquire)) {
             return E_FAIL;
         }
-        std::wmemcpy(
-            path,
-            activeConfiguration.virtualDocuments.c_str(),
-            activeConfiguration.virtualDocuments.size() + 1);
-        return S_OK;
+        if ((folder & ~CSIDL_FLAG_MASK) == CSIDL_PERSONAL) {
+            if (path == nullptr
+                || context->configuration.virtualDocuments.size() >= MAX_PATH
+                || !StableIdentitiesMatch(*context)
+                || !InspectExistingComponents(
+                    context->configuration.virtualDocuments,
+                    context->trampolines.createFile)) {
+                return E_FAIL;
+            }
+            std::wmemcpy(
+                path,
+                context->configuration.virtualDocuments.c_str(),
+                context->configuration.virtualDocuments.size() + 1);
+            return S_OK;
+        }
+        return context->trampolines.legacyFolder == nullptr
+            ? E_FAIL
+            : context->trampolines.legacyFolder(owner, folder, token, flags, path);
     }
-    return originalLegacyFolder(owner, folder, token, flags, path);
+    catch (...) {
+        return E_FAIL;
+    }
 }
 
 HANDLE WINAPI HookCreateFile(
@@ -429,11 +619,20 @@ HANDLE WINAPI HookCreateFile(
     const DWORD flags,
     const HANDLE templateFile) {
     try {
-        const auto evaluated = EvaluatePath(fileName, OpenOperation(desiredAccess));
+        CallbackLease callback;
+        const auto& context = callback.Context();
+        if (context == nullptr || context->trampolines.createFile == nullptr) {
+            SetLastError(ERROR_ACCESS_DENIED);
+            return INVALID_HANDLE_VALUE;
+        }
+        const auto evaluated = EvaluatePath(
+            *context,
+            fileName,
+            OpenOperation(desiredAccess));
         if (!evaluated.allowed) {
             return INVALID_HANDLE_VALUE;
         }
-        return originalCreateFile(
+        return context->trampolines.createFile(
             evaluated.effective.c_str(),
             desiredAccess,
             shareMode,
@@ -450,9 +649,18 @@ HANDLE WINAPI HookCreateFile(
 
 BOOL WINAPI HookDeleteFile(const LPCWSTR fileName) {
     try {
-        const auto evaluated = EvaluatePath(fileName, PathOperation::Delete);
+        CallbackLease callback;
+        const auto& context = callback.Context();
+        if (context == nullptr || context->trampolines.deleteFile == nullptr) {
+            SetLastError(ERROR_ACCESS_DENIED);
+            return FALSE;
+        }
+        const auto evaluated = EvaluatePath(
+            *context,
+            fileName,
+            PathOperation::Delete);
         return evaluated.allowed
-            ? originalDeleteFile(evaluated.effective.c_str())
+            ? context->trampolines.deleteFile(evaluated.effective.c_str())
             : FALSE;
     }
     catch (...) {
@@ -466,17 +674,26 @@ BOOL WINAPI HookMoveFile(
     const LPCWSTR newName,
     const DWORD flags) {
     try {
-        if (newName == nullptr) {
+        CallbackLease callback;
+        const auto& context = callback.Context();
+        if (context == nullptr || context->trampolines.moveFile == nullptr
+            || newName == nullptr) {
             SetLastError(ERROR_ACCESS_DENIED);
             return FALSE;
         }
-        const auto source = EvaluatePath(existingName, PathOperation::RenameSource);
+        const auto source = EvaluatePath(
+            *context,
+            existingName,
+            PathOperation::RenameSource);
         if (!source.allowed) {
             return FALSE;
         }
-        const auto destination = EvaluatePath(newName, PathOperation::RenameDestination);
+        const auto destination = EvaluatePath(
+            *context,
+            newName,
+            PathOperation::RenameDestination);
         return destination.allowed
-            ? originalMoveFile(
+            ? context->trampolines.moveFile(
                 source.effective.c_str(),
                 destination.effective.c_str(),
                 flags)
@@ -496,13 +713,21 @@ BOOL WINAPI HookReplaceFile(
     const LPVOID exclude,
     const LPVOID reserved) {
     try {
+        CallbackLease callback;
+        const auto& context = callback.Context();
+        if (context == nullptr || context->trampolines.replaceFile == nullptr) {
+            SetLastError(ERROR_ACCESS_DENIED);
+            return FALSE;
+        }
         const auto replaced = EvaluatePath(
+            *context,
             replacedName,
             PathOperation::RenameDestination);
         if (!replaced.allowed) {
             return FALSE;
         }
         const auto replacement = EvaluatePath(
+            *context,
             replacementName,
             PathOperation::RenameSource);
         if (!replacement.allowed) {
@@ -513,6 +738,7 @@ BOOL WINAPI HookReplaceFile(
         const wchar_t* effectiveBackup = nullptr;
         if (backupName != nullptr) {
             const auto evaluatedBackup = EvaluatePath(
+                *context,
                 backupName,
                 PathOperation::RenameDestination);
             if (!evaluatedBackup.allowed) {
@@ -521,7 +747,7 @@ BOOL WINAPI HookReplaceFile(
             backup = evaluatedBackup.effective;
             effectiveBackup = backup.c_str();
         }
-        return originalReplaceFile(
+        return context->trampolines.replaceFile(
             replaced.effective.c_str(),
             replacement.effective.c_str(),
             effectiveBackup,
@@ -540,9 +766,21 @@ BOOL WINAPI HookAttributes(
     const GET_FILEEX_INFO_LEVELS infoLevel,
     const LPVOID information) {
     try {
-        const auto evaluated = EvaluatePath(fileName, PathOperation::Attributes);
+        CallbackLease callback;
+        const auto& context = callback.Context();
+        if (context == nullptr || context->trampolines.attributes == nullptr) {
+            SetLastError(ERROR_ACCESS_DENIED);
+            return FALSE;
+        }
+        const auto evaluated = EvaluatePath(
+            *context,
+            fileName,
+            PathOperation::Attributes);
         return evaluated.allowed
-            ? originalAttributes(evaluated.effective.c_str(), infoLevel, information)
+            ? context->trampolines.attributes(
+                evaluated.effective.c_str(),
+                infoLevel,
+                information)
             : FALSE;
     }
     catch (...) {
@@ -559,11 +797,20 @@ HANDLE WINAPI HookFindFirst(
     const LPVOID searchFilter,
     const DWORD flags) {
     try {
-        const auto evaluated = EvaluatePath(fileName, PathOperation::Enumeration);
+        CallbackLease callback;
+        const auto& context = callback.Context();
+        if (context == nullptr || context->trampolines.findFirst == nullptr) {
+            SetLastError(ERROR_ACCESS_DENIED);
+            return INVALID_HANDLE_VALUE;
+        }
+        const auto evaluated = EvaluatePath(
+            *context,
+            fileName,
+            PathOperation::Enumeration);
         if (!evaluated.allowed) {
             return INVALID_HANDLE_VALUE;
         }
-        const auto result = originalFindFirst(
+        const auto result = context->trampolines.findFirst(
             evaluated.effective.c_str(),
             infoLevel,
             findData,
@@ -594,44 +841,33 @@ struct HookDefinition {
     void** original;
 };
 
-std::array<HookDefinition, 8> HookDefinitions() {
+std::array<HookDefinition, 8> HookDefinitions(HookContext& context) {
     return {{
         {L"shell32.dll", "SHGetKnownFolderPath",
          reinterpret_cast<void*>(&HookKnownFolder),
-         reinterpret_cast<void**>(&originalKnownFolder)},
+         reinterpret_cast<void**>(&context.trampolines.knownFolder)},
         {L"shell32.dll", "SHGetFolderPathW",
          reinterpret_cast<void*>(&HookLegacyFolder),
-         reinterpret_cast<void**>(&originalLegacyFolder)},
+         reinterpret_cast<void**>(&context.trampolines.legacyFolder)},
         {L"kernel32.dll", "CreateFileW",
          reinterpret_cast<void*>(&HookCreateFile),
-         reinterpret_cast<void**>(&originalCreateFile)},
+         reinterpret_cast<void**>(&context.trampolines.createFile)},
         {L"kernel32.dll", "DeleteFileW",
          reinterpret_cast<void*>(&HookDeleteFile),
-         reinterpret_cast<void**>(&originalDeleteFile)},
+         reinterpret_cast<void**>(&context.trampolines.deleteFile)},
         {L"kernel32.dll", "MoveFileExW",
          reinterpret_cast<void*>(&HookMoveFile),
-         reinterpret_cast<void**>(&originalMoveFile)},
+         reinterpret_cast<void**>(&context.trampolines.moveFile)},
         {L"kernel32.dll", "ReplaceFileW",
          reinterpret_cast<void*>(&HookReplaceFile),
-         reinterpret_cast<void**>(&originalReplaceFile)},
+         reinterpret_cast<void**>(&context.trampolines.replaceFile)},
         {L"kernel32.dll", "GetFileAttributesExW",
          reinterpret_cast<void*>(&HookAttributes),
-         reinterpret_cast<void**>(&originalAttributes)},
+         reinterpret_cast<void**>(&context.trampolines.attributes)},
         {L"kernel32.dll", "FindFirstFileExW",
          reinterpret_cast<void*>(&HookFindFirst),
-         reinterpret_cast<void**>(&originalFindFirst)},
+         reinterpret_cast<void**>(&context.trampolines.findFirst)},
     }};
-}
-
-void ResetOriginals() noexcept {
-    originalKnownFolder = nullptr;
-    originalLegacyFolder = nullptr;
-    originalCreateFile = nullptr;
-    originalDeleteFile = nullptr;
-    originalMoveFile = nullptr;
-    originalReplaceFile = nullptr;
-    originalAttributes = nullptr;
-    originalFindFirst = nullptr;
 }
 
 class MinHookPlatform final : public HookPlatform {
@@ -659,12 +895,8 @@ public:
         void* target,
         void* detour,
         void** original) noexcept override {
-        if (MH_CreateHook(target, detour, original) != MH_OK) {
-            return false;
-        }
-        if (targetCount_ >= targets_.size()) {
-            const auto status = MH_RemoveHook(target);
-            static_cast<void>(status);
+        if (targetCount_ >= targets_.size()
+            || MH_CreateHook(target, detour, original) != MH_OK) {
             return false;
         }
         targets_[targetCount_++] = target;
@@ -677,36 +909,48 @@ public:
 
     bool ApplyQueued() noexcept override { return MH_ApplyQueued() == MH_OK; }
 
-    void DisableAll() noexcept override {
+    bool DisableAll() noexcept override {
+        bool disabled = true;
         for (std::size_t index = 0; index < targetCount_; ++index) {
-            const auto target = targets_[index];
-            const auto status = MH_DisableHook(target);
-            static_cast<void>(status);
+            const auto status = MH_DisableHook(targets_[index]);
+            disabled = (status == MH_OK
+                    || status == MH_ERROR_DISABLED
+                    || status == MH_ERROR_NOT_CREATED)
+                && disabled;
         }
+        return disabled;
     }
 
-    void RemoveHook(void* target) noexcept override {
+    bool RemoveHook(void* target) noexcept override {
         const auto status = MH_RemoveHook(target);
-        static_cast<void>(status);
+        if (status != MH_OK && status != MH_ERROR_NOT_CREATED) {
+            return false;
+        }
         const auto found = std::find(
             targets_.begin(),
             targets_.begin() + static_cast<std::ptrdiff_t>(targetCount_),
             target);
         if (found != targets_.begin() + static_cast<std::ptrdiff_t>(targetCount_)) {
-            std::move(found + 1,
+            std::move(
+                found + 1,
                 targets_.begin() + static_cast<std::ptrdiff_t>(targetCount_),
                 found);
             --targetCount_;
         }
+        return true;
     }
 
-    void Uninitialize() noexcept override {
-        if (ownsInitialization_) {
-            const auto status = MH_Uninitialize();
-            static_cast<void>(status);
+    bool Uninitialize() noexcept override {
+        if (!ownsInitialization_) {
+            return targetCount_ == 0;
+        }
+        const auto status = MH_Uninitialize();
+        if (status != MH_OK && status != MH_ERROR_NOT_INITIALIZED) {
+            return false;
         }
         ownsInitialization_ = false;
         targetCount_ = 0;
+        return true;
     }
 
 private:
@@ -719,96 +963,109 @@ MinHookPlatform systemPlatform;
 
 bool ValidateConfiguration(
     const SaveHookConfiguration& configuration,
-    SaveHookConfiguration& canonicalConfiguration) {
+    std::shared_ptr<HookContext>& context) {
     if (configuration.virtualDocuments.size() >= MAX_PATH) {
         return false;
     }
 
-    canonicalConfiguration.diagnosticMode = configuration.diagnosticMode;
-    if (!ResolvePhysicalDosPath(
-            configuration.virtualDocuments,
-            false,
-            canonicalConfiguration.virtualDocuments)
-        || !ResolvePhysicalDosPath(
-            configuration.virtualLogicalSave,
-            false,
-            canonicalConfiguration.virtualLogicalSave)
-        || !ResolvePhysicalDosPath(
-            configuration.realSaveRoot,
-            false,
-            canonicalConfiguration.realSaveRoot)
-        || !ResolvePhysicalDosPath(
-            configuration.externalSaveRoot,
-            false,
-            canonicalConfiguration.externalSaveRoot)
-        || !ResolvePhysicalDosPath(
-            configuration.dedicatedRmm,
-            false,
-            canonicalConfiguration.dedicatedRmm)) {
+    SaveHookConfiguration canonical{};
+    canonical.diagnosticMode = configuration.diagnosticMode;
+    if (!CanonicalizeLexical(configuration.virtualDocuments, canonical.virtualDocuments)
+        || !CanonicalizeLexical(configuration.virtualLogicalSave, canonical.virtualLogicalSave)
+        || !CanonicalizeLexical(configuration.realSaveRoot, canonical.realSaveRoot)
+        || !CanonicalizeLexical(configuration.externalSaveRoot, canonical.externalSaveRoot)
+        || !CanonicalizeLexical(configuration.dedicatedRmm, canonical.dedicatedRmm)) {
         return false;
     }
 
-    if (!EqualsOrdinalIgnoreCase(
-            configuration.virtualDocuments,
-            canonicalConfiguration.virtualDocuments)
-        || !EqualsOrdinalIgnoreCase(
-            configuration.virtualLogicalSave,
-            canonicalConfiguration.virtualLogicalSave)
-        || !EqualsOrdinalIgnoreCase(
-            configuration.realSaveRoot,
-            canonicalConfiguration.realSaveRoot)
-        || !EqualsOrdinalIgnoreCase(
-            configuration.externalSaveRoot,
-            canonicalConfiguration.externalSaveRoot)
-        || !EqualsOrdinalIgnoreCase(
-            configuration.dedicatedRmm,
-            canonicalConfiguration.dedicatedRmm)
-        || !IsBelow(
-            canonicalConfiguration.virtualLogicalSave,
-            canonicalConfiguration.virtualDocuments)
-        || !IsBelow(
-            canonicalConfiguration.dedicatedRmm,
-            canonicalConfiguration.externalSaveRoot)) {
+    if (!EqualsOrdinalIgnoreCase(configuration.virtualDocuments, canonical.virtualDocuments)
+        || !EqualsOrdinalIgnoreCase(configuration.virtualLogicalSave, canonical.virtualLogicalSave)
+        || !EqualsOrdinalIgnoreCase(configuration.realSaveRoot, canonical.realSaveRoot)
+        || !EqualsOrdinalIgnoreCase(configuration.externalSaveRoot, canonical.externalSaveRoot)
+        || !EqualsOrdinalIgnoreCase(configuration.dedicatedRmm, canonical.dedicatedRmm)
+        || !IsBelow(canonical.virtualLogicalSave, canonical.virtualDocuments)
+        || !IsBelow(canonical.dedicatedRmm, canonical.externalSaveRoot)
+        || !InspectExistingComponents(canonical.virtualDocuments, &CreateFileW)
+        || !InspectExistingComponents(canonical.virtualLogicalSave, &CreateFileW)
+        || !InspectExistingComponents(canonical.realSaveRoot, &CreateFileW)
+        || !InspectExistingComponents(canonical.externalSaveRoot, &CreateFileW)
+        || !InspectExistingComponents(canonical.dedicatedRmm, &CreateFileW)) {
         return false;
     }
 
-    const SavePathPolicy policy(SavePathPolicyConfiguration{
-        canonicalConfiguration.virtualLogicalSave,
-        canonicalConfiguration.realSaveRoot,
-        canonicalConfiguration.dedicatedRmm,
-    });
-    const auto logical = policy.Evaluate(
+    auto candidate = std::make_shared<HookContext>(std::move(canonical));
+    const auto logical = candidate->policy.Evaluate(
         PathOperation::Open,
-        canonicalConfiguration.virtualLogicalSave);
-    const auto normalRoot = policy.Evaluate(
+        candidate->configuration.virtualLogicalSave);
+    const auto normalRoot = candidate->policy.Evaluate(
         PathOperation::Open,
-        canonicalConfiguration.realSaveRoot);
-    return logical.kind == PathDecisionKind::Redirect
-        && EqualsOrdinalIgnoreCase(
+        candidate->configuration.realSaveRoot);
+    if (logical.kind != PathDecisionKind::Redirect
+        || !EqualsOrdinalIgnoreCase(
             logical.EffectivePath(),
-            canonicalConfiguration.dedicatedRmm)
-        && normalRoot.kind == PathDecisionKind::Deny;
+            candidate->configuration.dedicatedRmm)
+        || normalRoot.kind != PathDecisionKind::Deny
+        || !AddStableIdentity(*candidate, candidate->configuration.virtualDocuments, true)
+        || !AddStableIdentity(
+            *candidate,
+            ParentPath(candidate->configuration.virtualLogicalSave),
+            true)
+        || !AddStableIdentity(*candidate, candidate->configuration.realSaveRoot, true)
+        || !AddStableIdentity(*candidate, candidate->configuration.externalSaveRoot, true)) {
+        return false;
+    }
+
+    context = std::move(candidate);
+    return true;
 }
 
-void Rollback(
-    HookPlatform& platform,
-    const bool disable,
-    const bool initialized) noexcept {
-    if (disable) {
-        platform.DisableAll();
-    }
-    for (std::size_t index = installedTargetCount; index > 0; --index) {
-        platform.RemoveHook(installedTargets[index - 1]);
-    }
-    installedTargetCount = 0;
-    if (initialized) {
-        platform.Uninitialize();
-    }
-    activePolicy.reset();
-    activeConfiguration = {};
-    installedPlatform = nullptr;
+SaveHookCleanupStatus CleanupLocked() noexcept {
     hooksInstalled.store(false, std::memory_order_release);
-    ResetOriginals();
+    if (lifecycle.context != nullptr) {
+        lifecycle.context->denyOnly.store(true, std::memory_order_release);
+    }
+    if (lifecycle.platform == nullptr) {
+        std::unique_lock callbackLock(callbackGate);
+        activeContext.store({}, std::memory_order_release);
+        lifecycle = {};
+        return SaveHookCleanupStatus::Success;
+    }
+
+    if (lifecycle.mayBeEnabled) {
+        if (!lifecycle.platform->DisableAll()) {
+            return SaveHookCleanupStatus::Incomplete;
+        }
+        lifecycle.mayBeEnabled = false;
+    }
+
+    std::unique_lock callbackLock(callbackGate);
+    bool allRemoved = true;
+    for (std::size_t index = lifecycle.created.size(); index > 0; --index) {
+        const auto slot = index - 1;
+        if (!lifecycle.created[slot]) {
+            continue;
+        }
+        if (lifecycle.platform->RemoveHook(lifecycle.targets[slot])) {
+            lifecycle.created[slot] = false;
+        }
+        else {
+            allRemoved = false;
+        }
+    }
+    if (!allRemoved) {
+        return SaveHookCleanupStatus::Incomplete;
+    }
+
+    if (lifecycle.initialized) {
+        if (!lifecycle.platform->Uninitialize()) {
+            return SaveHookCleanupStatus::Incomplete;
+        }
+        lifecycle.initialized = false;
+    }
+
+    activeContext.store({}, std::memory_order_release);
+    lifecycle = {};
+    return SaveHookCleanupStatus::Success;
 }
 
 }  // namespace
@@ -822,79 +1079,71 @@ SaveHookInstallStatus InstallSaveHooks(
     const SaveHookConfiguration& configuration,
     HookPlatform& platform) noexcept {
     std::scoped_lock lock(installMutex);
-    if (hooksInstalled.load(std::memory_order_acquire)) {
+    if (lifecycle.platform != nullptr
+        || activeContext.load(std::memory_order_acquire) != nullptr) {
         return SaveHookInstallStatus::InstallFailed;
     }
 
-    bool platformInitialized = false;
     try {
-        SaveHookConfiguration canonicalConfiguration{};
-        if (!ValidateConfiguration(configuration, canonicalConfiguration)) {
+        std::shared_ptr<HookContext> context;
+        if (!ValidateConfiguration(configuration, context)) {
             return SaveHookInstallStatus::InvalidConfiguration;
         }
         if (!platform.Initialize()) {
             return SaveHookInstallStatus::InstallFailed;
         }
-        platformInitialized = true;
 
-        const auto definitions = HookDefinitions();
-        std::array<void*, 8> targets{};
+        lifecycle.platform = &platform;
+        lifecycle.context = context;
+        lifecycle.initialized = true;
+        activeContext.store(context, std::memory_order_release);
+
+        const auto definitions = HookDefinitions(*context);
         for (std::size_t index = 0; index < definitions.size(); ++index) {
-            targets[index] = platform.ResolveTarget(
+            lifecycle.targets[index] = platform.ResolveTarget(
                 definitions[index].module,
                 definitions[index].procedure);
-            if (targets[index] == nullptr) {
-                Rollback(platform, false, true);
+            if (lifecycle.targets[index] == nullptr) {
+                static_cast<void>(CleanupLocked());
                 return SaveHookInstallStatus::InstallFailed;
             }
         }
 
         for (std::size_t index = 0; index < definitions.size(); ++index) {
             if (!platform.CreateHook(
-                    targets[index],
+                    lifecycle.targets[index],
                     definitions[index].detour,
                     definitions[index].original)) {
-                Rollback(platform, false, true);
+                static_cast<void>(CleanupLocked());
                 return SaveHookInstallStatus::InstallFailed;
             }
-            installedTargets[installedTargetCount++] = targets[index];
+            lifecycle.created[index] = true;
         }
 
-        activeConfiguration = canonicalConfiguration;
-        activePolicy = std::make_unique<SavePathPolicy>(SavePathPolicyConfiguration{
-            activeConfiguration.virtualLogicalSave,
-            activeConfiguration.realSaveRoot,
-            activeConfiguration.dedicatedRmm,
-        });
-
-        for (const auto target : targets) {
+        for (const auto target : lifecycle.targets) {
             if (!platform.QueueEnable(target)) {
-                Rollback(platform, false, true);
+                static_cast<void>(CleanupLocked());
                 return SaveHookInstallStatus::InstallFailed;
             }
         }
+        lifecycle.mayBeEnabled = true;
         if (!platform.ApplyQueued()) {
-            Rollback(platform, true, true);
+            static_cast<void>(CleanupLocked());
             return SaveHookInstallStatus::InstallFailed;
         }
 
-        installedPlatform = &platform;
         hooksInstalled.store(true, std::memory_order_release);
         return SaveHookInstallStatus::Success;
     }
     catch (...) {
-        if (platformInitialized) {
-            Rollback(platform, true, true);
-        }
+        static_cast<void>(CleanupLocked());
         return SaveHookInstallStatus::InstallFailed;
     }
 }
 
-void UninstallSaveHooks() noexcept {
+SaveHookCleanupStatus UninstallSaveHooks() noexcept {
     std::scoped_lock lock(installMutex);
-    if (installedPlatform != nullptr) {
-        Rollback(*installedPlatform, true, true);
-    }
+    return CleanupLocked();
 }
 
 bool SaveHooksAreInstalled() noexcept {
@@ -913,5 +1162,32 @@ SaveAuditCounters CurrentSaveAuditCounters() noexcept {
             .load(std::memory_order_relaxed),
     };
 }
+
+namespace Testing {
+
+SaveHookLifecycleSnapshot CurrentSaveHookLifecycle() noexcept {
+    const auto context = activeContext.load(std::memory_order_acquire);
+    return {
+        hooksInstalled.load(std::memory_order_acquire),
+        context != nullptr,
+        context != nullptr
+            && context->denyOnly.load(std::memory_order_acquire),
+        context == nullptr
+            ? 0
+            : context->inFlight.load(std::memory_order_acquire),
+    };
+}
+
+void HoldSaveHookCallback(void* enteredEvent, void* releaseEvent) noexcept {
+    CallbackLease callback;
+    if (enteredEvent != nullptr) {
+        SetEvent(static_cast<HANDLE>(enteredEvent));
+    }
+    if (releaseEvent != nullptr) {
+        WaitForSingleObject(static_cast<HANDLE>(releaseEvent), INFINITE);
+    }
+}
+
+}  // namespace Testing
 
 }  // namespace DSRRandomizer::Save

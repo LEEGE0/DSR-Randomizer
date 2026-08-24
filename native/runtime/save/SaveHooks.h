@@ -11,6 +11,11 @@ enum class SaveHookInstallStatus {
     InstallFailed,
 };
 
+enum class SaveHookCleanupStatus {
+    Success,
+    Incomplete,
+};
+
 enum class SaveAuditCategory {
     DedicatedRmm,
     DeniedNormal,
@@ -48,9 +53,9 @@ public:
         void** original) noexcept = 0;
     virtual bool QueueEnable(void* target) noexcept = 0;
     virtual bool ApplyQueued() noexcept = 0;
-    virtual void DisableAll() noexcept = 0;
-    virtual void RemoveHook(void* target) noexcept = 0;
-    virtual void Uninitialize() noexcept = 0;
+    virtual bool DisableAll() noexcept = 0;
+    virtual bool RemoveHook(void* target) noexcept = 0;
+    virtual bool Uninitialize() noexcept = 0;
 };
 
 [[nodiscard]] SaveHookInstallStatus InstallSaveHooks(
@@ -58,8 +63,22 @@ public:
 [[nodiscard]] SaveHookInstallStatus InstallSaveHooks(
     const SaveHookConfiguration& configuration,
     HookPlatform& platform) noexcept;
-void UninstallSaveHooks() noexcept;
+[[nodiscard]] SaveHookCleanupStatus UninstallSaveHooks() noexcept;
 [[nodiscard]] bool SaveHooksAreInstalled() noexcept;
 [[nodiscard]] SaveAuditCounters CurrentSaveAuditCounters() noexcept;
+
+namespace Testing {
+
+struct SaveHookLifecycleSnapshot {
+    bool ready;
+    bool contextRetained;
+    bool denyOnly;
+    std::uint64_t inFlight;
+};
+
+[[nodiscard]] SaveHookLifecycleSnapshot CurrentSaveHookLifecycle() noexcept;
+void HoldSaveHookCallback(void* enteredEvent, void* releaseEvent) noexcept;
+
+}  // namespace Testing
 
 }  // namespace DSRRandomizer::Save

@@ -116,6 +116,82 @@ bool IsAccessDeniedCreate(const std::wstring_view path) {
     return error == ERROR_ACCESS_DENIED;
 }
 
+bool IsAccessDeniedOpenDirectory(const std::wstring_view path) {
+    SetLastError(ERROR_SUCCESS);
+    const HANDLE file = CreateFileW(
+        std::wstring(path).c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS,
+        nullptr);
+    const DWORD error = GetLastError();
+    if (file != INVALID_HANDLE_VALUE) {
+        CloseHandle(file);
+        return false;
+    }
+    return error == ERROR_ACCESS_DENIED;
+}
+
+bool IsAccessDeniedDelete(const std::wstring_view path) {
+    SetLastError(ERROR_SUCCESS);
+    const BOOL deleted = DeleteFileW(std::wstring(path).c_str());
+    return !deleted && GetLastError() == ERROR_ACCESS_DENIED;
+}
+
+bool IsAccessDeniedAttributes(const std::wstring_view path) {
+    WIN32_FILE_ATTRIBUTE_DATA attributes{};
+    SetLastError(ERROR_SUCCESS);
+    return !GetFileAttributesExW(
+               std::wstring(path).c_str(),
+               GetFileExInfoStandard,
+               &attributes)
+        && GetLastError() == ERROR_ACCESS_DENIED;
+}
+
+bool IsAccessDeniedFind(const std::wstring_view path) {
+    WIN32_FIND_DATAW data{};
+    SetLastError(ERROR_SUCCESS);
+    const HANDLE find = FindFirstFileExW(
+        std::wstring(path).c_str(),
+        FindExInfoBasic,
+        &data,
+        FindExSearchNameMatch,
+        nullptr,
+        0);
+    if (find != INVALID_HANDLE_VALUE) {
+        FindClose(find);
+        return false;
+    }
+    return GetLastError() == ERROR_ACCESS_DENIED;
+}
+
+bool IsAccessDeniedMove(
+    const std::wstring_view source,
+    const std::wstring_view destination) {
+    SetLastError(ERROR_SUCCESS);
+    return !MoveFileExW(
+               std::wstring(source).c_str(),
+               std::wstring(destination).c_str(),
+               MOVEFILE_REPLACE_EXISTING)
+        && GetLastError() == ERROR_ACCESS_DENIED;
+}
+
+bool IsAccessDeniedReplace(
+    const std::wstring_view replaced,
+    const std::wstring_view replacement) {
+    SetLastError(ERROR_SUCCESS);
+    return !ReplaceFileW(
+               std::wstring(replaced).c_str(),
+               std::wstring(replacement).c_str(),
+               nullptr,
+               REPLACEFILE_WRITE_THROUGH,
+               nullptr,
+               nullptr)
+        && GetLastError() == ERROR_ACCESS_DENIED;
+}
+
 #pragma pack(push, 1)
 struct MountPointReparseData {
     DWORD tag;
@@ -132,8 +208,13 @@ struct MountPointReparseData {
 bool CreateJunction(
     const std::wstring_view junction,
     const std::wstring_view target) {
-    if (!RemoveDirectoryW(std::wstring(junction).c_str())
-        || !CreateDirectoryW(std::wstring(junction).c_str(), nullptr)) {
+    const auto junctionPath = std::wstring(junction);
+    const auto attributes = GetFileAttributesW(junctionPath.c_str());
+    if (attributes != INVALID_FILE_ATTRIBUTES
+        && !RemoveDirectoryW(junctionPath.c_str())) {
+        return false;
+    }
+    if (!CreateDirectoryW(junctionPath.c_str(), nullptr)) {
         return false;
     }
 
@@ -186,6 +267,241 @@ bool CreateJunction(
     return created != FALSE;
 }
 
+bool CreateDirectoryIfMissing(const std::wstring& path) {
+    return CreateDirectoryW(path.c_str(), nullptr)
+        || GetLastError() == ERROR_ALREADY_EXISTS;
+}
+
+bool RemoveFileIfPresent(const std::wstring& path) {
+    return DeleteFileW(path.c_str())
+        || GetLastError() == ERROR_FILE_NOT_FOUND;
+}
+
+bool GuardedFileApisAreDenied(
+    const std::wstring& guardedRoot,
+    const std::wstring& physicalRoot,
+    const std::wstring& scratchRoot) {
+    const auto createPath = guardedRoot + L"\\create.bin";
+    const auto deletePath = guardedRoot + L"\\delete.bin";
+    const auto movePath = guardedRoot + L"\\move.bin";
+    const auto replacePath = guardedRoot + L"\\replace.bin";
+    const auto attributesPath = guardedRoot + L"\\attributes.bin";
+    const auto findPath = guardedRoot + L"\\find.bin";
+    const auto moveDestination = scratchRoot + L"\\moved.bin";
+    const auto replacement = scratchRoot + L"\\replacement.bin";
+
+    if (!WriteExact(physicalRoot + L"\\delete.bin", "delete")
+        || !WriteExact(physicalRoot + L"\\move.bin", "move")
+        || !WriteExact(physicalRoot + L"\\replace.bin", "replace")
+        || !WriteExact(physicalRoot + L"\\attributes.bin", "attributes")
+        || !WriteExact(physicalRoot + L"\\find.bin", "find")
+        || !WriteExact(replacement, "replacement")) {
+        return false;
+    }
+
+    const bool createDenied = IsAccessDeniedCreate(createPath);
+    const bool deleteDenied = IsAccessDeniedDelete(deletePath);
+
+    SetLastError(ERROR_SUCCESS);
+    const bool moveDenied = !MoveFileExW(
+            movePath.c_str(),
+            moveDestination.c_str(),
+            MOVEFILE_REPLACE_EXISTING)
+        && GetLastError() == ERROR_ACCESS_DENIED;
+
+    SetLastError(ERROR_SUCCESS);
+    const bool replaceDenied = !ReplaceFileW(
+            replacePath.c_str(),
+            replacement.c_str(),
+            nullptr,
+            REPLACEFILE_WRITE_THROUGH,
+            nullptr,
+            nullptr)
+        && GetLastError() == ERROR_ACCESS_DENIED;
+    const bool attributesDenied = IsAccessDeniedAttributes(attributesPath);
+    const bool findDenied = IsAccessDeniedFind(findPath);
+
+    return createDenied
+        && deleteDenied
+        && moveDenied
+        && replaceDenied
+        && attributesDenied
+        && findDenied;
+}
+
+bool CleanupGuardedApiFiles(
+    const std::wstring& physicalRoot,
+    const std::wstring& scratchRoot) {
+    const std::array<std::wstring_view, 6> names{
+        L"create.bin", L"delete.bin", L"move.bin", L"replace.bin",
+        L"attributes.bin", L"find.bin"};
+    bool cleaned = true;
+    for (const auto name : names) {
+        cleaned = RemoveFileIfPresent(physicalRoot + L"\\" + std::wstring(name))
+            && cleaned;
+    }
+    cleaned = RemoveFileIfPresent(scratchRoot + L"\\moved.bin") && cleaned;
+    cleaned = RemoveFileIfPresent(scratchRoot + L"\\replacement.bin") && cleaned;
+    return cleaned;
+}
+
+int VerifyGuardedReparseFailures(
+    const std::wstring& virtualDocuments,
+    const std::wstring& logicalSave,
+    const std::wstring& realSave,
+    const std::wstring& externalRoot,
+    const std::wstring& escapeTarget) {
+    const auto realProfileSeparator = realSave.find_last_of(L'\\');
+    const auto realProfile = realSave.substr(0, realProfileSeparator);
+    const auto realRootSeparator = realProfile.find_last_of(L'\\');
+    const auto realRoot = realProfile.substr(0, realRootSeparator);
+
+    const auto virtualTarget = escapeTarget + L"\\virtual-target";
+    const auto virtualScratch = escapeTarget + L"\\virtual-scratch";
+    const auto savedVirtual = escapeTarget + L"\\virtual-original";
+    const auto stagedVirtual = escapeTarget + L"\\virtual-link-stage";
+    if (!CreateDirectoryIfMissing(virtualTarget)
+        || !CreateDirectoryIfMissing(virtualScratch)
+        || !CreateJunction(stagedVirtual, virtualTarget)
+        || !MoveFileW(virtualDocuments.c_str(), savedVirtual.c_str())
+        || !MoveFileW(stagedVirtual.c_str(), virtualDocuments.c_str())) {
+        return 50;
+    }
+    const bool virtualDenied = GuardedFileApisAreDenied(
+        virtualDocuments,
+        virtualTarget,
+        virtualScratch);
+    if (!RemoveDirectoryW(virtualDocuments.c_str())
+        || !CleanupGuardedApiFiles(virtualTarget, virtualScratch)
+        || !RemoveDirectoryW(virtualTarget.c_str())
+        || !RemoveDirectoryW(virtualScratch.c_str())
+        || !MoveFileW(savedVirtual.c_str(), virtualDocuments.c_str())) {
+        return 51;
+    }
+    if (!virtualDenied) {
+        return 52;
+    }
+
+    const auto realTarget = escapeTarget + L"\\real-target";
+    const auto realScratch = escapeTarget + L"\\real-scratch";
+    const auto savedReal = escapeTarget + L"\\real-original";
+    const auto stagedReal = escapeTarget + L"\\real-link-stage";
+    if (!CreateDirectoryIfMissing(realTarget)
+        || !CreateDirectoryIfMissing(realScratch)
+        || !CreateJunction(stagedReal, realTarget)
+        || !MoveFileW(realRoot.c_str(), savedReal.c_str())
+        || !MoveFileW(stagedReal.c_str(), realRoot.c_str())) {
+        return 53;
+    }
+    const bool realDenied = GuardedFileApisAreDenied(
+        realRoot,
+        realTarget,
+        realScratch);
+    if (!RemoveDirectoryW(realRoot.c_str())
+        || !CleanupGuardedApiFiles(realTarget, realScratch)
+        || !RemoveDirectoryW(realTarget.c_str())
+        || !RemoveDirectoryW(realScratch.c_str())
+        || !MoveFileW(savedReal.c_str(), realRoot.c_str())) {
+        return 54;
+    }
+    if (!realDenied) {
+        return 55;
+    }
+
+    const auto finalTarget = escapeTarget + L"\\final-target";
+    const auto stagedFinal = escapeTarget + L"\\final-link-stage";
+    const auto finalMove = externalRoot + L"\\final-move.bin";
+    const auto finalReplacement = externalRoot + L"\\final-replacement.bin";
+    if (!CreateDirectoryIfMissing(finalTarget)
+        || !WriteExact(finalReplacement, "final-replacement")
+        || !CreateJunction(stagedFinal, finalTarget)
+        || !MoveFileW(stagedFinal.c_str(), logicalSave.c_str())) {
+        return 56;
+    }
+    const bool finalOpenDenied = IsAccessDeniedOpenDirectory(logicalSave);
+    const bool finalDeleteDenied = IsAccessDeniedDelete(logicalSave);
+    const bool finalMoveDenied = IsAccessDeniedMove(logicalSave, finalMove);
+    const bool finalReplaceDenied = IsAccessDeniedReplace(
+        logicalSave,
+        finalReplacement);
+    const bool finalAttributesDenied = IsAccessDeniedAttributes(logicalSave);
+    const bool finalFindDenied = IsAccessDeniedFind(logicalSave);
+    const bool finalDenied = finalOpenDenied
+        && finalDeleteDenied
+        && finalMoveDenied
+        && finalReplaceDenied
+        && finalAttributesDenied
+        && finalFindDenied;
+    if (!RemoveDirectoryW(logicalSave.c_str())
+        || !RemoveDirectoryW(finalTarget.c_str())
+        || !RemoveFileIfPresent(finalMove)
+        || !RemoveFileIfPresent(finalReplacement)) {
+        return 57;
+    }
+    if (!finalDenied) {
+        return 58;
+    }
+
+    const auto danglingTarget = escapeTarget + L"\\dangling-target";
+    const auto stagedDangling = escapeTarget + L"\\dangling-link-stage";
+    const auto danglingMove = externalRoot + L"\\dangling-move.bin";
+    const auto danglingReplacement = externalRoot + L"\\dangling-replacement.bin";
+    if (!CreateDirectoryIfMissing(danglingTarget)
+        || !WriteExact(danglingReplacement, "dangling-replacement")
+        || !CreateJunction(stagedDangling, danglingTarget)
+        || !MoveFileW(stagedDangling.c_str(), logicalSave.c_str())
+        || !RemoveDirectoryW(danglingTarget.c_str())) {
+        return 59;
+    }
+    const bool danglingCreateDenied = IsAccessDeniedCreate(logicalSave);
+    const bool danglingDeleteDenied = IsAccessDeniedDelete(logicalSave);
+    const bool danglingMoveDenied = IsAccessDeniedMove(logicalSave, danglingMove);
+    const bool danglingReplaceDenied = IsAccessDeniedReplace(
+        logicalSave,
+        danglingReplacement);
+    const bool danglingAttributesDenied = IsAccessDeniedAttributes(logicalSave);
+    const bool danglingFindDenied = IsAccessDeniedFind(logicalSave);
+    const bool danglingDenied = danglingCreateDenied
+        && danglingDeleteDenied
+        && danglingMoveDenied
+        && danglingReplaceDenied
+        && danglingAttributesDenied
+        && danglingFindDenied;
+    if (!RemoveDirectoryW(logicalSave.c_str())
+        || !RemoveFileIfPresent(danglingMove)
+        || !RemoveFileIfPresent(danglingReplacement)) {
+        return 60;
+    }
+    if (!danglingDenied) {
+        return 61;
+    }
+
+    const auto unrelatedTarget = escapeTarget + L"\\unrelated-target";
+    const auto unrelatedLink = externalRoot + L"\\unrelated-link";
+    const auto renamedLink = externalRoot + L"\\renamed-link";
+    if (!CreateDirectoryIfMissing(unrelatedTarget)
+        || !CreateJunction(unrelatedLink, unrelatedTarget)
+        || !MoveFileExW(
+            unrelatedLink.c_str(),
+            renamedLink.c_str(),
+            MOVEFILE_REPLACE_EXISTING)) {
+        return 62;
+    }
+    const auto renamedAttributes = GetFileAttributesW(renamedLink.c_str());
+    const bool callerPathWasPreserved = renamedAttributes != INVALID_FILE_ATTRIBUTES
+        && (renamedAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+        && GetFileAttributesW(unrelatedLink.c_str()) == INVALID_FILE_ATTRIBUTES
+        && GetFileAttributesW(unrelatedTarget.c_str()) != INVALID_FILE_ATTRIBUTES;
+    if (!callerPathWasPreserved) {
+        return 63;
+    }
+    if (!RemoveDirectoryW(renamedLink.c_str())
+        || !RemoveDirectoryW(unrelatedTarget.c_str())) {
+        return 64;
+    }
+    return 0;
+}
+
 int RunFileOperations(
     const std::wstring& virtualDocuments,
     const std::wstring& logicalSave,
@@ -218,12 +534,16 @@ int RunFileOperations(
         return 21;
     }
 
-    if (!CreateJunction(externalRoot, escapeTarget)) {
+    const auto externalOriginal = escapeTarget + L"\\external-original";
+    const auto stagedExternal = escapeTarget + L"\\external-link-stage";
+    if (!CreateJunction(stagedExternal, escapeTarget)
+        || !MoveFileW(externalRoot.c_str(), externalOriginal.c_str())
+        || !MoveFileW(stagedExternal.c_str(), externalRoot.c_str())) {
         return 33;
     }
     const bool escapeWasDenied = IsAccessDeniedCreate(logicalSave);
     if (!RemoveDirectoryW(externalRoot.c_str())
-        || !CreateDirectoryW(externalRoot.c_str(), nullptr)) {
+        || !MoveFileW(externalOriginal.c_str(), externalRoot.c_str())) {
         return 34;
     }
     if (!escapeWasDenied) {
@@ -301,6 +621,16 @@ int RunFileOperations(
         + L"\\PROFIL~1\\DRAKS0005.sl2";
     if (!IsAccessDeniedCreate(shortNameSave)) {
         return 31;
+    }
+
+    const auto reparseResult = VerifyGuardedReparseFailures(
+        virtualDocuments,
+        logicalSave,
+        realSave,
+        externalRoot,
+        escapeTarget);
+    if (reparseResult != 0) {
+        return reparseResult;
     }
 
     return 0;

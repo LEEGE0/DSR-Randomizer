@@ -1,5 +1,7 @@
 #include <cstdint>
 #include <iostream>
+#include <new>
+#include <string>
 
 #include "DSRRandomizer/ProtectionProtocol.h"
 #include "ProtectionBootstrap.h"
@@ -17,6 +19,13 @@ static_assert(offsetof(DSRRandomizer::ProtectionInitBlock, dedicatedRmm) == 4404
 int Fail(const char* message) {
     std::cerr << message << '\n';
     return 1;
+}
+
+bool ThrowingPathReader(
+    const wchar_t*,
+    std::size_t,
+    std::wstring&) {
+    throw std::bad_alloc();
 }
 
 }  // namespace
@@ -68,6 +77,21 @@ int main() {
     if (DSRRandomizer::CurrentProtectionFlags()
         != DSRRandomizer::ProtectionFlags::None) {
         return Fail("failed save-hook installation left protection flags active");
+    }
+
+    block.virtualDocuments[0] = L'x';
+    block.virtualDocuments[1] = L'\0';
+    const auto throwingSaveConfigurationStatus =
+        DSRRandomizer::Testing::InitializeWithPathReader(
+            &block,
+            &ThrowingPathReader);
+    if (throwingSaveConfigurationStatus
+        != DSRRandomizer::InitStatus::SaveHookInstallFailed) {
+        return Fail("save configuration allocation failure escaped InitializeCore");
+    }
+    if (DSRRandomizer::CurrentProtectionFlags()
+        != DSRRandomizer::ProtectionFlags::None) {
+        return Fail("save configuration exception left protection flags active");
     }
 
     block.requiredFlags = static_cast<std::uint64_t>(
