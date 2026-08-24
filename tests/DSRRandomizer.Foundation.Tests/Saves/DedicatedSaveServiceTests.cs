@@ -45,6 +45,39 @@ public sealed class DedicatedSaveServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task PrepareAsync_RmmBecomesHardLinkAfterInspection_IsRejectedWithoutChangingNormalSave()
+    {
+        var fixture = await Fixture.CreateAsync(_root);
+        fixture.CreateNormalSave(fill: 0x52);
+        fixture.CreateValidExternalRmm(fill: 0x52);
+        var before = fixture.CaptureSourceState();
+        var swapped = false;
+        fixture.Access.AfterSingleLinkCheck = (path, isSingleLink) =>
+        {
+            if (swapped
+                || !isSingleLink
+                || !path.Equals(fixture.DedicatedPath, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            swapped = true;
+            File.Delete(fixture.DedicatedPath);
+            if (!CreateHardLinkW(fixture.DedicatedPath, fixture.SourcePath, IntPtr.Zero))
+            {
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+            }
+        };
+
+        var result = await fixture.Service.PrepareAsync(fixture.SteamId, default);
+
+        Assert.True(swapped);
+        Assert.False(result.Ready);
+        Assert.Equal(SaveErrorCode.ExistingSaveInvalid, result.ErrorCode);
+        Assert.Equal(before, fixture.CaptureSourceState());
+    }
+
+    [Fact]
     public async Task PrepareAsync_FirstBootstrap_OpensExactSelectedSourceReadOnlyWithoutDeleteSharing()
     {
         var fixture = await Fixture.CreateAsync(_root);
@@ -1139,6 +1172,7 @@ public sealed class DedicatedSaveServiceTests : IDisposable
         public Action<string, string>? BeforeMoveCreateNew { get; set; }
         public Action<string>? BeforeOwnedDelete { get; set; }
         public Action<string>? AfterMutationLeaseAcquired { get; set; }
+        public Action<string, bool>? AfterSingleLinkCheck { get; set; }
         public bool ParentSwapAttempted { get; set; }
         public string? RedirectFrom { get; set; }
         public string? RedirectTo { get; set; }
@@ -1176,7 +1210,12 @@ public sealed class DedicatedSaveServiceTests : IDisposable
 
         public FileAttributes GetAttributes(string path) => inner.GetAttributes(Map(path));
 
-        public bool IsSingleLinkFile(string path) => inner.IsSingleLinkFile(Map(path));
+        public bool IsSingleLinkFile(string path)
+        {
+            var isSingleLink = inner.IsSingleLinkFile(Map(path));
+            AfterSingleLinkCheck?.Invoke(path, isSingleLink);
+            return isSingleLink;
+        }
 
         public Stream Open(string path, FileMode mode, FileAccess access, FileShare share)
         {

@@ -85,6 +85,7 @@ bool WriteExactWithoutSharing(
     if (file == INVALID_HANDLE_VALUE) {
         return false;
     }
+    const DWORD creationStatus = GetLastError();
 
     DWORD written = 0;
     const BOOL wrote = WriteFile(
@@ -95,7 +96,28 @@ bool WriteExactWithoutSharing(
         nullptr);
     const BOOL flushed = wrote ? FlushFileBuffers(file) : FALSE;
     CloseHandle(file);
-    return wrote && flushed && written == value.size();
+    return wrote && flushed && written == value.size()
+        && creationStatus == ERROR_ALREADY_EXISTS;
+}
+
+bool OpenAlwaysReports(
+    const std::wstring_view path,
+    const DWORD expectedStatus) {
+    SetLastError(ERROR_SUCCESS);
+    const HANDLE file = CreateFileW(
+        std::wstring(path).c_str(),
+        GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ,
+        nullptr,
+        OPEN_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    const DWORD status = GetLastError();
+    if (file == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    CloseHandle(file);
+    return status == expectedStatus;
 }
 
 bool ReadExact(const std::wstring_view path, const std::string_view expected) {
@@ -651,11 +673,40 @@ int RunFileOperations(
         return 35;
     }
 
+    const auto dedicatedSave = externalRoot + L"\\DRAKS0005.rmm";
+    const auto protectedTarget = escapeTarget + L"\\hardlink-protected.bin";
+    if (!WriteExact(protectedTarget, kReplacementSentinel)
+        || !DeleteFileW(dedicatedSave.c_str())
+        || !CreateHardLinkW(
+            dedicatedSave.c_str(),
+            protectedTarget.c_str(),
+            nullptr)) {
+        return 79;
+    }
+    if (WriteExactWithoutSharing(logicalSave, kSentinel)
+        || !ReadExact(protectedTarget, kReplacementSentinel)) {
+        return 80;
+    }
+    if (!DeleteFileW(dedicatedSave.c_str())
+        || !WriteExact(dedicatedSave, kSentinel)
+        || !DeleteFileW(protectedTarget.c_str())) {
+        return 81;
+    }
+
     if (!WriteExactWithoutSharing(logicalSave, kSentinel)) {
         return 22;
     }
     if (!ReadExact(logicalSave, kSentinel)) {
         return 76;
+    }
+    if (!OpenAlwaysReports(logicalSave, ERROR_ALREADY_EXISTS)) {
+        return 82;
+    }
+    if (!SetFileAttributesW(dedicatedSave.c_str(), FILE_ATTRIBUTE_HIDDEN)
+        || !IsAccessDeniedCreate(logicalSave)
+        || !ReadExact(dedicatedSave, kSentinel)
+        || !SetFileAttributesW(dedicatedSave.c_str(), FILE_ATTRIBUTE_NORMAL)) {
+        return 83;
     }
     const auto exclusiveResult = ExclusiveOpenResult(logicalSave);
     if (exclusiveResult != 0) {
@@ -781,6 +832,7 @@ int RunFileOperations(
 
     if (!DeleteFileW(logicalSave.c_str())
         || GetFileAttributesW(logicalSave.c_str()) != INVALID_FILE_ATTRIBUTES
+        || !OpenAlwaysReports(logicalSave, ERROR_SUCCESS)
         || !WriteExact(logicalSave, kSentinel)) {
         return 28;
     }

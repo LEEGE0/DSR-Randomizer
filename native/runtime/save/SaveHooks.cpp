@@ -520,6 +520,7 @@ struct EvaluatedPath {
     bool contained;
     std::wstring effective;
     std::vector<PinnedHandle> pins;
+    bool leafPinned = false;
 };
 
 bool PinExistingParents(
@@ -585,7 +586,11 @@ bool ResolvePhysicalPath(
     const CreateFileFunction open,
     std::wstring& physical,
     std::vector<EvaluatedPath::PinnedHandle>& pins,
-    const bool pinLeaf) {
+    const bool pinLeaf,
+    bool* const leafPinned = nullptr) {
+    if (leafPinned != nullptr) {
+        *leafPinned = false;
+    }
     if (open == nullptr || !IsAsciiDrivePath(lexical)) {
         return false;
     }
@@ -609,6 +614,9 @@ bool ResolvePhysicalPath(
                 return false;
             }
             pins.emplace_back(lexicalHandle);
+            if (leafPinned != nullptr) {
+                *leafPinned = true;
+            }
 
             HANDLE physicalHandle = lexicalHandle;
             if ((information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
@@ -758,6 +766,7 @@ EvaluatedPath EvaluatePath(
                     context.trampolines.createFile))) {
             return Denied(context, operation, SaveAuditCategory::Unrelated);
         }
+        bool leafPinned = false;
         if (pinLeaf && guarded) {
             std::wstring pinnedPhysical;
             if (!ResolvePhysicalPath(
@@ -765,7 +774,8 @@ EvaluatedPath EvaluatePath(
                     context.trampolines.createFile,
                     pinnedPhysical,
                     pins,
-                    true)
+                    true,
+                    &leafPinned)
                 || !EqualsOrdinalIgnoreCase(pinnedPhysical, physical)) {
                 return Denied(
                     context,
@@ -781,6 +791,7 @@ EvaluatedPath EvaluatePath(
             physicalBelowVirtual || physicalBelowExternal,
             std::wstring(requested),
             std::move(pins),
+            leafPinned,
         };
     }
 
@@ -801,12 +812,14 @@ EvaluatedPath EvaluatePath(
     }
 
     std::wstring physicalDedicated;
+    bool leafPinned = false;
     if (!ResolvePhysicalPath(
             context.configuration.dedicatedRmm,
             context.trampolines.createFile,
             physicalDedicated,
             pins,
-            pinLeaf)
+            pinLeaf,
+            &leafPinned)
         || context.policy.Evaluate(operation, physicalDedicated).kind
             != PathDecisionKind::Allow
         || !IsBelow(
@@ -823,6 +836,7 @@ EvaluatedPath EvaluatePath(
         true,
         context.configuration.dedicatedRmm,
         std::move(pins),
+        leafPinned,
     };
 }
 
@@ -1050,13 +1064,17 @@ HRESULT WINAPI HookLegacyFolder(
 
 bool IsPrivateRegularHandle(
     const HANDLE handle,
-    const std::wstring_view expectedPath) {
+    const std::wstring_view expectedPath,
+    BY_HANDLE_FILE_INFORMATION* const observedInformation = nullptr) {
     BY_HANDLE_FILE_INFORMATION information{};
     if (!GetFileInformationByHandle(handle, &information)
         || (information.dwFileAttributes
             & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0
         || information.nNumberOfLinks != 1) {
         return false;
+    }
+    if (observedInformation != nullptr) {
+        *observedInformation = information;
     }
     std::wstring finalPath;
     return FinalDosPath(handle, finalPath)
@@ -1104,19 +1122,29 @@ HANDLE ReopenPinnedLeaf(
     const DWORD flags,
     bool& handled) {
     handled = false;
-    if (!evaluated.guarded || evaluated.pins.empty()) {
+    if (!evaluated.guarded || !evaluated.leafPinned) {
+        return INVALID_HANDLE_VALUE;
+    }
+    handled = true;
+    if (evaluated.pins.empty()) {
+        SetLastError(ERROR_ACCESS_DENIED);
         return INVALID_HANDLE_VALUE;
     }
 
     std::wstring expected;
     if (!CanonicalizeLexical(evaluated.effective, expected)) {
+        SetLastError(ERROR_ACCESS_DENIED);
         return INVALID_HANDLE_VALUE;
     }
     auto& strongPin = evaluated.pins.back();
-    if (!IsPrivateRegularHandle(strongPin.Get(), expected)) {
+    BY_HANDLE_FILE_INFORMATION existingInformation{};
+    if (!IsPrivateRegularHandle(
+            strongPin.Get(),
+            expected,
+            &existingInformation)) {
+        SetLastError(ERROR_ACCESS_DENIED);
         return INVALID_HANDLE_VALUE;
     }
-    handled = true;
     if (creation == CREATE_NEW) {
         SetLastError(ERROR_FILE_EXISTS);
         return INVALID_HANDLE_VALUE;
@@ -1127,6 +1155,17 @@ HANDLE ReopenPinnedLeaf(
         && creation != TRUNCATE_EXISTING) {
         SetLastError(ERROR_INVALID_PARAMETER);
         return INVALID_HANDLE_VALUE;
+    }
+    if (creation == CREATE_ALWAYS) {
+        constexpr DWORD protectedAttributes =
+            FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM;
+        const DWORD requiredAttributes =
+            existingInformation.dwFileAttributes & protectedAttributes;
+        const DWORD requestedAttributes = flags & protectedAttributes;
+        if ((requiredAttributes & ~requestedAttributes) != 0) {
+            SetLastError(ERROR_ACCESS_DENIED);
+            return INVALID_HANDLE_VALUE;
+        }
     }
 
     const HANDLE weakPin = ReOpenFile(

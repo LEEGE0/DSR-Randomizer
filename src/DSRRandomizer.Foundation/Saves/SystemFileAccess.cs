@@ -42,13 +42,7 @@ public sealed class SystemFileAccess : IFileAccess
                 new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error()));
         }
 
-        var information = GetInformation(handle);
-        var attributes = (FileAttributes)information.FileAttributes;
-        return (attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) == 0
-            && information.NumberOfLinks == 1
-            && ResolveFinalPath(handle).Equals(
-                Path.GetFullPath(path),
-                StringComparison.OrdinalIgnoreCase);
+        return IsPrivateRegularHandle(handle, path);
     }
 
     public Stream Open(string path, FileMode mode, FileAccess access, FileShare share) =>
@@ -90,7 +84,12 @@ public sealed class SystemFileAccess : IFileAccess
         string path,
         CancellationToken cancellationToken)
     {
-        await using var stream = Open(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        using var handle = OpenPrivateRegularReadHandle(path);
+        await using var stream = new FileStream(
+            handle,
+            FileAccess.Read,
+            bufferSize: 81920,
+            isAsync: true);
         return await IdentityAndHashAsync(stream, cancellationToken);
     }
 
@@ -213,6 +212,57 @@ public sealed class SystemFileAccess : IFileAccess
         }
 
         return information;
+    }
+
+    private static SafeFileHandle OpenPrivateRegularReadHandle(string path)
+    {
+        const uint genericRead = 0x80000000;
+        const uint shareRead = 0x00000001;
+        const uint openExisting = 3;
+        const uint overlapped = 0x40000000;
+        const uint openReparsePoint = 0x00200000;
+        var handle = CreateFileW(
+            path,
+            genericRead,
+            shareRead,
+            IntPtr.Zero,
+            openExisting,
+            overlapped | openReparsePoint,
+            IntPtr.Zero);
+        if (handle.IsInvalid)
+        {
+            var error = Marshal.GetLastWin32Error();
+            handle.Dispose();
+            throw new IOException(
+                $"Unable to open private external file: {path}",
+                new System.ComponentModel.Win32Exception(error));
+        }
+
+        try
+        {
+            if (!IsPrivateRegularHandle(handle, path))
+            {
+                throw new IOException($"External file is linked, redirected, or not regular: {path}");
+            }
+
+            return handle;
+        }
+        catch
+        {
+            handle.Dispose();
+            throw;
+        }
+    }
+
+    private static bool IsPrivateRegularHandle(SafeFileHandle handle, string path)
+    {
+        var information = GetInformation(handle);
+        var attributes = (FileAttributes)information.FileAttributes;
+        return (attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) == 0
+            && information.NumberOfLinks == 1
+            && ResolveFinalPath(handle).Equals(
+                Path.GetFullPath(path),
+                StringComparison.OrdinalIgnoreCase);
     }
 
     private static long Combine(uint high, uint low) =>

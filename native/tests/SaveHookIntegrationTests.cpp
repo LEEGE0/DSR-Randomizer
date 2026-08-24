@@ -282,11 +282,20 @@ int VerifyHookInstallRollback(const fs::path& root) {
     const auto configuration = HookConfigurationFor(root);
 
     FixtureHookPlatform missingTarget(FixtureHookFailures{.missingTarget = 3});
-    if (DSRRandomizer::Save::InstallSaveHooks(configuration, missingTarget)
-            != SaveHookInstallStatus::InstallFailed
+    const auto missingTargetStatus =
+        DSRRandomizer::Save::InstallSaveHooks(configuration, missingTarget);
+    if (missingTargetStatus != SaveHookInstallStatus::InstallFailed
         || !missingTarget.WasRolledBack()
         || missingTarget.ApplyWasCalled()
         || DSRRandomizer::Save::SaveHooksAreInstalled()) {
+        std::cerr << "missing target state: status="
+                  << static_cast<unsigned int>(missingTargetStatus)
+                  << " rolledBack=" << missingTarget.WasRolledBack()
+                  << " apply=" << missingTarget.ApplyWasCalled()
+                  << " created=" << missingTarget.CreatedCount()
+                  << " enabled=" << missingTarget.EnabledCount()
+                  << " installed="
+                  << DSRRandomizer::Save::SaveHooksAreInstalled() << '\n';
         return Fail("missing hook target did not roll back the save group");
     }
 
