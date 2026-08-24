@@ -77,21 +77,36 @@ public sealed class SystemFileAccess : IFileAccess
         destination.Flush(flushToDisk: true);
     }
 
-    public async Task WriteAllBytesAndFlushAsync(
+    public async Task<CreatedFileIdentity> WriteAllBytesAndFlushAsync(
         string path,
         ReadOnlyMemory<byte> bytes,
         CancellationToken cancellationToken)
     {
-        await using var stream = new FileStream(
-            path,
-            FileMode.CreateNew,
-            FileAccess.Write,
-            FileShare.None,
-            bufferSize: 4096,
-            FileOptions.Asynchronous | FileOptions.SequentialScan);
-        await stream.WriteAsync(bytes, cancellationToken);
-        await stream.FlushAsync(cancellationToken);
-        stream.Flush(flushToDisk: true);
+        string? createdIdentity = null;
+        try
+        {
+            await using var stream = new FileStream(
+                path,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None,
+                bufferSize: 4096,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
+            createdIdentity = Identity(GetInformation(stream.SafeFileHandle));
+            await stream.WriteAsync(bytes, cancellationToken);
+            await stream.FlushAsync(cancellationToken);
+            stream.Flush(flushToDisk: true);
+            return new CreatedFileIdentity(createdIdentity);
+        }
+        catch
+        {
+            if (createdIdentity is not null)
+            {
+                TryDeleteCreatedFile(path, createdIdentity);
+            }
+
+            throw;
+        }
     }
 
     public bool MoveCreateNewIfIdentityMatches(
@@ -204,6 +219,19 @@ public sealed class SystemFileAccess : IFileAccess
         finally
         {
             Marshal.FreeHGlobal(buffer);
+        }
+    }
+
+    private void TryDeleteCreatedFile(string path, string createdIdentity)
+    {
+        try
+        {
+            DeleteIfIdentityMatches(path, createdIdentity);
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or FileNotFoundException)
+        {
+            // Preserve the original write failure; a replacement is not transaction-owned.
         }
     }
 

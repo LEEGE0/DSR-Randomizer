@@ -6,6 +6,8 @@ public sealed record FileIdentityAndHash(
     DateTime LastWriteTimeUtc,
     string Sha256);
 
+public sealed record CreatedFileIdentity(string Identity);
+
 public interface IFileMutationLease : IDisposable
 {
     void Verify();
@@ -36,7 +38,9 @@ public interface IFileAccess
         string destinationPath,
         CancellationToken cancellationToken);
 
-    Task WriteAllBytesAndFlushAsync(
+    // The implementation owns any created file until this returns successfully.
+    // On failure it removes only the object created by this call, never a path replacement.
+    Task<CreatedFileIdentity> WriteAllBytesAndFlushAsync(
         string path,
         ReadOnlyMemory<byte> bytes,
         CancellationToken cancellationToken);

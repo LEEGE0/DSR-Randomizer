@@ -890,17 +890,11 @@ public sealed class DedicatedSaveService
             $"save-metadata.{Guid.NewGuid():N}.tmp");
         EnsureExternal(locations.SaveDirectory, temporaryPath, locations.MetadataPath);
         var bytes = JsonSerializer.SerializeToUtf8Bytes(metadata, JsonOptions);
-        try
-        {
-            await _files.WriteAllBytesAndFlushAsync(temporaryPath, bytes, cancellationToken);
-            var identity = await _files.IdentityAndHashAsync(temporaryPath, CancellationToken.None);
-            return new OwnedFile(temporaryPath, identity.Identity);
-        }
-        catch
-        {
-            await DeleteUniqueFileIfPresentAsync(temporaryPath);
-            throw;
-        }
+        var created = await _files.WriteAllBytesAndFlushAsync(
+            temporaryPath,
+            bytes,
+            cancellationToken);
+        return new OwnedFile(temporaryPath, created.Identity);
     }
 
     private async Task<OwnedFile> WriteSessionTemporaryAsync(
@@ -916,17 +910,11 @@ public sealed class DedicatedSaveService
             temporaryPath,
             locations.SessionStatePath);
         var bytes = JsonSerializer.SerializeToUtf8Bytes(sessionState, JsonOptions);
-        try
-        {
-            await _files.WriteAllBytesAndFlushAsync(temporaryPath, bytes, cancellationToken);
-            var identity = await _files.IdentityAndHashAsync(temporaryPath, CancellationToken.None);
-            return new OwnedFile(temporaryPath, identity.Identity);
-        }
-        catch
-        {
-            await DeleteUniqueFileIfPresentAsync(temporaryPath);
-            throw;
-        }
+        var created = await _files.WriteAllBytesAndFlushAsync(
+            temporaryPath,
+            bytes,
+            cancellationToken);
+        return new OwnedFile(temporaryPath, created.Identity);
     }
 
     private SaveLocations ResolveLocations(string steamId)

@@ -147,6 +147,23 @@ public sealed class DedicatedSaveServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task PrepareAsync_MetadataTempIsReplacedBeforeWriteFailure_PreservesForeignWinner()
+    {
+        var fixture = await Fixture.CreateAsync(_root);
+        fixture.CreateNormalSave();
+        var foreignBytes = new byte[] { 0x46, 0x4F, 0x52, 0x45, 0x49, 0x47, 0x4E };
+        fixture.Access.ReplaceMetadataTemporaryBeforeWriteFailure = foreignBytes;
+
+        var result = await fixture.Service.PrepareAsync(fixture.SteamId, default);
+
+        Assert.False(result.Ready);
+        Assert.False(File.Exists(fixture.DedicatedPath));
+        var foreignPath = Assert.IsType<string>(fixture.Access.ReplacedMetadataTemporaryPath);
+        Assert.True(File.Exists(foreignPath));
+        Assert.Equal(foreignBytes, File.ReadAllBytes(foreignPath));
+    }
+
+    [Fact]
     public async Task PrepareAsync_MetadataReplaceFails_RemovesOwnedSaveMetadataAndTemp()
     {
         var fixture = await Fixture.CreateAsync(_root);
@@ -876,6 +893,8 @@ public sealed class DedicatedSaveServiceTests : IDisposable
         public byte[]? RaceDestinationBytes { get; set; }
         public bool FailNextMetadataReplace { get; set; }
         public bool FailMetadataWriteAfterCreate { get; set; }
+        public byte[]? ReplaceMetadataTemporaryBeforeWriteFailure { get; set; }
+        public string? ReplacedMetadataTemporaryPath { get; private set; }
         public bool MetadataReplaceCompleted { get; private set; }
         public string? CorruptOnHashPath { get; set; }
         public int CorruptOnHashPathCall { get; set; }
@@ -996,19 +1015,37 @@ public sealed class DedicatedSaveServiceTests : IDisposable
             AfterCopy?.Invoke(destinationPath);
         }
 
-        public async Task WriteAllBytesAndFlushAsync(
+        public async Task<CreatedFileIdentity> WriteAllBytesAndFlushAsync(
             string path,
             ReadOnlyMemory<byte> bytes,
             CancellationToken cancellationToken)
         {
             ObserveMutation(path);
-            await inner.WriteAllBytesAndFlushAsync(Map(path), bytes, cancellationToken);
+            var mappedPath = Map(path);
+            var created = await inner.WriteAllBytesAndFlushAsync(
+                mappedPath,
+                bytes,
+                cancellationToken);
+            if (ReplaceMetadataTemporaryBeforeWriteFailure is not null
+                && Path.GetFileName(path).StartsWith("save-metadata.", StringComparison.OrdinalIgnoreCase))
+            {
+                File.Delete(mappedPath);
+                File.WriteAllBytes(mappedPath, ReplaceMetadataTemporaryBeforeWriteFailure);
+                ReplacedMetadataTemporaryPath = mappedPath;
+                ReplaceMetadataTemporaryBeforeWriteFailure = null;
+                inner.DeleteIfIdentityMatches(mappedPath, created.Identity);
+                throw new IOException("Injected metadata write failure after foreign replacement.");
+            }
+
             if (FailMetadataWriteAfterCreate
                 && Path.GetFileName(path).StartsWith("save-metadata.", StringComparison.OrdinalIgnoreCase))
             {
                 FailMetadataWriteAfterCreate = false;
+                inner.DeleteIfIdentityMatches(mappedPath, created.Identity);
                 throw new IOException("Injected metadata write failure after creation.");
             }
+
+            return created;
         }
 
         public bool MoveCreateNewIfIdentityMatches(
