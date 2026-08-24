@@ -8,6 +8,9 @@ enum class InitStatus : std::uint32_t {
     Success = 0,
     InvalidArgument = 1,
     UnsupportedProtocol = 2,
+    RequiredProtectionUnavailable = 3,
+    SupervisorUnavailable = 4,
+    SupervisorReportFailed = 5,
 };
 
 InitStatus InitializeProtection(ProtectionInitBlock* block) noexcept;

@@ -47,7 +47,8 @@ public sealed class WindowsProtectedProcessPlatform : IProtectedProcessPlatform
                 checked((int)processInformation.ProcessId),
                 process,
                 thread,
-                job));
+                job,
+                request));
         }
         catch
         {
@@ -118,11 +119,14 @@ public sealed class WindowsProtectedProcessPlatform : IProtectedProcessPlatform
         int processId,
         SafeProcessHandle process,
         SafeProcessHandle primaryThread,
-        SafeJobHandle job) : IProtectedProcess
+        SafeJobHandle job,
+        SafetyLaunchRequest request) : IProtectedProcess, IRemoteProcessAccessor
     {
         private int _disposed;
 
         public int ProcessId { get; } = processId;
+
+        SafeProcessHandle IRemoteProcessAccessor.ProcessHandle => process;
 
         public void AssignKillOnCloseJob()
         {
@@ -135,7 +139,14 @@ public sealed class WindowsProtectedProcessPlatform : IProtectedProcessPlatform
 
         public Task<ProtectionHandshake> InjectAndInitializeAsync(
             CancellationToken cancellationToken) =>
-            throw new SafetyLaunchException("SAFETY_INJECTION_NOT_IMPLEMENTED");
+            new RemoteDllInjector().InitializeAsync(
+                this,
+                GuardConfiguration.Create(
+                    request.GuardDllPath,
+                    request.Profile.ProtocolVersion,
+                    request.RequiredProtectionFlags,
+                    request.DiagnosticMode),
+                cancellationToken);
 
         public uint ResumeMainThread()
         {

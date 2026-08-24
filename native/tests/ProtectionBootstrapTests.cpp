@@ -18,6 +18,8 @@ int main() {
     block.magic = DSRRandomizer::kProtectionMagic;
     block.version = 99;
     block.size = static_cast<std::uint16_t>(sizeof(block));
+    block.requiredFlags = static_cast<std::uint64_t>(
+        DSRRandomizer::ProtectionFlags::Bootstrap);
 
     const auto status = DSRRandomizer::InitializeForTest(&block);
     if (status != DSRRandomizer::InitStatus::UnsupportedProtocol) {

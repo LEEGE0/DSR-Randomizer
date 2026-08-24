@@ -13,6 +13,12 @@ internal static class NativeMethods
     internal const uint WaitObject0 = 0;
     internal const uint WaitTimeout = 258;
     internal const uint WaitFailed = 0xFFFFFFFF;
+    internal const uint MemoryCommit = 0x00001000;
+    internal const uint MemoryReserve = 0x00002000;
+    internal const uint MemoryRelease = 0x00008000;
+    internal const uint PageReadWrite = 0x04;
+    internal const uint SnapshotModules = 0x00000008;
+    internal const uint SnapshotModules32 = 0x00000010;
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     internal static extern SafeJobHandle CreateJobObjectW(
@@ -64,6 +70,77 @@ internal static class NativeMethods
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool GetExitCodeProcess(SafeProcessHandle process, out uint exitCode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    internal static extern IntPtr VirtualAllocEx(
+        SafeProcessHandle process,
+        IntPtr address,
+        UIntPtr size,
+        uint allocationType,
+        uint protection);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool VirtualFreeEx(
+        SafeProcessHandle process,
+        IntPtr address,
+        UIntPtr size,
+        uint freeType);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool WriteProcessMemory(
+        SafeProcessHandle process,
+        IntPtr baseAddress,
+        byte[] buffer,
+        UIntPtr size,
+        out UIntPtr bytesWritten);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool ReadProcessMemory(
+        SafeProcessHandle process,
+        IntPtr baseAddress,
+        byte[] buffer,
+        UIntPtr size,
+        out UIntPtr bytesRead);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    internal static extern IntPtr CreateRemoteThread(
+        SafeProcessHandle process,
+        IntPtr threadAttributes,
+        UIntPtr stackSize,
+        IntPtr startAddress,
+        IntPtr parameter,
+        uint creationFlags,
+        out uint threadId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool GetExitCodeThread(
+        SafeProcessHandle thread,
+        out uint exitCode);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    internal static extern IntPtr GetModuleHandleW(string moduleName);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
+    internal static extern IntPtr GetProcAddress(IntPtr module, string procedureName);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    internal static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint processId);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool Module32FirstW(
+        SafeProcessHandle snapshot,
+        ref ModuleEntry32 entry);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool Module32NextW(
+        SafeProcessHandle snapshot,
+        ref ModuleEntry32 entry);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -140,5 +217,24 @@ internal static class NativeMethods
         internal UIntPtr JobMemoryLimit;
         internal UIntPtr PeakProcessMemoryUsed;
         internal UIntPtr PeakJobMemoryUsed;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    internal struct ModuleEntry32
+    {
+        internal uint Size;
+        internal uint ModuleId;
+        internal uint ProcessId;
+        internal uint GlobalUsageCount;
+        internal uint ProcessUsageCount;
+        internal IntPtr ModuleBaseAddress;
+        internal uint ModuleBaseSize;
+        internal IntPtr ModuleHandle;
+
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)]
+        internal string ModuleName;
+
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+        internal string ExecutablePath;
     }
 }

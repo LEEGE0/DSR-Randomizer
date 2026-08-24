@@ -1,11 +1,14 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace DSRRandomizer {
 
 inline constexpr std::uint32_t kProtectionMagic = 0x44535252;
 inline constexpr std::uint16_t kProtectionProtocolVersion = 1;
+inline constexpr std::size_t kProtectionNonceSize = 32;
+inline constexpr std::size_t kProtectionPipeNameCharacters = 128;
 
 enum class ProtectionFlags : std::uint64_t {
     None = 0,
@@ -17,6 +20,19 @@ struct ProtectionInitBlock {
     std::uint32_t magic;
     std::uint16_t version;
     std::uint16_t size;
+    std::uint64_t requiredFlags;
+    std::uint32_t diagnosticMode;
+    std::uint8_t nonce[kProtectionNonceSize];
+    wchar_t pipeName[kProtectionPipeNameCharacters];
+};
+
+struct ProtectionHandshakeMessage {
+    std::uint32_t magic;
+    std::uint16_t version;
+    std::uint16_t size;
+    std::uint8_t nonce[kProtectionNonceSize];
+    std::uint32_t status;
+    std::uint64_t activeFlags;
 };
 #pragma pack(pop)
 
