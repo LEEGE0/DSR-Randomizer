@@ -1063,10 +1063,16 @@ HANDLE WINAPI HookCreateFile(
             return INVALID_HANDLE_VALUE;
         }
         InvokeBeforeOriginalApiCallback();
+        // The guarded leaf pin owns read access so a checked save cannot be
+        // renamed before this open. Permit that internal reader while keeping
+        // the caller's write/delete sharing restrictions unchanged.
+        const DWORD effectiveShareMode = evaluated.guarded
+            ? shareMode | FILE_SHARE_READ
+            : shareMode;
         return context->trampolines.createFile(
             evaluated.effective.c_str(),
             desiredAccess,
-            shareMode,
+            effectiveShareMode,
             security,
             creation,
             flags,

@@ -283,32 +283,50 @@ public sealed class DedicatedSaveService
             }
         }
 
-        var prepared = await PrepareAsync(steamId, cancellationToken);
-        if (!prepared.Ready)
-        {
-            return new DedicatedSaveSessionResult(prepared, null);
-        }
-
         OwnedFile? sessionTemporary = null;
         OwnedFile? publishedSession = null;
         IFileMutationLease? retainedLease = null;
+        Stream? profileSessionLock = null;
         try
         {
-            var locations = ResolveLocations(steamId);
+            SaveLocations locations;
             try
             {
+                locations = ResolveLocations(steamId);
                 retainedLease = _files.AcquireMutationLease(
                     _layout.Root,
                     [locations.SaveDirectory]);
                 retainedLease.Verify();
+                profileSessionLock = _files.Open(
+                    locations.SessionLockPath,
+                    FileMode.OpenOrCreate,
+                    FileAccess.ReadWrite,
+                    FileShare.None);
+            }
+            catch (ArgumentException exception)
+            {
+                return new DedicatedSaveSessionResult(
+                    DedicatedSaveResult.Fail(SaveErrorCode.InvalidSteamId, exception.Message),
+                    null);
+            }
+            catch (UnauthorizedAccessException exception)
+            {
+                return new DedicatedSaveSessionResult(
+                    DedicatedSaveResult.Fail(SaveErrorCode.PathDenied, exception.Message),
+                    null);
             }
             catch (IOException exception)
             {
-                retainedLease?.Dispose();
-                retainedLease = null;
                 return SessionAlreadyActive(exception.Message);
             }
 
+            var prepared = await PrepareAsync(steamId, cancellationToken);
+            if (!prepared.Ready)
+            {
+                return new DedicatedSaveSessionResult(prepared, null);
+            }
+
+            retainedLease.Verify();
             var metadata = await ReadMetadataAsync(locations.MetadataPath, cancellationToken);
             if (metadata is null)
             {
@@ -344,7 +362,10 @@ public sealed class DedicatedSaveService
                 metadata with { CleanExit = false },
                 cancellationToken);
 
-            var liveSession = new LiveSessionLease(sessionToken, retainedLease);
+            var liveSession = new LiveSessionLease(
+                sessionToken,
+                retainedLease,
+                profileSessionLock);
             lock (_sessionLeaseGate)
             {
                 if (!_liveSessionLeases.TryAdd(steamId, liveSession))
@@ -353,6 +374,7 @@ public sealed class DedicatedSaveService
                 }
 
                 retainedLease = null;
+                profileSessionLock = null;
             }
             return new DedicatedSaveSessionResult(
                 Ready(locations.DedicatedPath, prepared.ReusedExisting),
@@ -381,6 +403,7 @@ public sealed class DedicatedSaveService
         {
             SafeDelete(sessionTemporary);
             retainedLease?.Dispose();
+            profileSessionLock?.Dispose();
         }
     }
 
@@ -508,6 +531,7 @@ public sealed class DedicatedSaveService
             {
                 _liveSessionLeases.Remove(steamId);
                 current.Lease.Dispose();
+                current.ProfileLock.Dispose();
             }
         }
     }
@@ -1018,12 +1042,14 @@ public sealed class DedicatedSaveService
             ?? throw new IOException("Dedicated save directory could not be resolved.");
         var metadataPath = Path.Combine(saveDirectory, MetadataFileName);
         var sessionStatePath = Path.Combine(saveDirectory, "session-state.json");
+        var sessionLockPath = Path.Combine(saveDirectory, ".session.lock");
         var archiveDirectory = Path.Combine(saveDirectory, "archive");
         EnsureExternal(
             saveDirectory,
             dedicatedPath,
             metadataPath,
             sessionStatePath,
+            sessionLockPath,
             archiveDirectory,
             _layout.Staging);
         return new SaveLocations(
@@ -1032,6 +1058,7 @@ public sealed class DedicatedSaveService
             dedicatedPath,
             metadataPath,
             sessionStatePath,
+            sessionLockPath,
             archiveDirectory);
     }
 
@@ -1118,6 +1145,7 @@ public sealed class DedicatedSaveService
         string DedicatedPath,
         string MetadataPath,
         string SessionStatePath,
+        string SessionLockPath,
         string ArchiveDirectory);
 
     private sealed record DedicatedSaveSessionState(
@@ -1127,7 +1155,8 @@ public sealed class DedicatedSaveService
 
     private sealed record LiveSessionLease(
         string SessionToken,
-        IFileMutationLease Lease);
+        IFileMutationLease Lease,
+        Stream ProfileLock);
 
     private sealed record OwnedFile(string Path, string Identity);
 

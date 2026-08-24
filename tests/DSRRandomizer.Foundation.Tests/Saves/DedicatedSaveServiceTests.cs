@@ -786,6 +786,59 @@ public sealed class DedicatedSaveServiceTests : IDisposable
         Assert.True(fixture.ReadMetadata().CleanExit);
     }
 
+    [Fact]
+    public async Task BeginSessionAsync_SameProfileAcrossServiceInstances_IsRejectedAsActive()
+    {
+        var fixture = await Fixture.CreateAsync(_root);
+        fixture.CreateValidExternalRmm();
+        var firstService = fixture.CreateService();
+        var secondService = fixture.CreateService();
+
+        var first = await firstService.BeginSessionAsync(fixture.SteamId, default);
+        var second = await secondService.BeginSessionAsync(fixture.SteamId, default);
+
+        Assert.True(first.Ready, first.Message);
+        Assert.False(second.Ready);
+        Assert.Equal(SaveErrorCode.SessionAlreadyActive, second.ErrorCode);
+
+        var completed = await firstService.CompleteSessionAsync(
+            fixture.SteamId,
+            first.SessionToken!,
+            normalGuardedExit: true,
+            default);
+        Assert.True(completed.Ready, completed.Message);
+    }
+
+    [Fact]
+    public async Task BeginSessionAsync_DifferentProfiles_AreNotGloballySerialized()
+    {
+        const string secondSteamId = "22345678901234567";
+        var fixture = await Fixture.CreateAsync(_root);
+        fixture.CreateValidExternalRmm();
+        fixture.CreateValidExternalRmm(secondSteamId, fill: 0x53);
+        var firstService = fixture.CreateService();
+        var secondService = fixture.CreateService();
+
+        var first = await firstService.BeginSessionAsync(fixture.SteamId, default);
+        var second = await secondService.BeginSessionAsync(secondSteamId, default);
+
+        Assert.True(first.Ready, first.Message);
+        Assert.True(second.Ready, second.Message);
+
+        var firstCompleted = await firstService.CompleteSessionAsync(
+            fixture.SteamId,
+            first.SessionToken!,
+            normalGuardedExit: true,
+            default);
+        var secondCompleted = await secondService.CompleteSessionAsync(
+            secondSteamId,
+            second.SessionToken!,
+            normalGuardedExit: true,
+            default);
+        Assert.True(firstCompleted.Ready, firstCompleted.Message);
+        Assert.True(secondCompleted.Ready, secondCompleted.Message);
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_root))
@@ -818,6 +871,7 @@ public sealed class DedicatedSaveServiceTests : IDisposable
         {
             SteamId = "12345678901234567";
             Layout = layout;
+            Boundary = boundary;
             Access = access;
             SourcePath = Path.Combine(root, "documents", SteamId, "DRAKS0005.sl2");
             SaveDirectory = Path.Combine(layout.Saves, SteamId);
@@ -833,6 +887,7 @@ public sealed class DedicatedSaveServiceTests : IDisposable
         public string DedicatedPath { get; }
         public string MetadataPath { get; }
         public LocalDataLayout Layout { get; }
+        public WriteBoundary Boundary { get; }
         public RecordingFileAccess Access { get; }
         public DedicatedSaveService Service { get; }
         public byte[] NormalBytes { get; private set; } = [];
@@ -877,19 +932,42 @@ public sealed class DedicatedSaveServiceTests : IDisposable
             string? lastKnownSha256 = null,
             SeedBinding? seed = null,
             bool cleanExit = true)
-        {
-            Directory.CreateDirectory(SaveDirectory);
-            var bytes = Bytes(fill, length);
-            File.WriteAllBytes(DedicatedPath, bytes);
-            WriteMetadata(new DedicatedSaveMetadata(
-                1,
+            => CreateValidExternalRmm(
                 SteamId,
-                FixedSaveLength,
-                lastKnownSha256 ?? Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant(),
-                seed?.SeedId,
-                seed?.PlacementSha256,
-                cleanExit));
+                fill,
+                length,
+                lastKnownSha256,
+                seed,
+                cleanExit);
+
+        public void CreateValidExternalRmm(
+            string steamId,
+            byte fill = 0x52,
+            int length = checked((int)FixedSaveLength),
+            string? lastKnownSha256 = null,
+            SeedBinding? seed = null,
+            bool cleanExit = true)
+        {
+            var saveDirectory = Path.Combine(Layout.Saves, steamId);
+            var dedicatedPath = Path.Combine(saveDirectory, "DRAKS0005.rmm");
+            var metadataPath = Path.Combine(saveDirectory, "save-metadata.json");
+            Directory.CreateDirectory(saveDirectory);
+            var bytes = Bytes(fill, length);
+            File.WriteAllBytes(dedicatedPath, bytes);
+            File.WriteAllBytes(metadataPath, JsonSerializer.SerializeToUtf8Bytes(
+                new DedicatedSaveMetadata(
+                    1,
+                    steamId,
+                    FixedSaveLength,
+                    lastKnownSha256 ?? Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant(),
+                    seed?.SeedId,
+                    seed?.PlacementSha256,
+                    cleanExit),
+                JsonOptions));
         }
+
+        public DedicatedSaveService CreateService() =>
+            new(Layout, Boundary, new SaveSelectionStore(Layout, Boundary), new SystemFileAccess());
 
         public DedicatedSaveMetadata ReadMetadata() =>
             JsonSerializer.Deserialize<DedicatedSaveMetadata>(

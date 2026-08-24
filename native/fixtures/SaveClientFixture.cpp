@@ -71,6 +71,33 @@ bool WriteExact(const std::wstring_view path, const std::string_view value) {
     return wrote && flushed && written == value.size();
 }
 
+bool WriteExactWithoutSharing(
+    const std::wstring_view path,
+    const std::string_view value) {
+    const HANDLE file = CreateFileW(
+        std::wstring(path).c_str(),
+        GENERIC_READ | GENERIC_WRITE,
+        0,
+        nullptr,
+        CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+
+    DWORD written = 0;
+    const BOOL wrote = WriteFile(
+        file,
+        value.data(),
+        static_cast<DWORD>(value.size()),
+        &written,
+        nullptr);
+    const BOOL flushed = wrote ? FlushFileBuffers(file) : FALSE;
+    CloseHandle(file);
+    return wrote && flushed && written == value.size();
+}
+
 bool ReadExact(const std::wstring_view path, const std::string_view expected) {
     const HANDLE file = CreateFileW(
         std::wstring(path).c_str(),
@@ -596,7 +623,7 @@ int RunFileOperations(
         return 35;
     }
 
-    if (!WriteExact(logicalSave, kSentinel)
+    if (!WriteExactWithoutSharing(logicalSave, kSentinel)
         || !ReadExact(logicalSave, kSentinel)) {
         return 22;
     }
