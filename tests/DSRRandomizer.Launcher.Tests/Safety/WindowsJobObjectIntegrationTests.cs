@@ -85,6 +85,10 @@ public sealed class WindowsJobObjectIntegrationTests
             childProcessId = await WaitForChildProcessIdAsync(
                 childPidPath,
                 TimeSpan.FromSeconds(5));
+            using (var childProcess = Process.GetProcessById(childProcessId))
+            {
+                Assert.False(childProcess.HasExited);
+            }
 
             await process.DisposeAsync();
             process = null;
