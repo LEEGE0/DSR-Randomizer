@@ -65,18 +65,21 @@ public sealed class RemoteDllInjector
         var canonicalGuardPath = Path.GetFullPath(configuration.GuardDllPath);
         IntPtr remotePath = IntPtr.Zero;
         IntPtr remoteBlock = IntPtr.Zero;
+        var remoteMemoryCanBeReleased = true;
         try
         {
             var pathBytes = Encoding.Unicode.GetBytes(canonicalGuardPath + '\0');
             remotePath = AllocateWriteAndVerify(remote.ProcessHandle, pathBytes);
 
             var loadLibraryAddress = ResolveBootstrapLoadLibrary();
-            var loadStatus = await RunRemoteCallAsync(
+            var loadStatus = await RunRemoteCallFailClosedAsync(
+                child,
                 remote.ProcessHandle,
                 loadLibraryAddress,
                 remotePath,
                 configuration.OperationTimeout,
-                cancellationToken);
+                cancellationToken,
+                () => remoteMemoryCanBeReleased = false);
             if (loadStatus == 0)
             {
                 return ProtectionHandshake.Failed("SAFETY_LOAD_LIBRARY_FAILED");
@@ -94,12 +97,14 @@ public sealed class RemoteDllInjector
             var initBlock = CreateInitBlock(configuration, pipe.FullPipeName);
             remoteBlock = AllocateWriteAndVerify(remote.ProcessHandle, initBlock);
             var handshakeTask = pipe.WaitForHandshakeAsync(cancellationToken);
-            var initializeStatus = await RunRemoteCallAsync(
+            var initializeStatus = await RunRemoteCallFailClosedAsync(
+                child,
                 remote.ProcessHandle,
                 initializerAddress,
                 remoteBlock,
                 configuration.OperationTimeout,
-                cancellationToken);
+                cancellationToken,
+                () => remoteMemoryCanBeReleased = false);
             if (initializeStatus != 0)
             {
                 await pipe.DisposeAsync();
@@ -123,8 +128,11 @@ public sealed class RemoteDllInjector
         }
         finally
         {
-            FreeRemoteMemory(remote.ProcessHandle, remoteBlock);
-            FreeRemoteMemory(remote.ProcessHandle, remotePath);
+            if (remoteMemoryCanBeReleased)
+            {
+                FreeRemoteMemory(remote.ProcessHandle, remoteBlock);
+                FreeRemoteMemory(remote.ProcessHandle, remotePath);
+            }
         }
     }
 
@@ -209,6 +217,7 @@ public sealed class RemoteDllInjector
         TimeSpan timeout,
         CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var threadPointer = NativeMethods.CreateRemoteThread(
             process,
             IntPtr.Zero,
@@ -252,6 +261,50 @@ public sealed class RemoteDllInjector
         }
 
         throw new SafetyLaunchException("SAFETY_REMOTE_TIMEOUT");
+    }
+
+    private static async Task<uint> RunRemoteCallFailClosedAsync(
+        IProtectedProcess child,
+        SafeProcessHandle process,
+        IntPtr startAddress,
+        IntPtr parameter,
+        TimeSpan timeout,
+        CancellationToken cancellationToken,
+        Action markRemoteMemoryUnsafeToRelease)
+    {
+        try
+        {
+            return await RunRemoteCallAsync(
+                process,
+                startAddress,
+                parameter,
+                timeout,
+                cancellationToken);
+        }
+        catch
+        {
+            if (!await TerminateAndConfirmExitAsync(child))
+            {
+                markRemoteMemoryUnsafeToRelease();
+            }
+
+            throw;
+        }
+    }
+
+    private static async Task<bool> TerminateAndConfirmExitAsync(IProtectedProcess child)
+    {
+        try
+        {
+            child.TerminateJob();
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            _ = await child.WaitForExitAsync(timeout.Token);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static IntPtr ResolveBootstrapLoadLibrary()

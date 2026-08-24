@@ -26,6 +26,14 @@ dsr_configure_target(DSRRandomizer.SuspendedFixture)
 set_target_properties(DSRRandomizer.SuspendedFixture PROPERTIES
   CXX_EXTENSIONS OFF)
 
+add_library(DSRRandomizer.StalledRuntime SHARED
+  fixtures/StalledGuard.cpp)
+target_compile_features(DSRRandomizer.StalledRuntime PRIVATE cxx_std_20)
+dsr_configure_target(DSRRandomizer.StalledRuntime)
+set_target_properties(DSRRandomizer.StalledRuntime PROPERTIES
+  CXX_EXTENSIONS OFF
+  OUTPUT_NAME "DSRRandomizer.StalledRuntime")
+
 add_executable(ProtectionBootstrapTests
   tests/ProtectionBootstrapTests.cpp)
 target_compile_features(ProtectionBootstrapTests PRIVATE cxx_std_20)

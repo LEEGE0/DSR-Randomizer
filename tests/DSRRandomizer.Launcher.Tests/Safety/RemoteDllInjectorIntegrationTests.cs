@@ -119,6 +119,52 @@ public sealed class RemoteDllInjectorIntegrationTests
     }
 
     [Fact]
+    public async Task InitializeAsync_RemoteTimeoutTerminatesChildBeforeReturning()
+    {
+        var paths = FindNativeArtifacts();
+        await using var child = await CreateSuspendedFixtureAsync(paths.FixturePath);
+        var configuration = GuardConfiguration.Create(
+            paths.StalledGuardPath,
+            ProtocolVersion: 1,
+            RequiredFlags: (ulong)ProtectionFlags.Bootstrap,
+            DiagnosticMode: true) with
+        {
+            OperationTimeout = TimeSpan.FromMilliseconds(150)
+        };
+
+        var result = await new RemoteDllInjector().InitializeAsync(
+            child,
+            configuration,
+            CancellationToken.None);
+
+        Assert.False(result.Success);
+        Assert.Equal("SAFETY_REMOTE_TIMEOUT", result.ErrorCode);
+        Assert.True(await WaitForExitAsync(child.ProcessId, TimeSpan.FromMilliseconds(500)));
+    }
+
+    [Fact]
+    public async Task InitializeAsync_RemoteCancellationTerminatesChildBeforeRethrowing()
+    {
+        var paths = FindNativeArtifacts();
+        await using var child = await CreateSuspendedFixtureAsync(paths.FixturePath);
+        var configuration = GuardConfiguration.Create(
+            paths.StalledGuardPath,
+            ProtocolVersion: 1,
+            RequiredFlags: (ulong)ProtectionFlags.Bootstrap,
+            DiagnosticMode: true);
+        using var cancellation = new CancellationTokenSource(
+            TimeSpan.FromMilliseconds(150));
+
+        await Assert.ThrowsAsync<OperationCanceledException>(
+            () => new RemoteDllInjector().InitializeAsync(
+                child,
+                configuration,
+                cancellation.Token));
+
+        Assert.True(await WaitForExitAsync(child.ProcessId, TimeSpan.FromMilliseconds(500)));
+    }
+
+    [Fact]
     public async Task Coordinator_DoesNotInheritArbitraryParentEnvironment()
     {
         var paths = FindNativeArtifacts();
@@ -199,14 +245,47 @@ public sealed class RemoteDllInjectorIntegrationTests
                 "runtime",
                 configuration,
                 "DSRRandomizer.Runtime.dll");
-            if (File.Exists(fixturePath) && File.Exists(guardPath))
+            var stalledGuardPath = Path.Combine(
+                buildRoot,
+                configuration,
+                "DSRRandomizer.StalledRuntime.dll");
+            if (File.Exists(fixturePath) &&
+                File.Exists(guardPath) &&
+                File.Exists(stalledGuardPath))
             {
-                return new NativeArtifacts(fixturePath, guardPath);
+                return new NativeArtifacts(fixturePath, guardPath, stalledGuardPath);
             }
         }
 
         throw new Xunit.Sdk.XunitException("Native fixture and guard DLL must be built first.");
     }
 
-    private sealed record NativeArtifacts(string FixturePath, string GuardPath);
+    private static async Task<bool> WaitForExitAsync(int processId, TimeSpan timeout)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        while (stopwatch.Elapsed < timeout)
+        {
+            try
+            {
+                using var process = Process.GetProcessById(processId);
+                if (process.HasExited)
+                {
+                    return true;
+                }
+            }
+            catch (ArgumentException)
+            {
+                return true;
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(25));
+        }
+
+        return false;
+    }
+
+    private sealed record NativeArtifacts(
+        string FixturePath,
+        string GuardPath,
+        string StalledGuardPath);
 }
