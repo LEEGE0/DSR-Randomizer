@@ -17,7 +17,7 @@ public sealed class SaveSelectionStoreTests : IDisposable
         var (layout, boundary, canonicalizer) = CreateExternalLayout();
         Directory.CreateDirectory(Path.GetDirectoryName(source)!);
         System.IO.File.WriteAllText(source, "fixture");
-        var store = new SaveSelectionStore(layout, boundary, canonicalizer);
+        var store = new SaveSelectionStore(layout, boundary);
 
         await store.WriteAsync(new SaveProfileCandidate("12345678901234567", source), default);
         var selection = await store.ReadAsync(default);
@@ -35,7 +35,7 @@ public sealed class SaveSelectionStoreTests : IDisposable
         Directory.CreateDirectory(Path.GetDirectoryName(source)!);
         System.IO.File.WriteAllText(source, "fixture");
         var deniedLayout = layout with { Config = Path.Combine(_container, "denied") };
-        var store = new SaveSelectionStore(deniedLayout, boundary, canonicalizer);
+        var store = new SaveSelectionStore(deniedLayout, boundary);
 
         await Assert.ThrowsAsync<UnauthorizedAccessException>(
             () => store.WriteAsync(new SaveProfileCandidate("12345678901234567", source), default));
@@ -50,7 +50,7 @@ public sealed class SaveSelectionStoreTests : IDisposable
         var (layout, boundary, canonicalizer) = CreateExternalLayout();
         Directory.CreateDirectory(Path.GetDirectoryName(source)!);
         System.IO.File.WriteAllText(source, "fixture");
-        var store = new SaveSelectionStore(layout, boundary, canonicalizer);
+        var store = new SaveSelectionStore(layout, boundary);
 
         await Assert.ThrowsAsync<ArgumentException>(
             () => store.WriteAsync(new SaveProfileCandidate("12345678901234567", source), default));
@@ -62,11 +62,47 @@ public sealed class SaveSelectionStoreTests : IDisposable
     public async Task ReadAsync_ReturnsNullWhenNoSelectionWasWritten()
     {
         var (layout, boundary, canonicalizer) = CreateExternalLayout();
-        var store = new SaveSelectionStore(layout, boundary, canonicalizer);
+        var store = new SaveSelectionStore(layout, boundary);
 
         var selection = await store.ReadAsync(default);
 
         Assert.Null(selection);
+    }
+
+    [Fact]
+    public async Task ReadAsync_DeniesOutsideSelectionBeforeOpeningIt()
+    {
+        var source = Path.Combine(_container, "documents", "NBGI", "DARK SOULS REMASTERED", "12345678901234567", "DRAKS0005.sl2");
+        var (layout, boundary, canonicalizer) = CreateExternalLayout();
+        Directory.CreateDirectory(Path.GetDirectoryName(source)!);
+        System.IO.File.WriteAllText(source, "fixture");
+        var deniedLayout = layout with { Config = Path.Combine(_container, "denied") };
+        Directory.CreateDirectory(deniedLayout.Config);
+        await System.IO.File.WriteAllTextAsync(
+            Path.Combine(deniedLayout.Config, "selected-save-profile.json"),
+            JsonSerializer.Serialize(
+                new SaveProfileCandidate("12345678901234567", source),
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
+        var store = new SaveSelectionStore(deniedLayout, boundary);
+
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => store.ReadAsync(default));
+    }
+
+    [Fact]
+    public async Task ReadAsyncAndWriteAsync_PersistAnAlreadyDiscoveredPathWithoutResolvingItsNormalSave()
+    {
+        var source = Path.Combine(_container, "documents", "NBGI", "DARK SOULS REMASTERED", "12345678901234567", "DRAKS0005.sl2");
+        Directory.CreateDirectory(Path.GetDirectoryName(source)!);
+        System.IO.File.WriteAllText(source, "fixture");
+        var canonicalizer = new NormalSaveRejectingCanonicalizer(source);
+        var (layout, boundary) = CreateExternalLayout(canonicalizer);
+        var store = new SaveSelectionStore(layout, boundary);
+        var candidate = new SaveProfileCandidate("12345678901234567", source);
+
+        await store.WriteAsync(candidate, default);
+        var selection = await store.ReadAsync(default);
+
+        Assert.Equal(new SaveProfileCandidate(candidate.SteamId, Path.GetFullPath(source)), selection);
     }
 
     public void Dispose()
@@ -86,5 +122,29 @@ public sealed class SaveSelectionStoreTests : IDisposable
         var canonicalizer = new WindowsPathCanonicalizer();
         var boundary = WriteBoundary.Create(source, local, canonicalizer);
         return (LocalDataLayout.Create(local, boundary), boundary, canonicalizer);
+    }
+
+    private (LocalDataLayout Layout, WriteBoundary Boundary) CreateExternalLayout(
+        IPathCanonicalizer canonicalizer)
+    {
+        var source = Path.Combine(_container, "source-installation");
+        var local = Path.Combine(_container, "local-data");
+        Directory.CreateDirectory(source);
+        Directory.CreateDirectory(local);
+        var boundary = WriteBoundary.Create(source, local, canonicalizer);
+        return (LocalDataLayout.Create(local, boundary), boundary);
+    }
+
+    private sealed class NormalSaveRejectingCanonicalizer(string normalSavePath) : IPathCanonicalizer
+    {
+        public string Canonicalize(string path)
+        {
+            if (path.Equals(normalSavePath, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("The selection store must not resolve the normal save.");
+            }
+
+            return Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar);
+        }
     }
 }

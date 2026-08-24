@@ -15,25 +15,23 @@ public sealed partial class SaveSelectionStore
 
     private readonly string _configPath;
     private readonly WriteBoundary _boundary;
-    private readonly IPathCanonicalizer _canonicalizer;
 
     public SaveSelectionStore(
         LocalDataLayout layout,
-        WriteBoundary boundary,
-        IPathCanonicalizer canonicalizer)
+        WriteBoundary boundary)
     {
         ArgumentNullException.ThrowIfNull(layout);
         ArgumentNullException.ThrowIfNull(boundary);
-        ArgumentNullException.ThrowIfNull(canonicalizer);
 
         _configPath = layout.Config;
         _boundary = boundary;
-        _canonicalizer = canonicalizer;
     }
 
     public async Task<SaveProfileCandidate?> ReadAsync(CancellationToken cancellationToken)
     {
         var path = Path.Combine(_configPath, FileName);
+        _boundary.EnsureAllowed(_configPath);
+        _boundary.EnsureAllowed(path);
         if (!File.Exists(path))
         {
             return null;
@@ -44,7 +42,7 @@ public sealed partial class SaveSelectionStore
             stream,
             JsonOptions,
             cancellationToken);
-        return selection is null ? null : CanonicalizeAndValidate(selection);
+        return selection is null ? null : NormalizeAndValidate(selection);
     }
 
     public async Task WriteAsync(
@@ -53,7 +51,7 @@ public sealed partial class SaveSelectionStore
     {
         ArgumentNullException.ThrowIfNull(selection);
 
-        var canonicalSelection = CanonicalizeAndValidate(selection);
+        var canonicalSelection = NormalizeAndValidate(selection);
         var path = Path.Combine(_configPath, FileName);
         var temporaryPath = Path.Combine(
             _configPath,
@@ -78,14 +76,19 @@ public sealed partial class SaveSelectionStore
         }
     }
 
-    private SaveProfileCandidate CanonicalizeAndValidate(SaveProfileCandidate selection)
+    private static SaveProfileCandidate NormalizeAndValidate(SaveProfileCandidate selection)
     {
         if (string.IsNullOrWhiteSpace(selection.SteamId) || !SteamIdPattern().IsMatch(selection.SteamId))
         {
             throw new ArgumentException("Steam ID must contain 16 to 20 decimal digits.", nameof(selection));
         }
 
-        var canonicalSourcePath = _canonicalizer.Canonicalize(selection.SourcePath);
+        if (string.IsNullOrWhiteSpace(selection.SourcePath))
+        {
+            throw new ArgumentException("Selection must include a source path.", nameof(selection));
+        }
+
+        var canonicalSourcePath = Path.GetFullPath(selection.SourcePath);
         var parentDirectory = Path.GetDirectoryName(canonicalSourcePath);
         if (!Path.GetFileName(canonicalSourcePath).Equals(NormalSaveName, StringComparison.OrdinalIgnoreCase)
             || parentDirectory is null
