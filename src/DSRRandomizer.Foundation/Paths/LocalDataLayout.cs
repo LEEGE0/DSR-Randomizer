@@ -3,6 +3,8 @@ namespace DSRRandomizer.Foundation.Paths;
 public sealed record LocalDataLayout(
     string Root,
     string Runtimes,
+    string Components,
+    string VirtualProfile,
     string Staging,
     string ActiveSeed,
     string Saves,
@@ -17,6 +19,8 @@ public sealed record LocalDataLayout(
         var layout = new LocalDataLayout(
             root,
             Path.Combine(root, "runtimes"),
+            Path.Combine(root, "components"),
+            Path.Combine(root, "profile"),
             Path.Combine(root, "staging"),
             Path.Combine(root, "active-seed"),
             Path.Combine(root, "saves"),
@@ -25,6 +29,8 @@ public sealed record LocalDataLayout(
 
         boundary.EnsureAllowed(layout.Root);
         boundary.EnsureAllowed(layout.Runtimes);
+        boundary.EnsureAllowed(layout.Components);
+        boundary.EnsureAllowed(layout.VirtualProfile);
         boundary.EnsureAllowed(layout.Staging);
         boundary.EnsureAllowed(layout.ActiveSeed);
         boundary.EnsureAllowed(layout.Saves);

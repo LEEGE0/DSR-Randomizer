@@ -62,6 +62,8 @@ public sealed class WriteBoundaryTests
         {
             @"C:\Local\DSR",
             @"C:\Local\DSR\runtimes",
+            @"C:\Local\DSR\components",
+            @"C:\Local\DSR\profile",
             @"C:\Local\DSR\staging",
             @"C:\Local\DSR\active-seed",
             @"C:\Local\DSR\saves",
@@ -72,6 +74,8 @@ public sealed class WriteBoundaryTests
         {
             layout.Root,
             layout.Runtimes,
+            layout.Components,
+            layout.VirtualProfile,
             layout.Staging,
             layout.ActiveSeed,
             layout.Saves,
