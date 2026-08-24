@@ -8,12 +8,12 @@ artifacts/
 .worktrees/
 
 # Local game-derived data: never commit or distribute
-runtime/
-active-seed/
-saves/
-logs/
-local-data/
-game-catalog.json
+/runtime/
+/active-seed/
+/saves/
+/logs/
+/local-data/
+/game-catalog.json
 *.sl2
 *.rsl2
 *.dcx
