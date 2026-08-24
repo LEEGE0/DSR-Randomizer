@@ -72,7 +72,7 @@ public sealed class RemoteDllInjector
             remotePath = AllocateWriteAndVerify(remote.ProcessHandle, pathBytes);
 
             var loadLibraryAddress = ResolveBootstrapLoadLibrary();
-            var loadStatus = await RunRemoteCallFailClosedAsync(
+            _ = await RunRemoteCallFailClosedAsync(
                 child,
                 remote.ProcessHandle,
                 loadLibraryAddress,
@@ -80,11 +80,6 @@ public sealed class RemoteDllInjector
                 configuration.OperationTimeout,
                 cancellationToken,
                 () => remoteMemoryCanBeReleased = false);
-            if (loadStatus == 0)
-            {
-                return ProtectionHandshake.Failed("SAFETY_LOAD_LIBRARY_FAILED");
-            }
-
             var remoteGuardBase = FindRemoteModuleBase(child.ProcessId, canonicalGuardPath);
             var initializerRva = PeExportReader.ReadExportRva(
                 canonicalGuardPath,
@@ -323,15 +318,7 @@ public sealed class RemoteDllInjector
         int processId,
         string expectedPath)
     {
-        var snapshotPointer = NativeMethods.CreateToolhelp32Snapshot(
-            NativeMethods.SnapshotModules | NativeMethods.SnapshotModules32,
-            checked((uint)processId));
-        if (snapshotPointer == IntPtr.Zero || snapshotPointer == new IntPtr(-1))
-        {
-            throw new SafetyLaunchException("SAFETY_MODULE_SNAPSHOT_FAILED");
-        }
-
-        using var snapshot = new SafeProcessHandle(snapshotPointer);
+        using var snapshot = CreateModuleSnapshot(processId);
         var entry = new NativeMethods.ModuleEntry32
         {
             Size = checked((uint)System.Runtime.InteropServices.Marshal.SizeOf<NativeMethods.ModuleEntry32>()),
@@ -357,6 +344,31 @@ public sealed class RemoteDllInjector
         while (NativeMethods.Module32NextW(snapshot, ref entry));
 
         throw new SafetyLaunchException("SAFETY_REMOTE_MODULE_NOT_FOUND");
+    }
+
+    private static SafeProcessHandle CreateModuleSnapshot(int processId)
+    {
+        const int errorBadLength = 24;
+        const int maximumAttempts = 5;
+        for (var attempt = 0; attempt < maximumAttempts; attempt++)
+        {
+            var snapshotPointer = NativeMethods.CreateToolhelp32Snapshot(
+                NativeMethods.SnapshotModules | NativeMethods.SnapshotModules32,
+                checked((uint)processId));
+            if (snapshotPointer != IntPtr.Zero && snapshotPointer != new IntPtr(-1))
+            {
+                return new SafeProcessHandle(snapshotPointer);
+            }
+
+            if (System.Runtime.InteropServices.Marshal.GetLastWin32Error() != errorBadLength)
+            {
+                break;
+            }
+
+            Thread.Yield();
+        }
+
+        throw new SafetyLaunchException("SAFETY_MODULE_SNAPSHOT_FAILED");
     }
 
     private static IntPtr AddAddress(IntPtr baseAddress, ulong offset)
