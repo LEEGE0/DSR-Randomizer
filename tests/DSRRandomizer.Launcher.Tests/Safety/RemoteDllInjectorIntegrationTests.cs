@@ -119,9 +119,12 @@ public sealed class RemoteDllInjectorIntegrationTests
     }
 
     [Fact]
-    public async Task Coordinator_InjectsAuthenticatesAndResumesFixtureExactlyOnce()
+    public async Task Coordinator_DoesNotInheritArbitraryParentEnvironment()
     {
         var paths = FindNativeArtifacts();
+        const string sentinelName = "DSR_RANDOMIZER_PARENT_SENTINEL";
+        var previousValue = Environment.GetEnvironmentVariable(sentinelName);
+        Environment.SetEnvironmentVariable(sentinelName, "must-not-reach-child");
         var request = new SafetyLaunchRequest(
             paths.FixturePath,
             Path.GetDirectoryName(paths.FixturePath)!,
@@ -130,11 +133,18 @@ public sealed class RemoteDllInjectorIntegrationTests
             RequiredProtectionFlags: (ulong)ProtectionFlags.Bootstrap,
             DiagnosticMode: true);
 
-        var result = await new SafetyLaunchCoordinator(new WindowsProtectedProcessPlatform())
-            .LaunchAsync(request, CancellationToken.None);
+        try
+        {
+            var result = await new SafetyLaunchCoordinator(new WindowsProtectedProcessPlatform())
+                .LaunchAsync(request, CancellationToken.None);
 
-        Assert.True(result.Started, result.ErrorCode);
-        Assert.Equal(2, result.ExitCode);
+            Assert.True(result.Started, result.ErrorCode);
+            Assert.Equal(0, result.ExitCode);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(sentinelName, previousValue);
+        }
     }
 
     private static async Task<IProtectedProcess> CreateSuspendedFixtureAsync(string fixturePath)

@@ -19,6 +19,7 @@ public sealed class WindowsProtectedProcessPlatform : IProtectedProcessPlatform
         }
 
         var job = CreateKillOnCloseJob();
+        var environment = IntPtr.Zero;
         try
         {
             var startupInfo = new NativeMethods.StartupInfo
@@ -26,6 +27,7 @@ public sealed class WindowsProtectedProcessPlatform : IProtectedProcessPlatform
                 Size = checked((uint)Marshal.SizeOf<NativeMethods.StartupInfo>())
             };
             var commandLine = new StringBuilder(QuoteCommandLineArgument(request.ExecutablePath));
+            environment = Marshal.StringToHGlobalUni(CreateMinimalEnvironmentBlock());
             if (!NativeMethods.CreateProcessW(
                     request.ExecutablePath,
                     commandLine,
@@ -33,7 +35,7 @@ public sealed class WindowsProtectedProcessPlatform : IProtectedProcessPlatform
                     IntPtr.Zero,
                     inheritHandles: false,
                     NativeMethods.CreateSuspended | NativeMethods.CreateUnicodeEnvironment,
-                    IntPtr.Zero,
+                    environment,
                     request.WorkingDirectory,
                     ref startupInfo,
                     out var processInformation))
@@ -54,6 +56,13 @@ public sealed class WindowsProtectedProcessPlatform : IProtectedProcessPlatform
         {
             job.Dispose();
             throw;
+        }
+        finally
+        {
+            if (environment != IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal(environment);
+            }
         }
     }
 
@@ -80,6 +89,32 @@ public sealed class WindowsProtectedProcessPlatform : IProtectedProcessPlatform
         }
 
         return job;
+    }
+
+    private static string CreateMinimalEnvironmentBlock()
+    {
+        var allowedNames = new[]
+        {
+            "APPDATA",
+            "CommonProgramFiles",
+            "CommonProgramFiles(x86)",
+            "LOCALAPPDATA",
+            "ProgramData",
+            "ProgramFiles",
+            "ProgramFiles(x86)",
+            "SystemDrive",
+            "SystemRoot",
+            "TEMP",
+            "TMP",
+            "USERPROFILE",
+            "WINDIR"
+        };
+        var entries = allowedNames
+            .Select(name => (Name: name, Value: Environment.GetEnvironmentVariable(name)))
+            .Where(entry => !string.IsNullOrEmpty(entry.Value))
+            .OrderBy(entry => entry.Name, StringComparer.OrdinalIgnoreCase)
+            .Select(entry => $"{entry.Name}={entry.Value}");
+        return string.Join('\0', entries) + "\0";
     }
 
     internal static string QuoteCommandLineArgument(string value)
