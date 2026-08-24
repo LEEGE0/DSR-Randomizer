@@ -1,5 +1,6 @@
 using System.IO;
 using System.Text.Json;
+using DSRRandomizer.Foundation.Packaging;
 using DSRRandomizer.Launcher.Services;
 
 namespace DSRRandomizer.Launcher;
@@ -23,6 +24,29 @@ public sealed class LauncherApplication
     public async Task<int> RunAsync(string[] args, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(args);
+
+        if (args is ["--validate-package", var packagePath])
+        {
+            if (!Directory.Exists(packagePath))
+            {
+                await WriteJsonAsync(new
+                {
+                    success = false,
+                    prohibitedPaths = new[] { packagePath },
+                    error = "Package directory does not exist."
+                });
+                return 6;
+            }
+
+            var paths = EnumeratePackagePaths(packagePath);
+            var prohibited = new ReleaseContentGuard().Validate(paths);
+            await WriteJsonAsync(new
+            {
+                success = prohibited.Count == 0,
+                prohibitedPaths = prohibited
+            });
+            return prohibited.Count == 0 ? 0 : 6;
+        }
 
         if (args is ["--launch"])
         {
@@ -98,4 +122,35 @@ public sealed class LauncherApplication
 
     private Task WriteJsonAsync<T>(T value) =>
         _output.WriteLineAsync(JsonSerializer.Serialize(value));
+
+    private static IReadOnlyList<string> EnumeratePackagePaths(string packageRoot)
+    {
+        var root = Path.GetFullPath(packageRoot);
+        var paths = new List<string>();
+        var pending = new Stack<string>();
+        pending.Push(root);
+        while (pending.TryPop(out var directory))
+        {
+            foreach (var entry in new DirectoryInfo(directory).EnumerateFileSystemInfos())
+            {
+                var relativePath = Path.GetRelativePath(root, entry.FullName)
+                    .Replace(Path.DirectorySeparatorChar, '/');
+                if ((entry.Attributes & FileAttributes.ReparsePoint) != 0)
+                {
+                    paths.Add($"reparse-point:{relativePath}");
+                }
+                else if ((entry.Attributes & FileAttributes.Directory) != 0)
+                {
+                    pending.Push(entry.FullName);
+                }
+                else
+                {
+                    paths.Add(relativePath);
+                }
+            }
+        }
+
+        paths.Sort(StringComparer.Ordinal);
+        return paths;
+    }
 }
