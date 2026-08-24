@@ -124,8 +124,9 @@ Failure to initialize save isolation or online blocking is fatal. The launcher o
 │   ├── placement-hashes.json
 │   └── generated game files
 ├── saves\
-│   ├── DRAKS-RANDOM.rsl2
-│   └── save-metadata.json
+│   └── <SteamID>\
+│       ├── DRAKS0005.rmm
+│       └── save-metadata.json
 ├── config\
 ├── logs\
 └── staging\
@@ -146,7 +147,7 @@ New seed activation follows this order:
 5. Finish every generated file and compute hashes.
 6. Request final confirmation that activating the seed resets the single randomizer save.
 7. Atomically replace `active-seed` with the validated staged package.
-8. Reset only `saves\DRAKS-RANDOM.rsl2` and its metadata.
+8. Archive the prior external `.rmm`, copy the selected normal `DRAKS0005.sl2` read-only into a staged `.rmm`, and atomically bind the new `.rmm` metadata to the activated seed.
 9. Write new seed metadata and report success.
 
 Generation or validation failure leaves the previous active seed and save untouched. Save reset never occurs before the replacement seed is complete and verified.
@@ -224,15 +225,17 @@ The implementation is independent code. The Nexus `AutoEquip for Dark Souls 1 Re
 
 ## 11. Save isolation
 
-The random runtime uses one save file:
+The random runtime manages exactly one active external save, namespaced beneath the explicitly selected SteamID to prevent account mixing:
 
 ```text
-%LOCALAPPDATA%\DSR-Randomizer\saves\DRAKS-RANDOM.rsl2
+%LOCALAPPDATA%\DSR-Randomizer\saves\<SteamID>\DRAKS0005.rmm
 ```
 
-It does not read or write the normal `.sl2` save. Steam Cloud must not treat the random save as the original save. `save-metadata.json` binds the save to the active seed, combined placement hash, game version, mod version, and next ring slot. A mismatch blocks launch and explains the corrective action instead of attempting an automatic conversion.
+When `.rmm` is absent, the launcher creates it by copying the exact normal `DRAKS0005.sl2` read-only through an external staging file and verifying length and SHA-256. If a valid matching `.rmm` already exists, ordinary startup uses it without opening the normal `.sl2`. The normal save is never written, renamed, replaced, truncated, or deleted. The production launcher and copied game never open the Overhaul save; a separately invoked immutability audit may hash it read-only before and after a diagnostic test. Steam Cloud must not treat the random save as the original save.
 
-Changing the seed resets the single random save after successful generation and explicit confirmation. The first release does not maintain multiple seed saves.
+The native safety runtime redirects the copied game's logical `DRAKS0005.sl2` request to the physical `.rmm` before the child resumes. `save-metadata.json` binds the save to the selected SteamID, active seed, combined placement hash, game version, mod version, clean-exit state, and next ring slot. A mismatch blocks launch and explains the corrective action instead of attempting an automatic conversion.
+
+Changing the seed resets the single random save only after successful generation and explicit confirmation. The prior external `.rmm` is archived beneath the external saves root, and the replacement is recreated from the selected normal `.sl2` using the same read-only verified-copy procedure. The first release does not maintain multiple active seed saves.
 
 ## 12. Official-online blocking
 
@@ -279,6 +282,9 @@ Logs redact local user-specific paths when exported for bug reports.
 - Automatic equipment classification and exact slot rules
 - Ring alternation persists across simulated sessions
 - Save path redirection cannot fall back to `.sl2`
+- Existing valid `.rmm` startup performs no normal-save open
+- `.rmm` bootstrap reads normal `DRAKS0005.sl2` without changing its content, size, timestamps, or attributes
+- Production launcher and copied-game access to Overhaul saves is denied; only an explicit read-only immutability audit may hash them
 - Network initialization calls are denied in the random profile
 - Canonical path guard rejects every Steam-installation descendant
 - Release archive allowlist rejects game-derived files and executable extensions not built by the project
@@ -303,10 +309,11 @@ Development uses `feat/*` and `fix/*` branches. Commits follow Conventional Comm
 Release sequence:
 
 - `v0.1.0-alpha.1`: launcher and external-runtime isolation with game launch locked
-- `v0.2.0-alpha.1`: item permutation and progression validation
-- `v0.3.0-alpha.1`: weighted regular-enemy placement, boss permutation, special offline spawns, and tutorial scaling
-- `v0.4.0-alpha.1`: auto-equip, save isolation, and official-online blocking
-- `v0.5.0-beta.1`: integrated local runtime and release-candidate testing
+- `v0.2.0-alpha.1`: native safety runtime, `.rmm` save isolation, and official-online blocking with public play still locked
+- `v0.3.0-alpha.1`: item permutation and progression validation
+- `v0.4.0-alpha.1`: weighted regular-enemy placement, boss permutation, special offline spawns, and tutorial scaling
+- `v0.5.0-alpha.1`: auto-equip and integrated local runtime
+- `v0.6.0-beta.1`: release-candidate integration and seed stress testing
 - `v1.0.0`: first stable release
 
 Every release uses an annotated Git tag, a GitHub Release, release notes derived from `CHANGELOG.md`, build checksums, and third-party notices. Game files, local catalogs, saves, credentials, local paths, and generated seed packages remain excluded.
@@ -315,13 +322,13 @@ Every release uses an annotated Git tag, a GitHub Release, release notes derived
 
 1. Establish the public repository, safety guardrails, build, and test skeleton.
 2. Prove that a full copied external runtime can be constructed and verified without copying the installed Overhaul or modifying the source installation; keep game launch locked.
-3. Implement catalog import, deterministic seed formatting, and atomic seed packages.
-4. Implement item permutation and progression validation.
-5. Implement weighted regular-enemy placement, offline Gravelord Black Phantom and Vagrant spawns, and first-visit tutorial scaling.
-6. Implement compatible boss permutation and tutorial-boss scaling.
-7. Implement auto-equip and persistent ring rotation.
-8. Implement dedicated save redirection and mismatch protection.
-9. Implement and verify official-online blocking, then perform the first permitted copied-runtime launch and prove that it neither loads the installed Overhaul nor modifies the source installation.
-10. Complete integration, seed stress, release-content, and original-install immutability tests.
+3. Implement dedicated `.rmm` bootstrap/redirection, exact-build native injection, and official-online blocking; then perform a short diagnostic copied-runtime launch and prove that it neither loads installed Overhaul nor modifies the source installation or saves.
+4. Implement catalog import, deterministic seed formatting, and atomic seed packages while keeping the public play control locked.
+5. Implement item permutation and progression validation, then bind active seed metadata to `.rmm` and unlock the first test-only gameplay path.
+6. Implement weighted regular-enemy placement, offline Gravelord Black Phantom and Vagrant spawns, and first-visit tutorial scaling.
+7. Implement compatible boss permutation and tutorial-boss scaling.
+8. Implement auto-equip and persistent ring rotation.
+9. Complete integrated runtime, save/seed mismatch, and protection-failure testing.
+10. Complete seed stress, release-content, and original-install/normal-save/Overhaul immutability tests.
 
 Each phase is committed and pushed only after its applicable tests pass. Tags and releases follow the sequence in Section 15.
