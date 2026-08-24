@@ -5,6 +5,7 @@ out/
 artifacts/
 .vs/
 .idea/
+.worktrees/
 
 # Local game-derived data: never commit or distribute
 runtime/
