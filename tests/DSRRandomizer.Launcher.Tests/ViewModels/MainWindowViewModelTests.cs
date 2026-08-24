@@ -186,6 +186,49 @@ public sealed class MainWindowViewModelTests
         Assert.False(viewModel.CanLaunch);
     }
 
+    [Fact]
+    public async Task PrepareSaveCommand_InFlightProfileChangeRendersOriginalSelectionSnapshot()
+    {
+        var first = new SaveProfileCandidate(
+            "12345678901234567",
+            @"C:\Documents\12345678901234567\DRAKS0005.sl2");
+        var second = new SaveProfileCandidate(
+            "76543210987654321",
+            @"C:\Documents\76543210987654321\DRAKS0005.sl2");
+        var pendingResult = new TaskCompletionSource<DedicatedSaveResult>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var service = new FakeLauncherService
+        {
+            SaveProfiles = [first, second],
+            PendingPrepareResult = pendingResult
+        };
+        var local = @"C:\Local\DSR-Randomizer";
+        var viewModel = new MainWindowViewModel(service, new RecordingLogger(), local);
+        await viewModel.PrepareSaveCommand.ExecuteAsync(null);
+        viewModel.SelectedSaveProfile = first;
+
+        var preparation = viewModel.PrepareSaveCommand.ExecuteAsync(null);
+        await service.PrepareEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.True(viewModel.IsBusy);
+        Assert.False(viewModel.AreSaveControlsEnabled);
+        viewModel.SelectedSaveProfile = second;
+        viewModel.FirstCopyConfirmed = true;
+        pendingResult.SetResult(DedicatedSaveResult.Fail(
+            SaveErrorCode.FirstCopyConfirmationRequired,
+            "First-copy confirmation is required."));
+        await preparation;
+
+        Assert.Equal((first.SteamId, false), Assert.Single(service.PrepareCalls));
+        Assert.Contains(first.SourcePath, viewModel.Status, StringComparison.Ordinal);
+        Assert.Contains(
+            Path.Combine(local, "saves", first.SteamId, "DRAKS0005.rmm"),
+            viewModel.Status,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(second.SourcePath, viewModel.Status, StringComparison.Ordinal);
+        Assert.False(viewModel.IsBusy);
+        Assert.True(viewModel.AreSaveControlsEnabled);
+    }
+
     private static MainWindowViewModel CreateViewModel(
         ILauncherService service,
         IExternalLogger logger) =>
@@ -199,6 +242,11 @@ public sealed class MainWindowViewModelTests
             DedicatedSaveResult.Fail(SaveErrorCode.SourceMissing, "not configured");
 
         public List<(string SteamId, bool FirstCopyConfirmed)> PrepareCalls { get; } = [];
+
+        public TaskCompletionSource<DedicatedSaveResult>? PendingPrepareResult { get; init; }
+
+        public TaskCompletionSource PrepareEntered { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public VerificationResult VerificationResult { get; init; } = new(
             true,
@@ -254,7 +302,8 @@ public sealed class MainWindowViewModelTests
             CancellationToken cancellationToken)
         {
             PrepareCalls.Add((steamId, firstCopyConfirmed));
-            return Task.FromResult(PrepareResult);
+            PrepareEntered.TrySetResult();
+            return PendingPrepareResult?.Task ?? Task.FromResult(PrepareResult);
         }
     }
 

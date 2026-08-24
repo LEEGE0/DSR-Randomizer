@@ -60,6 +60,45 @@ public sealed class LauncherServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task DiscoverSaveProfilesAsync_ExternalOnlyRmmIsReusableWithoutNormalRoot()
+    {
+        var documents = Path.Combine(_container, "missing-documents");
+        var local = Path.Combine(_container, "local");
+        var destination = CreateValidDedicatedSave(local, SteamId, 0x52);
+        var service = new LauncherService(local, new FixedKnownFolderProvider(documents));
+
+        var profiles = await service.DiscoverSaveProfilesAsync(CancellationToken.None);
+        var profile = Assert.Single(profiles);
+        var result = await service.PrepareDedicatedSaveAsync(
+            profile.SteamId,
+            firstCopyConfirmed: false,
+            CancellationToken.None);
+
+        Assert.Equal(SteamId, profile.SteamId);
+        Assert.Equal(string.Empty, profile.SourcePath);
+        Assert.True(result.Ready, result.Message);
+        Assert.True(result.ReusedExisting);
+        Assert.Equal(destination, result.SavePath);
+        Assert.False(Directory.Exists(documents));
+    }
+
+    [Fact]
+    public async Task NormalSaveBlockingFileAccess_RejectsEveryPathBasedReadOfExactNormalSave()
+    {
+        var normalSave = Path.Combine(_container, "DRAKS0005.sl2");
+        Directory.CreateDirectory(_container);
+        await File.WriteAllBytesAsync(normalSave, [0x31]);
+        var access = new NormalSaveBlockingFileAccess(new SystemFileAccess());
+
+        Assert.False(access.Exists(normalSave));
+        Assert.Throws<UnauthorizedAccessException>(() => access.GetAttributes(normalSave));
+        Assert.Throws<UnauthorizedAccessException>(() =>
+            access.Open(normalSave, FileMode.Open, FileAccess.Read, FileShare.Read));
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+            access.IdentityAndHashAsync(normalSave, CancellationToken.None));
+    }
+
+    [Fact]
     public async Task PrepareDedicatedSaveAsync_UnconfirmedFirstCopyDoesNotOpenNormalSave()
     {
         var documents = Path.Combine(_container, "documents");
@@ -286,7 +325,7 @@ public sealed class LauncherServiceTests : IDisposable
             CancellationToken cancellationToken) =>
             _inner.IdentityAndHashAsync(path, cancellationToken);
 
-        public Task CopyAndFlushAsync(
+        public Task<CreatedFileIdentity> CopyAndFlushAsync(
             Stream source,
             string destinationPath,
             CancellationToken cancellationToken) =>

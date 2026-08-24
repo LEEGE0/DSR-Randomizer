@@ -33,7 +33,7 @@ public interface IFileAccess
         string path,
         CancellationToken cancellationToken);
 
-    Task CopyAndFlushAsync(
+    Task<CreatedFileIdentity> CopyAndFlushAsync(
         Stream source,
         string destinationPath,
         CancellationToken cancellationToken);

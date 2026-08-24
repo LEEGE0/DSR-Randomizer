@@ -59,22 +59,37 @@ public sealed class SystemFileAccess : IFileAccess
         return await IdentityAndHashAsync(stream, cancellationToken);
     }
 
-    public async Task CopyAndFlushAsync(
+    public async Task<CreatedFileIdentity> CopyAndFlushAsync(
         Stream source,
         string destinationPath,
         CancellationToken cancellationToken)
     {
-        source.Position = 0;
-        await using var destination = new FileStream(
-            destinationPath,
-            FileMode.CreateNew,
-            FileAccess.Write,
-            FileShare.None,
-            bufferSize: 81920,
-            FileOptions.Asynchronous | FileOptions.SequentialScan);
-        await source.CopyToAsync(destination, cancellationToken);
-        await destination.FlushAsync(cancellationToken);
-        destination.Flush(flushToDisk: true);
+        string? createdIdentity = null;
+        try
+        {
+            source.Position = 0;
+            await using var destination = new FileStream(
+                destinationPath,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None,
+                bufferSize: 81920,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
+            createdIdentity = Identity(GetInformation(destination.SafeFileHandle));
+            await source.CopyToAsync(destination, cancellationToken);
+            await destination.FlushAsync(cancellationToken);
+            destination.Flush(flushToDisk: true);
+            return new CreatedFileIdentity(createdIdentity);
+        }
+        catch
+        {
+            if (createdIdentity is not null)
+            {
+                TryDeleteCreatedFile(destinationPath, createdIdentity);
+            }
+
+            throw;
+        }
     }
 
     public async Task<CreatedFileIdentity> WriteAllBytesAndFlushAsync(

@@ -8,12 +8,14 @@
 #include <array>
 #include <atomic>
 #include <cwchar>
+#include <initializer_list>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "save/SavePathPolicy.h"
@@ -58,6 +60,8 @@ struct HookContext {
 
     SaveHookConfiguration configuration;
     SavePathPolicy policy;
+    std::wstring physicalVirtualDocuments;
+    std::wstring physicalExternalSaveRoot;
     HookTrampolines trampolines;
     std::vector<StableIdentity> stableIdentities;
     std::atomic<bool> denyOnly{false};
@@ -79,6 +83,8 @@ std::atomic<std::shared_ptr<HookContext>> activeContext;
 HookLifecycle lifecycle{};
 std::atomic<bool> hooksInstalled{false};
 std::array<std::atomic<std::uint64_t>, 4> auditCounters{};
+std::atomic<Testing::BeforeOriginalApiCallback> beforeOriginalApiCallback{};
+std::atomic<void*> beforeOriginalApiState{};
 
 class CallbackLease final {
 public:
@@ -390,6 +396,32 @@ bool AddStableIdentity(
     return !required && result == IdentityCaptureResult::Missing;
 }
 
+bool AddStableIdentityAtOrAbove(
+    HookContext& context,
+    const std::wstring& path) {
+    auto candidate = path;
+    while (!candidate.empty()) {
+        StableIdentity identity{};
+        const auto result = CaptureIdentity(candidate, identity);
+        if (result == IdentityCaptureResult::Captured) {
+            context.stableIdentities.push_back(std::move(identity));
+            return true;
+        }
+        if (result == IdentityCaptureResult::Unsafe) {
+            return false;
+        }
+        auto parent = ParentPath(candidate);
+        if (parent.empty() && candidate.size() > 3) {
+            parent = candidate.substr(0, 3);
+        }
+        if (parent.empty() || EqualsOrdinalIgnoreCase(parent, candidate)) {
+            return false;
+        }
+        candidate = std::move(parent);
+    }
+    return false;
+}
+
 bool StableIdentitiesMatch(const HookContext& context) {
     return std::all_of(
         context.stableIdentities.begin(),
@@ -445,10 +477,195 @@ void RecordAudit(
 }
 
 struct EvaluatedPath {
+    class PinnedHandle final {
+    public:
+        explicit PinnedHandle(const HANDLE handle) noexcept : handle_(handle) {}
+        ~PinnedHandle() {
+            if (handle_ != INVALID_HANDLE_VALUE) {
+                CloseHandle(handle_);
+            }
+        }
+
+        PinnedHandle(PinnedHandle&& other) noexcept
+            : handle_(std::exchange(other.handle_, INVALID_HANDLE_VALUE)) {}
+        PinnedHandle& operator=(PinnedHandle&& other) noexcept {
+            if (this != &other) {
+                if (handle_ != INVALID_HANDLE_VALUE) {
+                    CloseHandle(handle_);
+                }
+                handle_ = std::exchange(other.handle_, INVALID_HANDLE_VALUE);
+            }
+            return *this;
+        }
+
+        PinnedHandle(const PinnedHandle&) = delete;
+        PinnedHandle& operator=(const PinnedHandle&) = delete;
+
+    private:
+        HANDLE handle_ = INVALID_HANDLE_VALUE;
+    };
+
     bool allowed;
     bool redirected;
+    bool guarded;
+    bool contained;
     std::wstring effective;
+    std::vector<PinnedHandle> pins;
 };
+
+bool PinExistingParents(
+    const std::wstring& lexical,
+    const CreateFileFunction open,
+    std::vector<EvaluatedPath::PinnedHandle>& pins) {
+    if (open == nullptr || !IsAsciiDrivePath(lexical)) {
+        return false;
+    }
+    const auto parent = ParentPath(lexical);
+    if (parent.empty()) {
+        return true;
+    }
+
+    std::size_t segmentEnd = parent.find(L'\\', 3);
+    while (true) {
+        const auto current = segmentEnd == std::wstring::npos
+            ? parent
+            : parent.substr(0, segmentEnd);
+        const HANDLE lexicalHandle = open(
+            current.c_str(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            nullptr);
+        if (lexicalHandle == INVALID_HANDLE_VALUE) {
+            const auto error = GetLastError();
+            return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+        }
+
+        BY_HANDLE_FILE_INFORMATION information{};
+        if (!GetFileInformationByHandle(lexicalHandle, &information)) {
+            CloseHandle(lexicalHandle);
+            return false;
+        }
+        pins.emplace_back(lexicalHandle);
+        if ((information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+            const HANDLE physicalHandle = open(
+                current.c_str(),
+                FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                nullptr,
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS,
+                nullptr);
+            if (physicalHandle == INVALID_HANDLE_VALUE) {
+                return false;
+            }
+            pins.emplace_back(physicalHandle);
+        }
+
+        if (segmentEnd == std::wstring::npos) {
+            return true;
+        }
+        segmentEnd = parent.find(L'\\', segmentEnd + 1);
+    }
+}
+
+bool ResolvePhysicalPath(
+    const std::wstring& lexical,
+    const CreateFileFunction open,
+    std::wstring& physical,
+    std::vector<EvaluatedPath::PinnedHandle>& pins,
+    const bool pinLeaf) {
+    if (open == nullptr || !IsAsciiDrivePath(lexical)) {
+        return false;
+    }
+    if (!PinExistingParents(lexical, open, pins)) {
+        return false;
+    }
+
+    if (pinLeaf) {
+        const HANDLE lexicalHandle = open(
+            lexical.c_str(),
+            GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            nullptr);
+        if (lexicalHandle != INVALID_HANDLE_VALUE) {
+            BY_HANDLE_FILE_INFORMATION information{};
+            if (!GetFileInformationByHandle(lexicalHandle, &information)) {
+                CloseHandle(lexicalHandle);
+                return false;
+            }
+            pins.emplace_back(lexicalHandle);
+
+            HANDLE physicalHandle = lexicalHandle;
+            if ((information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+                physicalHandle = open(
+                    lexical.c_str(),
+                    GENERIC_READ,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    nullptr,
+                    OPEN_EXISTING,
+                    FILE_FLAG_BACKUP_SEMANTICS,
+                    nullptr);
+                if (physicalHandle == INVALID_HANDLE_VALUE) {
+                    return false;
+                }
+                pins.emplace_back(physicalHandle);
+            }
+            return FinalDosPath(physicalHandle, physical);
+        }
+        const auto error = GetLastError();
+        if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) {
+            return false;
+        }
+    }
+
+    auto existing = lexical;
+    while (!existing.empty()) {
+        const HANDLE handle = open(
+            existing.c_str(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            nullptr);
+        if (handle != INVALID_HANDLE_VALUE) {
+            std::wstring finalExisting;
+            const bool resolved = FinalDosPath(handle, finalExisting);
+            CloseHandle(handle);
+            if (!resolved) {
+                return false;
+            }
+
+            auto suffix = lexical.substr(existing.size());
+            if (!suffix.empty()
+                && finalExisting.ends_with(L'\\')
+                && suffix.starts_with(L'\\')) {
+                suffix.erase(0, 1);
+            }
+            return CanonicalizeLexical(finalExisting + suffix, physical);
+        }
+
+        const auto error = GetLastError();
+        if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) {
+            return false;
+        }
+        auto parent = ParentPath(existing);
+        if (parent.empty() && existing.size() > 3) {
+            parent = existing.substr(0, 3);
+        }
+        if (parent.empty() || EqualsOrdinalIgnoreCase(parent, existing)) {
+            return false;
+        }
+        existing = std::move(parent);
+    }
+    return false;
+}
 
 EvaluatedPath Denied(
     const HookContext& context,
@@ -456,13 +673,14 @@ EvaluatedPath Denied(
     const SaveAuditCategory category) {
     RecordAudit(context, operation, category);
     SetLastError(ERROR_ACCESS_DENIED);
-    return {false, false, {}};
+    return {false, false, false, false, {}, {}};
 }
 
 EvaluatedPath EvaluatePath(
     const HookContext& context,
     const wchar_t* path,
-    const PathOperation operation) {
+    const PathOperation operation,
+    const bool pinLeaf = false) {
     if (path == nullptr || context.denyOnly.load(std::memory_order_acquire)) {
         return Denied(context, operation, SaveAuditCategory::Unrelated);
     }
@@ -472,7 +690,7 @@ EvaluatedPath EvaluatePath(
     if (requested.size() > namedPipePrefix.size()
         && StartsWithOrdinalIgnoreCase(requested, namedPipePrefix)) {
         RecordAudit(context, operation, SaveAuditCategory::Unrelated);
-        return {true, false, std::wstring(requested)};
+        return {true, false, false, false, std::wstring(requested), {}};
     }
 
     std::wstring lexical;
@@ -490,16 +708,71 @@ EvaluatedPath EvaluatePath(
                 : SaveAuditCategory::DeniedNormal);
     }
 
+    std::wstring physical;
+    std::vector<EvaluatedPath::PinnedHandle> pins;
+    if (!ResolvePhysicalPath(
+            lexical,
+            context.trampolines.createFile,
+            physical,
+            pins,
+            false)) {
+        return Denied(context, operation, SaveAuditCategory::Unrelated);
+    }
+    const auto physicalDecision = context.policy.Evaluate(operation, physical);
+    if ((decision.kind == PathDecisionKind::Allow
+            && physicalDecision.kind != PathDecisionKind::Allow)
+        || (decision.kind == PathDecisionKind::Redirect
+            && physicalDecision.kind != PathDecisionKind::Redirect)) {
+        return Denied(
+            context,
+            operation,
+            ContainsOrdinalIgnoreCase(physical, L".overhaul.sl2")
+                ? SaveAuditCategory::DeniedOverhaul
+                : SaveAuditCategory::DeniedNormal);
+    }
+
     if (decision.kind == PathDecisionKind::Allow) {
-        if (IsBelow(lexical, context.configuration.virtualDocuments)
+        const bool lexicalBelowVirtual = IsBelow(
+            lexical, context.configuration.virtualDocuments);
+        const bool lexicalBelowExternal = IsBelow(
+            lexical, context.configuration.externalSaveRoot);
+        const bool physicalBelowVirtual = IsBelow(
+            physical, context.physicalVirtualDocuments);
+        const bool physicalBelowExternal = IsBelow(
+            physical, context.physicalExternalSaveRoot);
+        const bool guarded = lexicalBelowVirtual || lexicalBelowExternal
+            || physicalBelowVirtual || physicalBelowExternal;
+        if (lexicalBelowVirtual
             && (!StableIdentitiesMatch(context)
                 || !InspectExistingComponents(
                     lexical,
                     context.trampolines.createFile))) {
             return Denied(context, operation, SaveAuditCategory::Unrelated);
         }
+        if (pinLeaf && guarded) {
+            std::wstring pinnedPhysical;
+            if (!ResolvePhysicalPath(
+                    lexical,
+                    context.trampolines.createFile,
+                    pinnedPhysical,
+                    pins,
+                    true)
+                || !EqualsOrdinalIgnoreCase(pinnedPhysical, physical)) {
+                return Denied(
+                    context,
+                    operation,
+                    SaveAuditCategory::Unrelated);
+            }
+        }
         RecordAudit(context, operation, SaveAuditCategory::Unrelated);
-        return {true, false, std::wstring(requested)};
+        return {
+            true,
+            false,
+            guarded,
+            physicalBelowVirtual || physicalBelowExternal,
+            std::wstring(requested),
+            std::move(pins),
+        };
     }
 
     if (!EqualsOrdinalIgnoreCase(
@@ -518,8 +791,157 @@ EvaluatedPath EvaluatePath(
         return Denied(context, operation, SaveAuditCategory::Unrelated);
     }
 
+    std::wstring physicalDedicated;
+    if (!ResolvePhysicalPath(
+            context.configuration.dedicatedRmm,
+            context.trampolines.createFile,
+            physicalDedicated,
+            pins,
+            pinLeaf)
+        || context.policy.Evaluate(operation, physicalDedicated).kind
+            != PathDecisionKind::Allow
+        || !IsBelow(
+            physicalDedicated,
+            context.physicalExternalSaveRoot)) {
+        return Denied(context, operation, SaveAuditCategory::Unrelated);
+    }
+
     RecordAudit(context, operation, SaveAuditCategory::DedicatedRmm);
-    return {true, true, context.configuration.dedicatedRmm};
+    return {
+        true,
+        true,
+        true,
+        true,
+        context.configuration.dedicatedRmm,
+        std::move(pins),
+    };
+}
+
+bool ContainsWildcard(const std::wstring_view value) noexcept {
+    return value.find_first_of(L"*?") != std::wstring_view::npos;
+}
+
+EvaluatedPath EvaluateEnumerationPath(
+    const HookContext& context,
+    const wchar_t* path) {
+    if (path == nullptr) {
+        return Denied(
+            context,
+            PathOperation::Enumeration,
+            SaveAuditCategory::Unrelated);
+    }
+
+    const std::wstring_view requested(path);
+    if (!ContainsWildcard(requested)) {
+        return EvaluatePath(context, path, PathOperation::Enumeration, true);
+    }
+
+    const auto separator = requested.find_last_of(L"\\/");
+    if (separator == std::wstring_view::npos
+        || separator + 1 >= requested.size()) {
+        return Denied(
+            context,
+            PathOperation::Enumeration,
+            SaveAuditCategory::Unrelated);
+    }
+    const auto directoryRequest = requested.substr(0, separator);
+    const auto leafPattern = requested.substr(separator + 1);
+    if (ContainsWildcard(directoryRequest)
+        || leafPattern.find_first_of(L"\\/") != std::wstring_view::npos) {
+        return Denied(
+            context,
+            PathOperation::Enumeration,
+            SaveAuditCategory::Unrelated);
+    }
+
+    std::wstring directoryText(directoryRequest);
+    auto directory = EvaluatePath(
+        context,
+        directoryText.c_str(),
+        PathOperation::Enumeration,
+        true);
+    if (!directory.allowed) {
+        return directory;
+    }
+
+    std::wstring canonicalDirectory;
+    const auto logicalProfile = ParentPath(
+        context.configuration.virtualLogicalSave);
+    if (!CanonicalizeLexical(directoryRequest, canonicalDirectory)
+        || !EqualsOrdinalIgnoreCase(canonicalDirectory, logicalProfile)) {
+        return {
+            true,
+            false,
+            directory.guarded,
+            directory.contained,
+            std::wstring(requested),
+            std::move(directory.pins),
+        };
+    }
+
+    if (!EqualsOrdinalIgnoreCase(leafPattern, L"*")
+        && !EqualsOrdinalIgnoreCase(leafPattern, L"DRAKS0005.*")) {
+        return Denied(
+            context,
+            PathOperation::Enumeration,
+            SaveAuditCategory::Unrelated);
+    }
+    if (!StableIdentitiesMatch(context)
+        || !InspectExistingComponents(
+            context.configuration.dedicatedRmm,
+            context.trampolines.createFile)
+        || !IsBelow(
+            context.configuration.dedicatedRmm,
+            context.configuration.externalSaveRoot)) {
+        return Denied(
+            context,
+            PathOperation::Enumeration,
+            SaveAuditCategory::Unrelated);
+    }
+
+    RecordAudit(
+        context,
+        PathOperation::Enumeration,
+        SaveAuditCategory::DedicatedRmm);
+    std::wstring physicalDedicated;
+    if (!ResolvePhysicalPath(
+            context.configuration.dedicatedRmm,
+            context.trampolines.createFile,
+            physicalDedicated,
+            directory.pins,
+            true)
+        || !IsBelow(
+            physicalDedicated,
+            context.physicalExternalSaveRoot)) {
+        return Denied(
+            context,
+            PathOperation::Enumeration,
+            SaveAuditCategory::Unrelated);
+    }
+    return {
+        true,
+        true,
+        true,
+        true,
+        context.configuration.dedicatedRmm,
+        std::move(directory.pins),
+    };
+}
+
+bool MutationOperandsAreContained(
+    const std::initializer_list<const EvaluatedPath*> operands) noexcept {
+    const bool guarded = std::any_of(
+        operands.begin(),
+        operands.end(),
+        [](const EvaluatedPath* operand) {
+            return operand != nullptr && operand->guarded;
+        });
+    return !guarded || std::all_of(
+        operands.begin(),
+        operands.end(),
+        [](const EvaluatedPath* operand) {
+            return operand == nullptr || operand->contained;
+        });
 }
 
 PathOperation OpenOperation(const DWORD desiredAccess) noexcept {
@@ -527,6 +949,13 @@ PathOperation OpenOperation(const DWORD desiredAccess) noexcept {
         | FILE_WRITE_ATTRIBUTES | FILE_WRITE_EA | DELETE)) != 0
         ? PathOperation::Write
         : PathOperation::Read;
+}
+
+void InvokeBeforeOriginalApiCallback() noexcept {
+    const auto callback = beforeOriginalApiCallback.load(std::memory_order_acquire);
+    if (callback != nullptr) {
+        callback(beforeOriginalApiState.load(std::memory_order_acquire));
+    }
 }
 
 HRESULT WINAPI HookKnownFolder(
@@ -628,10 +1057,12 @@ HANDLE WINAPI HookCreateFile(
         const auto evaluated = EvaluatePath(
             *context,
             fileName,
-            OpenOperation(desiredAccess));
+            OpenOperation(desiredAccess),
+            true);
         if (!evaluated.allowed) {
             return INVALID_HANDLE_VALUE;
         }
+        InvokeBeforeOriginalApiCallback();
         return context->trampolines.createFile(
             evaluated.effective.c_str(),
             desiredAccess,
@@ -693,11 +1124,12 @@ BOOL WINAPI HookMoveFile(
             newName,
             PathOperation::RenameDestination);
         return destination.allowed
+                && MutationOperandsAreContained({&source, &destination})
             ? context->trampolines.moveFile(
                 source.effective.c_str(),
                 destination.effective.c_str(),
                 flags)
-            : FALSE;
+            : (SetLastError(ERROR_ACCESS_DENIED), FALSE);
     }
     catch (...) {
         SetLastError(ERROR_ACCESS_DENIED);
@@ -736,8 +1168,9 @@ BOOL WINAPI HookReplaceFile(
 
         std::wstring backup;
         const wchar_t* effectiveBackup = nullptr;
+        EvaluatedPath evaluatedBackup{true, false, false, false, {}, {}};
         if (backupName != nullptr) {
-            const auto evaluatedBackup = EvaluatePath(
+            evaluatedBackup = EvaluatePath(
                 *context,
                 backupName,
                 PathOperation::RenameDestination);
@@ -746,6 +1179,13 @@ BOOL WINAPI HookReplaceFile(
             }
             backup = evaluatedBackup.effective;
             effectiveBackup = backup.c_str();
+        }
+        if (!MutationOperandsAreContained({
+                &replaced,
+                &replacement,
+                backupName == nullptr ? nullptr : &evaluatedBackup})) {
+            SetLastError(ERROR_ACCESS_DENIED);
+            return FALSE;
         }
         return context->trampolines.replaceFile(
             replaced.effective.c_str(),
@@ -775,7 +1215,8 @@ BOOL WINAPI HookAttributes(
         const auto evaluated = EvaluatePath(
             *context,
             fileName,
-            PathOperation::Attributes);
+            PathOperation::Attributes,
+            true);
         return evaluated.allowed
             ? context->trampolines.attributes(
                 evaluated.effective.c_str(),
@@ -803,10 +1244,9 @@ HANDLE WINAPI HookFindFirst(
             SetLastError(ERROR_ACCESS_DENIED);
             return INVALID_HANDLE_VALUE;
         }
-        const auto evaluated = EvaluatePath(
+        const auto evaluated = EvaluateEnumerationPath(
             *context,
-            fileName,
-            PathOperation::Enumeration);
+            fileName);
         if (!evaluated.allowed) {
             return INVALID_HANDLE_VALUE;
         }
@@ -994,6 +1434,21 @@ bool ValidateConfiguration(
     }
 
     auto candidate = std::make_shared<HookContext>(std::move(canonical));
+    std::vector<EvaluatedPath::PinnedHandle> validationPins;
+    if (!ResolvePhysicalPath(
+            candidate->configuration.virtualDocuments,
+            &CreateFileW,
+            candidate->physicalVirtualDocuments,
+            validationPins,
+            false)
+        || !ResolvePhysicalPath(
+            candidate->configuration.externalSaveRoot,
+            &CreateFileW,
+            candidate->physicalExternalSaveRoot,
+            validationPins,
+            false)) {
+        return false;
+    }
     const auto logical = candidate->policy.Evaluate(
         PathOperation::Open,
         candidate->configuration.virtualLogicalSave);
@@ -1010,7 +1465,9 @@ bool ValidateConfiguration(
             *candidate,
             ParentPath(candidate->configuration.virtualLogicalSave),
             true)
-        || !AddStableIdentity(*candidate, candidate->configuration.realSaveRoot, true)
+        || !AddStableIdentityAtOrAbove(
+            *candidate,
+            candidate->configuration.realSaveRoot)
         || !AddStableIdentity(*candidate, candidate->configuration.externalSaveRoot, true)) {
         return false;
     }
@@ -1176,6 +1633,13 @@ SaveHookLifecycleSnapshot CurrentSaveHookLifecycle() noexcept {
             ? 0
             : context->inFlight.load(std::memory_order_acquire),
     };
+}
+
+void SetBeforeOriginalApiCallback(
+    const BeforeOriginalApiCallback callback,
+    void* state) noexcept {
+    beforeOriginalApiState.store(state, std::memory_order_release);
+    beforeOriginalApiCallback.store(callback, std::memory_order_release);
 }
 
 void HoldSaveHookCallback(void* enteredEvent, void* releaseEvent) noexcept {

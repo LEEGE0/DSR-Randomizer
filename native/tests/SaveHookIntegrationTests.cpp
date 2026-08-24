@@ -179,6 +179,30 @@ bool WriteFixtureFile(
     return succeeded && written == contents.size();
 }
 
+struct RootSwapAttempt {
+    std::wstring approvedRoot;
+    std::wstring savedApprovedRoot;
+    std::wstring outsideRoot;
+    bool attempted = false;
+    bool succeeded = false;
+};
+
+void AttemptRootSwap(void* state) noexcept {
+    DSRRandomizer::Save::Testing::SetBeforeOriginalApiCallback(nullptr, nullptr);
+    auto& attempt = *static_cast<RootSwapAttempt*>(state);
+    attempt.attempted = true;
+    if (!MoveFileW(
+            attempt.approvedRoot.c_str(),
+            attempt.savedApprovedRoot.c_str())) {
+        return;
+    }
+    if (MoveFileW(attempt.outsideRoot.c_str(), attempt.approvedRoot.c_str())) {
+        attempt.succeeded = true;
+        return;
+    }
+    MoveFileW(attempt.savedApprovedRoot.c_str(), attempt.approvedRoot.c_str());
+}
+
 fs::path CreateTemporaryRoot() {
     std::array<wchar_t, 32768> temporary{};
     const auto length = GetTempPathW(
@@ -469,6 +493,113 @@ int VerifyHookInstallRollback(const fs::path& root) {
     return 0;
 }
 
+int VerifyMissingRealRootIsAllowed(const fs::path& root) {
+    auto configuration = HookConfigurationFor(root);
+    configuration.realSaveRoot = (root / L"missing-real-normal").native();
+    if (fs::exists(configuration.realSaveRoot)) {
+        return Fail("missing real root fixture unexpectedly exists");
+    }
+    if (DSRRandomizer::Save::InstallSaveHooks(configuration)
+        != SaveHookInstallStatus::Success) {
+        return Fail("missing real root configuration was rejected");
+    }
+    if (DSRRandomizer::Save::UninstallSaveHooks()
+        != SaveHookCleanupStatus::Success) {
+        return Fail("missing real root configuration did not uninstall cleanly");
+    }
+    return 0;
+}
+
+int VerifyInspectUseSwapIsPinned(const fs::path& root) {
+    const auto testRoot = root / L"inspect-use";
+    const auto virtualDocuments = testRoot / L"virtual-documents";
+    const auto virtualProfile = virtualDocuments
+        / L"NBGI" / L"DARK SOULS REMASTERED" / L"12345678901234567";
+    const auto logicalSave = virtualProfile / L"DRAKS0005.sl2";
+    const auto realRoot = testRoot / L"real-normal";
+    const auto externalRoot = testRoot / L"external";
+    const auto savedExternalRoot = testRoot / L"saved-external";
+    const auto outsideRoot = testRoot / L"outside";
+    const auto dedicatedRmm = externalRoot / L"DRAKS0005.rmm";
+    const auto escapedRmm = outsideRoot / L"DRAKS0005.rmm";
+    if (!CreateDirectories(virtualProfile)
+        || !CreateDirectories(realRoot)
+        || !CreateDirectories(externalRoot)
+        || !CreateDirectories(outsideRoot)
+        || !WriteFixtureFile(dedicatedRmm, "approved-save")
+        || !WriteFixtureFile(escapedRmm, "outside-save")) {
+        return Fail("inspect/use swap fixture setup failed");
+    }
+
+    const SaveHookConfiguration configuration{
+        virtualDocuments.native(),
+        logicalSave.native(),
+        realRoot.native(),
+        externalRoot.native(),
+        dedicatedRmm.native(),
+        false,
+    };
+    if (DSRRandomizer::Save::InstallSaveHooks(configuration)
+        != SaveHookInstallStatus::Success) {
+        return Fail("inspect/use swap hooks did not install");
+    }
+
+    RootSwapAttempt attempt{
+        dedicatedRmm.native(),
+        (savedExternalRoot / L"DRAKS0005.rmm").native(),
+        escapedRmm.native(),
+    };
+    if (!CreateDirectories(savedExternalRoot)) {
+        return Fail("inspect/use saved-root fixture setup failed");
+    }
+    DSRRandomizer::Save::Testing::SetBeforeOriginalApiCallback(
+        &AttemptRootSwap,
+        &attempt);
+    const HANDLE file = CreateFileW(
+        logicalSave.c_str(),
+        GENERIC_WRITE,
+        FILE_SHARE_READ,
+        nullptr,
+        CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    DSRRandomizer::Save::Testing::SetBeforeOriginalApiCallback(nullptr, nullptr);
+    if (file != INVALID_HANDLE_VALUE) {
+        CloseHandle(file);
+    }
+    if (DSRRandomizer::Save::UninstallSaveHooks()
+        != SaveHookCleanupStatus::Success) {
+        return Fail("inspect/use swap hooks did not uninstall");
+    }
+
+    if (attempt.succeeded) {
+        MoveFileW(dedicatedRmm.c_str(), escapedRmm.c_str());
+        MoveFileW(
+            (savedExternalRoot / L"DRAKS0005.rmm").c_str(),
+            dedicatedRmm.c_str());
+    }
+    const bool pinWasEffective = attempt.attempted
+        && !attempt.succeeded
+        && file != INVALID_HANDLE_VALUE
+        && fs::is_regular_file(dedicatedRmm);
+    if (!pinWasEffective) {
+        std::cerr << "inspect/use state: attempted=" << attempt.attempted
+                  << " swapped=" << attempt.succeeded
+                  << " handle=" << (file != INVALID_HANDLE_VALUE)
+                  << " approved=" << fs::is_regular_file(dedicatedRmm)
+                  << " outside=" << fs::exists(escapedRmm) << '\n';
+    }
+    std::error_code cleanupError;
+    fs::remove_all(testRoot, cleanupError);
+    if (!pinWasEffective) {
+        return Fail("inspected save identity was not pinned through CreateFileW");
+    }
+    if (cleanupError) {
+        return Fail("inspect/use fixture cleanup failed");
+    }
+    return 0;
+}
+
 int RunFixture(const wchar_t* fixturePath, const wchar_t* guardPath) {
     const TemporaryRoot root(CreateTemporaryRoot());
     if (root.Path().empty()) {
@@ -482,20 +613,33 @@ int RunFixture(const wchar_t* fixturePath, const wchar_t* guardPath) {
     const auto realSaveRoot = root.Path() / L"real-normal";
     const auto realProfile = realSaveRoot / L"12345678901234567";
     const auto realSave = realProfile / L"DRAKS0005.sl2";
+    const auto realAliasTarget = realSaveRoot / L"alias-target.bin";
     const auto overhaulSave = virtualProfile / L"DRAKS0005.sl2.overhaul.sl2";
     const auto externalRoot = root.Path() / L"external";
     const auto escapeTarget = root.Path() / L"escape-target";
     const auto dedicatedRmm = externalRoot / L"DRAKS0005.rmm";
+    const auto prohibitedPhysical = externalRoot
+        / L"DRAKS0005.sl2.overhaul.sl2";
     if (!CreateDirectories(virtualProfile)
         || !CreateDirectories(realProfile)
         || !CreateDirectories(externalRoot)
         || !CreateDirectories(escapeTarget)
-        || !WriteFixtureFile(dedicatedRmm, "preexisting-rmm")) {
+        || !WriteFixtureFile(realAliasTarget, "real-root-alias-target")
+        || !WriteFixtureFile(dedicatedRmm, "preexisting-rmm")
+        || !WriteFixtureFile(prohibitedPhysical, "physical-prohibited")) {
         return Fail("unable to create fixture directories");
     }
     if (const auto rollbackResult = VerifyHookInstallRollback(root.Path());
         rollbackResult != 0) {
         return rollbackResult;
+    }
+    if (const auto missingRootResult = VerifyMissingRealRootIsAllowed(root.Path());
+        missingRootResult != 0) {
+        return missingRootResult;
+    }
+    if (const auto pinResult = VerifyInspectUseSwapIsPinned(root.Path());
+        pinResult != 0) {
+        return pinResult;
     }
 
     const auto pipeName = L"\\\\.\\pipe\\DSRRandomizer-SaveHook-"
@@ -610,6 +754,16 @@ int RunFixture(const wchar_t* fixturePath, const wchar_t* guardPath) {
     if (!fs::is_regular_file(dedicatedRmm)
         || fs::file_size(dedicatedRmm) != std::string_view("rmm-save-hook-sentinel").size()) {
         return Fail("dedicated rmm sentinel was not created");
+    }
+    std::error_code prohibitedRemoveError;
+    if (!fs::remove(prohibitedPhysical, prohibitedRemoveError)
+        || prohibitedRemoveError) {
+        return Fail("unable to remove prohibited enumeration fixture");
+    }
+    std::error_code aliasTargetRemoveError;
+    if (!fs::remove(realAliasTarget, aliasTargetRemoveError)
+        || aliasTargetRemoveError) {
+        return Fail("unable to remove real-root alias fixture");
     }
     if (fs::exists(logicalSave) || fs::exists(realSave) || fs::exists(overhaulSave)) {
         return Fail("fixture wrote a prohibited save path");

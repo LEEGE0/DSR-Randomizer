@@ -180,16 +180,62 @@ bool IsAccessDeniedMove(
 
 bool IsAccessDeniedReplace(
     const std::wstring_view replaced,
-    const std::wstring_view replacement) {
+    const std::wstring_view replacement,
+    const wchar_t* backup = nullptr) {
     SetLastError(ERROR_SUCCESS);
     return !ReplaceFileW(
                std::wstring(replaced).c_str(),
                std::wstring(replacement).c_str(),
-               nullptr,
+               backup,
                REPLACEFILE_WRITE_THROUGH,
                nullptr,
                nullptr)
         && GetLastError() == ERROR_ACCESS_DENIED;
+}
+
+bool FindOnlyLogicalSave(const std::wstring_view pattern) {
+    WIN32_FIND_DATAW data{};
+    SetLastError(ERROR_SUCCESS);
+    const HANDLE find = FindFirstFileExW(
+        std::wstring(pattern).c_str(),
+        FindExInfoBasic,
+        &data,
+        FindExSearchNameMatch,
+        nullptr,
+        0);
+    if (find == INVALID_HANDLE_VALUE
+        || std::wstring_view(data.cFileName) != L"DRAKS0005.sl2"
+        || data.cAlternateFileName[0] != L'\0') {
+        if (find != INVALID_HANDLE_VALUE) {
+            FindClose(find);
+        }
+        return false;
+    }
+
+    SetLastError(ERROR_SUCCESS);
+    const bool noSecondEntry = !FindNextFileW(find, &data)
+        && GetLastError() == ERROR_NO_MORE_FILES;
+    FindClose(find);
+    return noSecondEntry;
+}
+
+bool FindUnrelatedFile(
+    const std::wstring_view pattern,
+    const std::wstring_view expectedName) {
+    WIN32_FIND_DATAW data{};
+    const HANDLE find = FindFirstFileExW(
+        std::wstring(pattern).c_str(),
+        FindExInfoBasic,
+        &data,
+        FindExSearchNameMatch,
+        nullptr,
+        0);
+    if (find == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    const bool matched = std::wstring_view(data.cFileName) == expectedName;
+    FindClose(find);
+    return matched;
 }
 
 #pragma pack(push, 1)
@@ -477,8 +523,8 @@ int VerifyGuardedReparseFailures(
     }
 
     const auto unrelatedTarget = escapeTarget + L"\\unrelated-target";
-    const auto unrelatedLink = externalRoot + L"\\unrelated-link";
-    const auto renamedLink = externalRoot + L"\\renamed-link";
+    const auto unrelatedLink = escapeTarget + L"\\unrelated-link";
+    const auto renamedLink = escapeTarget + L"\\renamed-link";
     if (!CreateDirectoryIfMissing(unrelatedTarget)
         || !CreateJunction(unrelatedLink, unrelatedTarget)
         || !MoveFileExW(
@@ -555,6 +601,50 @@ int RunFileOperations(
         return 22;
     }
 
+    const auto realProfileSeparator = realSave.find_last_of(L'\\');
+    const auto realProfile = realSave.substr(0, realProfileSeparator);
+    const auto realRootSeparator = realProfile.find_last_of(L'\\');
+    const auto realRoot = realProfile.substr(0, realRootSeparator);
+    const auto outsideAlias = escapeTarget + L"\\outside-real-alias";
+    if (!CreateJunction(outsideAlias, realRoot)) {
+        return 73;
+    }
+    const bool outsideAliasDenied = IsAccessDeniedAttributes(
+        outsideAlias + L"\\alias-target.bin");
+    if (!RemoveDirectoryW(outsideAlias.c_str())) {
+        return 74;
+    }
+    if (!outsideAliasDenied) {
+        return 75;
+    }
+
+    const auto profileSeparator = logicalSave.find_last_of(L'\\');
+    const auto logicalProfile = logicalSave.substr(0, profileSeparator);
+    const auto hiddenPhysical = externalRoot + L"\\physical-only.tmp";
+    const auto unrelatedDirectory = escapeTarget + L"\\unrelated-enumeration";
+    const auto unrelatedFile = unrelatedDirectory + L"\\caller-visible.tmp";
+    if (!WriteExact(hiddenPhysical, "hidden")
+        || !CreateDirectoryIfMissing(unrelatedDirectory)
+        || !WriteExact(unrelatedFile, "unrelated")) {
+        return 65;
+    }
+    if (!FindOnlyLogicalSave(logicalProfile + L"\\*")) {
+        return 70;
+    }
+    if (!FindOnlyLogicalSave(logicalProfile + L"\\DRAKS0005.*")) {
+        return 71;
+    }
+    if (!FindUnrelatedFile(
+            unrelatedDirectory + L"\\*.tmp",
+            L"caller-visible.tmp")) {
+        return 72;
+    }
+    if (!RemoveFileIfPresent(hiddenPhysical)
+        || !RemoveFileIfPresent(unrelatedFile)
+        || !RemoveDirectoryW(unrelatedDirectory.c_str())) {
+        return 66;
+    }
+
     WIN32_FILE_ATTRIBUTE_DATA attributes{};
     if (!GetFileAttributesExW(
             logicalSave.c_str(),
@@ -579,6 +669,33 @@ int RunFileOperations(
     FindClose(find);
     if (std::wstring_view(findData.cFileName) != L"DRAKS0005.sl2") {
         return 25;
+    }
+
+    const auto outsideMoveDestination = escapeTarget + L"\\outside-move.tmp";
+    const auto outsideMoveSource = escapeTarget + L"\\outside-source.tmp";
+    const auto outsideReplacement = escapeTarget + L"\\outside-replacement.tmp";
+    const auto outsideBackup = escapeTarget + L"\\outside-backup.tmp";
+    const auto guardedReplacement = externalRoot + L"\\guarded-replacement.tmp";
+    if (!WriteExact(outsideMoveSource, "outside-source")
+        || !WriteExact(outsideReplacement, "outside-replacement")
+        || !WriteExact(guardedReplacement, "guarded-replacement")) {
+        return 67;
+    }
+    if (!IsAccessDeniedMove(logicalSave, outsideMoveDestination)
+        || !IsAccessDeniedMove(outsideMoveSource, logicalSave)
+        || !IsAccessDeniedReplace(logicalSave, outsideReplacement)
+        || !IsAccessDeniedReplace(
+            logicalSave,
+            guardedReplacement,
+            outsideBackup.c_str())) {
+        return 68;
+    }
+    if (!RemoveFileIfPresent(outsideMoveSource)
+        || !RemoveFileIfPresent(outsideReplacement)
+        || !RemoveFileIfPresent(guardedReplacement)
+        || !RemoveFileIfPresent(outsideMoveDestination)
+        || !RemoveFileIfPresent(outsideBackup)) {
+        return 69;
     }
 
     const auto moved = externalRoot + L"\\move-stage.tmp";

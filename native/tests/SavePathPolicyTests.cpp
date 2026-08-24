@@ -138,6 +138,18 @@ int main() {
             && decision.EffectivePath() != test.expectedRedirect) {
             return Fail(test, decision.EffectivePath());
         }
+        if (test.expectedKind == PathDecisionKind::Deny
+            && !decision.EffectivePath().empty()) {
+            return Fail(test, decision.EffectivePath());
+        }
+    }
+
+    const auto normalizedAllow = policy.Evaluate(
+        PathOperation::Open,
+        L"C:/External/unrelated.txt");
+    if (normalizedAllow.kind != PathDecisionKind::Allow
+        || normalizedAllow.EffectivePath() != L"C:\\External\\unrelated.txt") {
+        return FailConfiguration("allow decision did not expose normalized effective path");
     }
 
     struct ConfigurationCase {

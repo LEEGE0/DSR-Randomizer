@@ -28,6 +28,9 @@ public sealed class DedicatedSaveService
     private readonly WriteBoundary _boundary;
     private readonly SaveSelectionStore _selectionStore;
     private readonly IFileAccess _files;
+    private readonly object _sessionLeaseGate = new();
+    private readonly Dictionary<string, LiveSessionLease> _liveSessionLeases =
+        new(StringComparer.Ordinal);
 
     public DedicatedSaveService(
         LocalDataLayout layout,
@@ -178,20 +181,20 @@ public sealed class DedicatedSaveService
             {
                 EnsureExternal(locations.ArchiveDirectory, archiveSave.Path, archiveMetadata.Path);
                 if (!_files.MoveCreateNewIfIdentityMatches(
-                        oldMetadata.Path,
-                        archiveMetadata.Path,
-                        oldMetadata.Identity))
-                {
-                    throw new IOException("Existing metadata ownership changed before archive.");
-                }
-
-                cancellationToken.ThrowIfCancellationRequested();
-                if (!_files.MoveCreateNewIfIdentityMatches(
                         oldSave.Path,
                         archiveSave.Path,
                         oldSave.Identity))
                 {
                     throw new IOException("Existing save ownership changed before archive.");
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!_files.MoveCreateNewIfIdentityMatches(
+                        oldMetadata.Path,
+                        archiveMetadata.Path,
+                        oldMetadata.Identity))
+                {
+                    throw new IOException("Existing metadata ownership changed before archive.");
                 }
 
                 cancellationToken.ThrowIfCancellationRequested();
@@ -233,7 +236,7 @@ public sealed class DedicatedSaveService
             }
             catch (Exception exception)
             {
-                await RollBackResetAsync(
+                var rollbackSucceeded = await RollBackResetAsync(
                     oldSave,
                     oldMetadata,
                     archiveSave,
@@ -241,6 +244,13 @@ public sealed class DedicatedSaveService
                     newSave,
                     newMetadata,
                     metadataTemporary);
+
+                if (!rollbackSucceeded)
+                {
+                    return DedicatedSaveResult.Fail(
+                        SaveErrorCode.RecoveryRequired,
+                        $"Reset failed and the previous save/metadata pair could not be restored; recovery is required. {exception.Message}");
+                }
 
                 if (exception is OperationCanceledException)
                 {
@@ -265,6 +275,14 @@ public sealed class DedicatedSaveService
         string steamId,
         CancellationToken cancellationToken)
     {
+        lock (_sessionLeaseGate)
+        {
+            if (_liveSessionLeases.ContainsKey(steamId))
+            {
+                return SessionAlreadyActive();
+            }
+        }
+
         var prepared = await PrepareAsync(steamId, cancellationToken);
         if (!prepared.Ready)
         {
@@ -273,13 +291,24 @@ public sealed class DedicatedSaveService
 
         OwnedFile? sessionTemporary = null;
         OwnedFile? publishedSession = null;
+        IFileMutationLease? retainedLease = null;
         try
         {
             var locations = ResolveLocations(steamId);
-            using var sessionLease = _files.AcquireMutationLease(
-                _layout.Root,
-                [locations.SaveDirectory]);
-            sessionLease.Verify();
+            try
+            {
+                retainedLease = _files.AcquireMutationLease(
+                    _layout.Root,
+                    [locations.SaveDirectory]);
+                retainedLease.Verify();
+            }
+            catch (IOException exception)
+            {
+                retainedLease?.Dispose();
+                retainedLease = null;
+                return SessionAlreadyActive(exception.Message);
+            }
+
             var metadata = await ReadMetadataAsync(locations.MetadataPath, cancellationToken);
             if (metadata is null)
             {
@@ -314,6 +343,17 @@ public sealed class DedicatedSaveService
                 locations,
                 metadata with { CleanExit = false },
                 cancellationToken);
+
+            var liveSession = new LiveSessionLease(sessionToken, retainedLease);
+            lock (_sessionLeaseGate)
+            {
+                if (!_liveSessionLeases.TryAdd(steamId, liveSession))
+                {
+                    return SessionAlreadyActive();
+                }
+
+                retainedLease = null;
+            }
             return new DedicatedSaveSessionResult(
                 Ready(locations.DedicatedPath, prepared.ReusedExisting),
                 sessionToken);
@@ -340,6 +380,7 @@ public sealed class DedicatedSaveService
         finally
         {
             SafeDelete(sessionTemporary);
+            retainedLease?.Dispose();
         }
     }
 
@@ -349,20 +390,30 @@ public sealed class DedicatedSaveService
         bool normalGuardedExit,
         CancellationToken cancellationToken)
     {
-        if (!normalGuardedExit)
+        LiveSessionLease liveSession;
+        lock (_sessionLeaseGate)
         {
-            return DedicatedSaveResult.Fail(
-                SaveErrorCode.ExistingSaveInvalid,
-                "The guarded session did not exit normally.");
+            if (string.IsNullOrWhiteSpace(sessionToken)
+                || !_liveSessionLeases.TryGetValue(steamId, out liveSession!)
+                || !liveSession.SessionToken.Equals(sessionToken, StringComparison.Ordinal))
+            {
+                return DedicatedSaveResult.Fail(
+                    SaveErrorCode.ExistingSaveInvalid,
+                    "No matching live session lease is active.");
+            }
         }
 
         try
         {
             var locations = ResolveLocations(steamId);
-            using var sessionLease = _files.AcquireMutationLease(
-                _layout.Root,
-                [locations.SaveDirectory]);
-            sessionLease.Verify();
+            liveSession.Lease.Verify();
+            if (!normalGuardedExit)
+            {
+                return DedicatedSaveResult.Fail(
+                    SaveErrorCode.ExistingSaveInvalid,
+                    "The guarded session did not exit normally.");
+            }
+
             if (!_files.Exists(locations.DedicatedPath))
             {
                 return DedicatedSaveResult.Fail(
@@ -370,8 +421,7 @@ public sealed class DedicatedSaveService
                     "Dedicated save is missing.");
             }
 
-            if (string.IsNullOrWhiteSpace(sessionToken)
-                || !_files.Exists(locations.SessionStatePath))
+            if (!_files.Exists(locations.SessionStatePath))
             {
                 return DedicatedSaveResult.Fail(
                     SaveErrorCode.ExistingSaveInvalid,
@@ -433,6 +483,32 @@ public sealed class DedicatedSaveService
         catch (Exception exception) when (exception is IOException or JsonException)
         {
             return DedicatedSaveResult.Fail(SaveErrorCode.ExistingSaveInvalid, exception.Message);
+        }
+        finally
+        {
+            ReleaseLiveSession(steamId, liveSession);
+        }
+    }
+
+    private DedicatedSaveSessionResult SessionAlreadyActive(string message = "") =>
+        new(
+            DedicatedSaveResult.Fail(
+                SaveErrorCode.SessionAlreadyActive,
+                string.IsNullOrWhiteSpace(message)
+                    ? "A guarded session is already active for this profile."
+                    : $"A guarded session lease could not be acquired: {message}"),
+            null);
+
+    private void ReleaseLiveSession(string steamId, LiveSessionLease expected)
+    {
+        lock (_sessionLeaseGate)
+        {
+            if (_liveSessionLeases.TryGetValue(steamId, out var current)
+                && ReferenceEquals(current, expected))
+            {
+                _liveSessionLeases.Remove(steamId);
+                current.Lease.Dispose();
+            }
         }
     }
 
@@ -562,6 +638,7 @@ public sealed class DedicatedSaveService
             _layout.Staging,
             $"DRAKS0005.{locations.SteamId}.{Guid.NewGuid():N}.stage");
         var stagedForCaller = false;
+        OwnedFile? createdStage = null;
 
         try
         {
@@ -588,9 +665,14 @@ public sealed class DedicatedSaveService
                     "Selected normal save has an unsupported length.");
             }
 
-            await _files.CopyAndFlushAsync(source, stagedPath, cancellationToken);
+            var created = await _files.CopyAndFlushAsync(
+                source,
+                stagedPath,
+                cancellationToken);
+            createdStage = new OwnedFile(stagedPath, created.Identity);
             var staged = await _files.IdentityAndHashAsync(stagedPath, cancellationToken);
-            if (!MatchesContent(before, staged))
+            if (!staged.Identity.Equals(created.Identity, StringComparison.Ordinal)
+                || !MatchesContent(before, staged))
             {
                 return StageResult.Fail(
                     SaveErrorCode.CopyVerificationFailed,
@@ -609,7 +691,7 @@ public sealed class DedicatedSaveService
 
             stagedForCaller = true;
             return new StageResult(
-                new OwnedFile(stagedPath, staged.Identity),
+                createdStage,
                 before,
                 null);
         }
@@ -629,7 +711,7 @@ public sealed class DedicatedSaveService
         {
             if (!stagedForCaller)
             {
-                await DeleteUniqueFileIfPresentAsync(stagedPath);
+                SafeDelete(createdStage);
             }
         }
     }
@@ -751,7 +833,7 @@ public sealed class DedicatedSaveService
             cancellationToken);
     }
 
-    private async Task RollBackResetAsync(
+    private async Task<bool> RollBackResetAsync(
         OwnedFile oldSave,
         OwnedFile oldMetadata,
         OwnedFile archiveSave,
@@ -768,11 +850,47 @@ public sealed class DedicatedSaveService
         var oldMetadataLive = await IsOwnedAtAsync(oldMetadata);
         if (oldSaveLive && oldMetadataLive)
         {
-            return;
+            return true;
         }
 
         var savePathOccupiedByForeign = _files.Exists(oldSave.Path) && !oldSaveLive;
         var metadataPathOccupiedByForeign = _files.Exists(oldMetadata.Path) && !oldMetadataLive;
+
+        if (savePathOccupiedByForeign || metadataPathOccupiedByForeign)
+        {
+            if (oldSaveLive)
+            {
+                await TryMoveOwnedAsync(oldSave, archiveSave.Path);
+            }
+
+            if (oldMetadataLive)
+            {
+                await TryMoveOwnedAsync(oldMetadata, archiveMetadata.Path);
+            }
+
+            return false;
+        }
+
+        if (!oldSaveLive
+            && !_files.Exists(oldSave.Path)
+            && await IsOwnedAtAsync(archiveSave))
+        {
+            await TryMoveOwnedAsync(archiveSave, oldSave.Path);
+        }
+
+        if (!oldMetadataLive
+            && !_files.Exists(oldMetadata.Path)
+            && await IsOwnedAtAsync(archiveMetadata))
+        {
+            await TryMoveOwnedAsync(archiveMetadata, oldMetadata.Path);
+        }
+
+        oldSaveLive = await IsOwnedAtAsync(oldSave);
+        oldMetadataLive = await IsOwnedAtAsync(oldMetadata);
+        if (oldSaveLive && oldMetadataLive)
+        {
+            return true;
+        }
 
         if (oldSaveLive)
         {
@@ -784,31 +902,7 @@ public sealed class DedicatedSaveService
             await TryMoveOwnedAsync(oldMetadata, archiveMetadata.Path);
         }
 
-        if (savePathOccupiedByForeign || metadataPathOccupiedByForeign)
-        {
-            return;
-        }
-
-        if (!await IsOwnedAtAsync(archiveSave)
-            || !await IsOwnedAtAsync(archiveMetadata)
-            || _files.Exists(oldSave.Path)
-            || _files.Exists(oldMetadata.Path))
-        {
-            return;
-        }
-
-        if (!await TryMoveOwnedAsync(archiveMetadata, oldMetadata.Path))
-        {
-            return;
-        }
-
-        var restoredMetadata = new OwnedFile(oldMetadata.Path, oldMetadata.Identity);
-        if (await TryMoveOwnedAsync(archiveSave, oldSave.Path))
-        {
-            return;
-        }
-
-        await TryMoveOwnedAsync(restoredMetadata, archiveMetadata.Path);
+        return false;
     }
 
     private async Task<bool> TryMoveOwnedAsync(OwnedFile source, string destinationPath)
@@ -1018,26 +1112,6 @@ public sealed class DedicatedSaveService
         }
     }
 
-    private async Task DeleteUniqueFileIfPresentAsync(string path)
-    {
-        try
-        {
-            _boundary.EnsureAllowed(path);
-            if (!_files.Exists(path))
-            {
-                return;
-            }
-
-            var identity = await _files.IdentityAndHashAsync(path, CancellationToken.None);
-            _files.DeleteIfIdentityMatches(path, identity.Identity);
-        }
-        catch (Exception exception) when (
-            exception is IOException or UnauthorizedAccessException or FileNotFoundException)
-        {
-            // A missing or replaced unique file is not transaction-owned cleanup work.
-        }
-    }
-
     private sealed record SaveLocations(
         string SteamId,
         string SaveDirectory,
@@ -1050,6 +1124,10 @@ public sealed class DedicatedSaveService
         int SchemaVersion,
         string SteamId,
         string SessionToken);
+
+    private sealed record LiveSessionLease(
+        string SessionToken,
+        IFileMutationLease Lease);
 
     private sealed record OwnedFile(string Path, string Identity);
 

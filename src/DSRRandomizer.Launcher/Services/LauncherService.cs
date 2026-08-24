@@ -1,3 +1,4 @@
+using System.Text.Json;
 using DSRRandomizer.Foundation.Installation;
 using DSRRandomizer.Foundation.Paths;
 using DSRRandomizer.Foundation.Runtime;
@@ -121,9 +122,49 @@ public sealed class LauncherService : ILauncherService
             .ValidateAsync(cancellationToken);
     }
 
-    public Task<IReadOnlyList<SaveProfileCandidate>> DiscoverSaveProfilesAsync(
-        CancellationToken cancellationToken) =>
-        _saveProfileLocator.DiscoverAsync(cancellationToken);
+    public async Task<IReadOnlyList<SaveProfileCandidate>> DiscoverSaveProfilesAsync(
+        CancellationToken cancellationToken)
+    {
+        var profiles = (await _saveProfileLocator.DiscoverAsync(cancellationToken))
+            .ToDictionary(candidate => candidate.SteamId, StringComparer.Ordinal);
+        var components = await CreateSaveComponentsAsync(cancellationToken);
+
+        if (Directory.Exists(components.Layout.Saves))
+        {
+            foreach (var directory in Directory.EnumerateDirectories(components.Layout.Saves))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var steamId = Path.GetFileName(directory);
+                var attributes = File.GetAttributes(directory);
+                if (!IsSteamId(steamId)
+                    || (attributes & FileAttributes.ReparsePoint) != 0
+                    || !_fileAccess.Exists(Path.Combine(directory, "DRAKS0005.rmm")))
+                {
+                    continue;
+                }
+
+                profiles[steamId] = new SaveProfileCandidate(steamId, string.Empty);
+            }
+        }
+
+        try
+        {
+            var persisted = await components.SelectionStore.ReadAsync(cancellationToken);
+            if (persisted is not null && !profiles.ContainsKey(persisted.SteamId))
+            {
+                profiles[persisted.SteamId] = persisted;
+            }
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or JsonException or ArgumentException)
+        {
+            // A malformed optional selection cannot hide independently discovered profiles.
+        }
+
+        return profiles.Values
+            .OrderBy(candidate => candidate.SteamId, StringComparer.Ordinal)
+            .ToArray();
+    }
 
     public async Task<DedicatedSaveResult> PrepareDedicatedSaveAsync(
         string steamId,
@@ -201,77 +242,92 @@ public sealed class LauncherService : ILauncherService
             new SaveSelectionStore(layout, boundary));
     }
 
+    private static bool IsSteamId(string value) =>
+        value.Length is >= 16 and <= 20
+        && value.All(character => character is >= '0' and <= '9');
+
     private sealed record SaveComponents(
         WriteBoundary Boundary,
         LocalDataLayout Layout,
         SaveSelectionStore SelectionStore);
+}
 
-    private sealed class NormalSaveBlockingFileAccess(IFileAccess inner) : IFileAccess
+internal sealed class NormalSaveBlockingFileAccess(IFileAccess inner) : IFileAccess
+{
+    public bool Exists(string path) => IsNormalSave(path) ? false : inner.Exists(path);
+
+    public IFileMutationLease AcquireMutationLease(
+        string rootPath,
+        IReadOnlyCollection<string> directoryPaths) =>
+        inner.AcquireMutationLease(rootPath, directoryPaths);
+
+    public FileAttributes GetAttributes(string path)
     {
-        public bool Exists(string path) => IsNormalSave(path) ? false : inner.Exists(path);
-
-        public IFileMutationLease AcquireMutationLease(
-            string rootPath,
-            IReadOnlyCollection<string> directoryPaths) =>
-            inner.AcquireMutationLease(rootPath, directoryPaths);
-
-        public FileAttributes GetAttributes(string path) => inner.GetAttributes(path);
-
-        public Stream Open(string path, FileMode mode, FileAccess access, FileShare share)
-        {
-            if (IsNormalSave(path))
-            {
-                throw new UnauthorizedAccessException(
-                    "The normal DRAKS0005.sl2 save cannot be opened before first-copy confirmation.");
-            }
-
-            return inner.Open(path, mode, access, share);
-        }
-
-        public Task<FileIdentityAndHash> IdentityAndHashAsync(
-            Stream stream,
-            CancellationToken cancellationToken) =>
-            inner.IdentityAndHashAsync(stream, cancellationToken);
-
-        public Task<FileIdentityAndHash> IdentityAndHashAsync(
-            string path,
-            CancellationToken cancellationToken) =>
-            inner.IdentityAndHashAsync(path, cancellationToken);
-
-        public Task CopyAndFlushAsync(
-            Stream source,
-            string destinationPath,
-            CancellationToken cancellationToken) =>
-            inner.CopyAndFlushAsync(source, destinationPath, cancellationToken);
-
-        public Task<CreatedFileIdentity> WriteAllBytesAndFlushAsync(
-            string path,
-            ReadOnlyMemory<byte> bytes,
-            CancellationToken cancellationToken) =>
-            inner.WriteAllBytesAndFlushAsync(path, bytes, cancellationToken);
-
-        public bool MoveCreateNewIfIdentityMatches(
-            string sourcePath,
-            string destinationPath,
-            string expectedSourceIdentity) =>
-            inner.MoveCreateNewIfIdentityMatches(
-                sourcePath,
-                destinationPath,
-                expectedSourceIdentity);
-
-        public bool ReplaceIfSourceIdentityMatches(
-            string sourcePath,
-            string destinationPath,
-            string expectedSourceIdentity) =>
-            inner.ReplaceIfSourceIdentityMatches(
-                sourcePath,
-                destinationPath,
-                expectedSourceIdentity);
-
-        public bool DeleteIfIdentityMatches(string path, string expectedIdentity) =>
-            inner.DeleteIfIdentityMatches(path, expectedIdentity);
-
-        private static bool IsNormalSave(string path) =>
-            Path.GetFileName(path).Equals("DRAKS0005.sl2", StringComparison.OrdinalIgnoreCase);
+        ThrowIfNormalSave(path);
+        return inner.GetAttributes(path);
     }
+
+    public Stream Open(string path, FileMode mode, FileAccess access, FileShare share)
+    {
+        ThrowIfNormalSave(path);
+        return inner.Open(path, mode, access, share);
+    }
+
+    public Task<FileIdentityAndHash> IdentityAndHashAsync(
+        Stream stream,
+        CancellationToken cancellationToken) =>
+        inner.IdentityAndHashAsync(stream, cancellationToken);
+
+    public Task<FileIdentityAndHash> IdentityAndHashAsync(
+        string path,
+        CancellationToken cancellationToken)
+    {
+        ThrowIfNormalSave(path);
+        return inner.IdentityAndHashAsync(path, cancellationToken);
+    }
+
+    public Task<CreatedFileIdentity> CopyAndFlushAsync(
+        Stream source,
+        string destinationPath,
+        CancellationToken cancellationToken) =>
+        inner.CopyAndFlushAsync(source, destinationPath, cancellationToken);
+
+    public Task<CreatedFileIdentity> WriteAllBytesAndFlushAsync(
+        string path,
+        ReadOnlyMemory<byte> bytes,
+        CancellationToken cancellationToken) =>
+        inner.WriteAllBytesAndFlushAsync(path, bytes, cancellationToken);
+
+    public bool MoveCreateNewIfIdentityMatches(
+        string sourcePath,
+        string destinationPath,
+        string expectedSourceIdentity) =>
+        inner.MoveCreateNewIfIdentityMatches(
+            sourcePath,
+            destinationPath,
+            expectedSourceIdentity);
+
+    public bool ReplaceIfSourceIdentityMatches(
+        string sourcePath,
+        string destinationPath,
+        string expectedSourceIdentity) =>
+        inner.ReplaceIfSourceIdentityMatches(
+            sourcePath,
+            destinationPath,
+            expectedSourceIdentity);
+
+    public bool DeleteIfIdentityMatches(string path, string expectedIdentity) =>
+        inner.DeleteIfIdentityMatches(path, expectedIdentity);
+
+    private static void ThrowIfNormalSave(string path)
+    {
+        if (IsNormalSave(path))
+        {
+            throw new UnauthorizedAccessException(
+                "The normal DRAKS0005.sl2 save cannot be opened before first-copy confirmation.");
+        }
+    }
+
+    private static bool IsNormalSave(string path) =>
+        Path.GetFileName(path).Equals("DRAKS0005.sl2", StringComparison.OrdinalIgnoreCase);
 }

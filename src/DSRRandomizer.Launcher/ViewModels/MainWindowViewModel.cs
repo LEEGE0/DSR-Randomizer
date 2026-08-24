@@ -74,12 +74,15 @@ public sealed class MainWindowViewModel : ObservableObject
         {
             if (SetProperty(ref _isBusy, value))
             {
+                OnPropertyChanged(nameof(AreSaveControlsEnabled));
                 RaiseCommandStates();
             }
         }
     }
 
     public bool CanLaunch => false;
+
+    public bool AreSaveControlsEnabled => !IsBusy;
 
     public ObservableCollection<SaveProfileCandidate> SaveProfiles { get; } = [];
 
@@ -224,9 +227,13 @@ public sealed class MainWindowViewModel : ObservableObject
                 return;
             }
 
+            var selection = SelectedSaveProfile;
+            var firstCopyConfirmed = FirstCopyConfirmed;
+            var selectedSaveSourcePath = SelectedSaveSourcePath;
+            var dedicatedSavePath = DedicatedSavePath;
             var result = await _service.PrepareDedicatedSaveAsync(
-                SelectedSaveProfile.SteamId,
-                FirstCopyConfirmed,
+                selection.SteamId,
+                firstCopyConfirmed,
                 CancellationToken.None);
             if (result.Ready)
             {
@@ -236,9 +243,9 @@ public sealed class MainWindowViewModel : ObservableObject
                 return;
             }
 
-            Status = !FirstCopyConfirmed
+            Status = !firstCopyConfirmed
                 && result.ErrorCode == SaveErrorCode.FirstCopyConfirmationRequired
-                ? $"First-copy confirmation required. Source: {SelectedSaveSourcePath} Destination: {DedicatedSavePath}"
+                ? $"First-copy confirmation required. Source: {selectedSaveSourcePath} Destination: {dedicatedSavePath}"
                 : $"Dedicated save preparation failed: {result.Message}";
         }
         catch (Exception exception)

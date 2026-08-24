@@ -36,5 +36,7 @@ public enum SaveErrorCode
     DestinationRace,
     SeedMismatch,
     PathDenied,
-    FirstCopyConfirmationRequired
+    FirstCopyConfirmationRequired,
+    RecoveryRequired,
+    SessionAlreadyActive
 }

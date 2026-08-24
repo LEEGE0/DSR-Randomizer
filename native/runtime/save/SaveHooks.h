@@ -69,6 +69,8 @@ public:
 
 namespace Testing {
 
+using BeforeOriginalApiCallback = void (*)(void*) noexcept;
+
 struct SaveHookLifecycleSnapshot {
     bool ready;
     bool contextRetained;
@@ -77,6 +79,9 @@ struct SaveHookLifecycleSnapshot {
 };
 
 [[nodiscard]] SaveHookLifecycleSnapshot CurrentSaveHookLifecycle() noexcept;
+void SetBeforeOriginalApiCallback(
+    BeforeOriginalApiCallback callback,
+    void* state) noexcept;
 void HoldSaveHookCallback(void* enteredEvent, void* releaseEvent) noexcept;
 
 }  // namespace Testing

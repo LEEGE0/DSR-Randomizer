@@ -59,6 +59,7 @@
                       MinHeight="30"
                       ItemsSource="{Binding SaveProfiles}"
                       SelectedItem="{Binding SelectedSaveProfile}"
+                      IsEnabled="{Binding AreSaveControlsEnabled}"
                       DisplayMemberPath="SteamId" />
             <TextBlock Text="Source normal save" />
             <TextBlock Margin="0,3,0,8"
@@ -70,6 +71,7 @@
                        TextWrapping="Wrap" />
             <CheckBox Margin="0,0,0,8"
                       IsChecked="{Binding FirstCopyConfirmed}"
+                      IsEnabled="{Binding AreSaveControlsEnabled}"
                       Content="I confirm the first copy from the exact source shown above." />
             <Button MinWidth="180"
                     HorizontalAlignment="Left"

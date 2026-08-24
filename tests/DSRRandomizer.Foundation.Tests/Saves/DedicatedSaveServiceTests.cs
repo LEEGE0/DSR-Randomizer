@@ -115,6 +115,29 @@ public sealed class DedicatedSaveServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task PrepareAsync_StageIsReplacedBeforeVerification_PreservesForeignWinner()
+    {
+        var fixture = await Fixture.CreateAsync(_root);
+        fixture.CreateNormalSave();
+        var foreignBytes = new byte[] { 0x46, 0x4F, 0x52, 0x45, 0x49, 0x47, 0x4E };
+        string? replacedStagePath = null;
+        fixture.Access.AfterCopy = path =>
+        {
+            replacedStagePath = path;
+            File.Delete(path);
+            File.WriteAllBytes(path, foreignBytes);
+        };
+
+        var result = await fixture.Service.PrepareAsync(fixture.SteamId, default);
+
+        Assert.False(result.Ready);
+        var stagePath = Assert.IsType<string>(replacedStagePath);
+        Assert.True(File.Exists(stagePath));
+        Assert.Equal(foreignBytes, File.ReadAllBytes(stagePath));
+        Assert.False(File.Exists(fixture.DedicatedPath));
+    }
+
+    [Fact]
     public async Task PrepareAsync_DestinationAppearsAtPublishTime_DoesNotOverwriteRaceWinner()
     {
         var fixture = await Fixture.CreateAsync(_root);
@@ -389,6 +412,28 @@ public sealed class DedicatedSaveServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task ResetForSeedAsync_PersistentSaveArchiveFailure_PreservesLivePair()
+    {
+        var fixture = await Fixture.CreateAsync(_root);
+        fixture.CreateNormalSave(fill: 0x41);
+        fixture.CreateValidExternalRmm(fill: 0x22, seed: Fixture.OldSeed);
+        var priorSave = File.ReadAllBytes(fixture.DedicatedPath);
+        var priorMetadata = File.ReadAllBytes(fixture.MetadataPath);
+        fixture.Access.FailSaveArchiveMoves = true;
+
+        var result = await fixture.Service.ResetForSeedAsync(
+            fixture.SteamId,
+            Fixture.NewSeed,
+            default);
+
+        Assert.False(result.Ready);
+        Assert.Equal(priorSave, File.ReadAllBytes(fixture.DedicatedPath));
+        Assert.Equal(priorMetadata, File.ReadAllBytes(fixture.MetadataPath));
+        var archive = Path.Combine(fixture.SaveDirectory, "archive");
+        Assert.Empty(Directory.EnumerateFiles(archive));
+    }
+
+    [Fact]
     public async Task ResetForSeedAsync_MetadataPublishFailure_RestoresPreviousSaveAndMetadata()
     {
         var fixture = await Fixture.CreateAsync(_root);
@@ -644,6 +689,12 @@ public sealed class DedicatedSaveServiceTests : IDisposable
         Assert.False(string.IsNullOrWhiteSpace(result.SessionToken));
         Assert.False(fixture.ReadMetadata().CleanExit);
         Assert.True(fixture.Access.MetadataReplaceCompleted);
+
+        await fixture.Service.CompleteSessionAsync(
+            fixture.SteamId,
+            result.SessionToken!,
+            normalGuardedExit: false,
+            default);
     }
 
     [Fact]
@@ -705,25 +756,30 @@ public sealed class DedicatedSaveServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task CompleteSessionAsync_StaleBeginToken_DoesNotCompleteNewerSession()
+    public async Task BeginSessionAsync_OverlappingBeginIsRejectedAndCannotCompleteFirstLease()
     {
         var fixture = await Fixture.CreateAsync(_root);
         fixture.CreateValidExternalRmm();
         var first = await fixture.Service.BeginSessionAsync(fixture.SteamId, default);
         var second = await fixture.Service.BeginSessionAsync(fixture.SteamId, default);
 
-        var stale = await fixture.Service.CompleteSessionAsync(
+        Assert.True(first.Ready);
+        Assert.False(second.Ready);
+        Assert.Equal(SaveErrorCode.SessionAlreadyActive, second.ErrorCode);
+        Assert.Null(second.SessionToken);
+
+        var rejectedCompletion = await fixture.Service.CompleteSessionAsync(
             fixture.SteamId,
-            first.SessionToken!,
+            Guid.NewGuid().ToString("N"),
             normalGuardedExit: true,
             default);
 
-        Assert.False(stale.Ready);
+        Assert.False(rejectedCompletion.Ready);
         Assert.False(fixture.ReadMetadata().CleanExit);
 
         var current = await fixture.Service.CompleteSessionAsync(
             fixture.SteamId,
-            second.SessionToken!,
+            first.SessionToken!,
             normalGuardedExit: true,
             default);
         Assert.True(current.Ready);
@@ -892,6 +948,7 @@ public sealed class DedicatedSaveServiceTests : IDisposable
         public string? RaceDestinationPath { get; set; }
         public byte[]? RaceDestinationBytes { get; set; }
         public bool FailNextMetadataReplace { get; set; }
+        public bool FailSaveArchiveMoves { get; set; }
         public bool FailMetadataWriteAfterCreate { get; set; }
         public byte[]? ReplaceMetadataTemporaryBeforeWriteFailure { get; set; }
         public string? ReplacedMetadataTemporaryPath { get; private set; }
@@ -967,52 +1024,63 @@ public sealed class DedicatedSaveServiceTests : IDisposable
             return inner.IdentityAndHashAsync(Map(path), cancellationToken);
         }
 
-        public async Task CopyAndFlushAsync(
+        public async Task<CreatedFileIdentity> CopyAndFlushAsync(
             Stream source,
             string destinationPath,
             CancellationToken cancellationToken)
         {
+            CreatedFileIdentity created;
             if (CopyBehavior == CopyBehavior.Normal)
             {
                 ObserveMutation(destinationPath);
-                await inner.CopyAndFlushAsync(source, Map(destinationPath), cancellationToken);
+                created = await inner.CopyAndFlushAsync(
+                    source,
+                    Map(destinationPath),
+                    cancellationToken);
             }
             else
             {
                 source.Position = 0;
-                await using var destination = inner.Open(
-                    destinationPath,
-                    FileMode.CreateNew,
-                    FileAccess.Write,
-                    FileShare.None);
-                var remaining = CopyBehavior == CopyBehavior.Short
-                    ? Math.Max(0, source.Length - 1)
-                    : source.Length;
-                var buffer = new byte[81920];
-                while (remaining > 0)
+                await using (var destination = inner.Open(
+                                 Map(destinationPath),
+                                 FileMode.CreateNew,
+                                 FileAccess.Write,
+                                 FileShare.None))
                 {
-                    var read = await source.ReadAsync(
-                        buffer.AsMemory(0, (int)Math.Min(buffer.Length, remaining)),
-                        cancellationToken);
-                    if (read == 0)
+                    var remaining = CopyBehavior == CopyBehavior.Short
+                        ? Math.Max(0, source.Length - 1)
+                        : source.Length;
+                    var buffer = new byte[81920];
+                    while (remaining > 0)
                     {
-                        break;
+                        var read = await source.ReadAsync(
+                            buffer.AsMemory(0, (int)Math.Min(buffer.Length, remaining)),
+                            cancellationToken);
+                        if (read == 0)
+                        {
+                            break;
+                        }
+
+                        await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+                        remaining -= read;
                     }
 
-                    await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
-                    remaining -= read;
-                }
+                    if (CopyBehavior == CopyBehavior.CorruptSameLength)
+                    {
+                        destination.Position = 0;
+                        await destination.WriteAsync(new byte[] { 0xFF }, cancellationToken);
+                    }
 
-                if (CopyBehavior == CopyBehavior.CorruptSameLength)
-                {
-                    destination.Position = 0;
-                    await destination.WriteAsync(new byte[] { 0xFF }, cancellationToken);
+                    await destination.FlushAsync(cancellationToken);
                 }
-
-                await destination.FlushAsync(cancellationToken);
+                var identity = await inner.IdentityAndHashAsync(
+                    Map(destinationPath),
+                    cancellationToken);
+                created = new CreatedFileIdentity(identity.Identity);
             }
 
             AfterCopy?.Invoke(destinationPath);
+            return created;
         }
 
         public async Task<CreatedFileIdentity> WriteAllBytesAndFlushAsync(
@@ -1055,6 +1123,12 @@ public sealed class DedicatedSaveServiceTests : IDisposable
         {
             BeforeMoveCreateNew?.Invoke(sourcePath, destinationPath);
             ObserveMutation(destinationPath);
+            if (FailSaveArchiveMoves
+                && sourcePath.EndsWith("DRAKS0005.rmm", StringComparison.OrdinalIgnoreCase)
+                && destinationPath.Contains("archive", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new IOException("Injected persistent save archive failure.");
+            }
             var mappedSource = Map(sourcePath);
             var mappedDestination = Map(destinationPath);
             if (destinationPath.Equals(RaceDestinationPath, StringComparison.OrdinalIgnoreCase))
