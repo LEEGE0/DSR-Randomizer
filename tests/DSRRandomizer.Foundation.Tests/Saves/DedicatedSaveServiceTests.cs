@@ -21,7 +21,7 @@ public sealed class DedicatedSaveServiceTests : IDisposable
 
         var result = await fixture.Service.PrepareAsync(fixture.SteamId, default);
 
-        Assert.True(result.Ready);
+        Assert.True(result.Ready, result.Message);
         Assert.True(result.ReusedExisting);
         Assert.DoesNotContain(
             fixture.Access.Opens,
@@ -132,6 +132,93 @@ public sealed class DedicatedSaveServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task PrepareAsync_MetadataWriteFailsAfterCreatingTemp_RemovesOwnedSaveMetadataAndTemp()
+    {
+        var fixture = await Fixture.CreateAsync(_root);
+        fixture.CreateNormalSave();
+        fixture.Access.FailMetadataWriteAfterCreate = true;
+
+        var result = await fixture.Service.PrepareAsync(fixture.SteamId, default);
+
+        Assert.False(result.Ready);
+        Assert.False(File.Exists(fixture.DedicatedPath));
+        Assert.False(File.Exists(fixture.MetadataPath));
+        Assert.Empty(Directory.EnumerateFiles(fixture.SaveDirectory));
+    }
+
+    [Fact]
+    public async Task PrepareAsync_MetadataReplaceFails_RemovesOwnedSaveMetadataAndTemp()
+    {
+        var fixture = await Fixture.CreateAsync(_root);
+        fixture.CreateNormalSave();
+        fixture.Access.FailNextMetadataReplace = true;
+
+        var result = await fixture.Service.PrepareAsync(fixture.SteamId, default);
+
+        Assert.False(result.Ready);
+        Assert.False(File.Exists(fixture.DedicatedPath));
+        Assert.False(File.Exists(fixture.MetadataPath));
+        Assert.Empty(Directory.EnumerateFiles(fixture.SaveDirectory));
+    }
+
+    [Fact]
+    public async Task PrepareAsync_FinalVerificationFails_RemovesOwnedSaveAndMetadata()
+    {
+        var fixture = await Fixture.CreateAsync(_root);
+        fixture.CreateNormalSave();
+        fixture.Access.CorruptOnHashPath = fixture.DedicatedPath;
+        fixture.Access.CorruptOnHashPathCall = 1;
+
+        var result = await fixture.Service.PrepareAsync(fixture.SteamId, default);
+
+        Assert.False(result.Ready);
+        Assert.False(File.Exists(fixture.DedicatedPath));
+        Assert.False(File.Exists(fixture.MetadataPath));
+    }
+
+    [Fact]
+    public async Task PrepareAsync_CancellationAfterSavePublication_RollsBackOwnedArtifactsAndRethrows()
+    {
+        var fixture = await Fixture.CreateAsync(_root);
+        fixture.CreateNormalSave();
+        using var cancellation = new CancellationTokenSource();
+        fixture.Access.AfterMoveCreateNew = (_, destination) =>
+        {
+            if (destination.Equals(fixture.DedicatedPath, StringComparison.OrdinalIgnoreCase))
+            {
+                cancellation.Cancel();
+            }
+        };
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => fixture.Service.PrepareAsync(fixture.SteamId, cancellation.Token));
+
+        Assert.False(File.Exists(fixture.DedicatedPath));
+        Assert.False(File.Exists(fixture.MetadataPath));
+        Assert.Empty(Directory.EnumerateFiles(fixture.SaveDirectory));
+    }
+
+    [Fact]
+    public async Task PrepareAsync_MoveReportsFailureAfterPublication_RemovesExactOwnedSave()
+    {
+        var fixture = await Fixture.CreateAsync(_root);
+        fixture.CreateNormalSave();
+        fixture.Access.AfterMoveCreateNew = (_, destination) =>
+        {
+            if (destination.Equals(fixture.DedicatedPath, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new IOException("Injected post-publication move failure.");
+            }
+        };
+
+        var result = await fixture.Service.PrepareAsync(fixture.SteamId, default);
+
+        Assert.False(result.Ready);
+        Assert.False(File.Exists(fixture.DedicatedPath));
+        Assert.False(File.Exists(fixture.MetadataPath));
+    }
+
+    [Fact]
     public async Task PrepareAsync_InvalidExistingMetadata_FailsWithoutOpeningNormalSaveOrChangingDestination()
     {
         var fixture = await Fixture.CreateAsync(_root);
@@ -149,6 +236,42 @@ public sealed class DedicatedSaveServiceTests : IDisposable
             fixture.Access.Opens,
             open => open.Path.EndsWith(".sl2", StringComparison.OrdinalIgnoreCase));
         Assert.Equal(before, File.ReadAllBytes(fixture.DedicatedPath));
+    }
+
+    [Fact]
+    public async Task PrepareAsync_NullSteamIdMetadata_BlocksWithoutOpeningNormalSave()
+    {
+        var fixture = await Fixture.CreateAsync(_root);
+        fixture.CreateValidExternalRmm();
+        File.WriteAllText(
+            fixture.MetadataPath,
+            $$"""
+            {"schemaVersion":1,"steamId":null,"fixedLength":{{FixedSaveLength}},"lastKnownSha256":"{{new string('0', 64)}}","activeSeedId":null,"placementSha256":null,"cleanExit":false}
+            """);
+
+        var result = await fixture.Service.PrepareAsync(fixture.SteamId, default);
+
+        Assert.False(result.Ready);
+        Assert.Equal(SaveErrorCode.ExistingSaveInvalid, result.ErrorCode);
+        Assert.DoesNotContain(
+            fixture.Access.Opens,
+            open => open.Path.EndsWith(".sl2", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task PrepareAsync_MetadataPlacementHashIsNotHex_BlocksWithoutOpeningNormalSave()
+    {
+        var fixture = await Fixture.CreateAsync(_root);
+        fixture.CreateValidExternalRmm(
+            seed: new SeedBinding("seed", new string('z', 64)));
+
+        var result = await fixture.Service.PrepareAsync(fixture.SteamId, default);
+
+        Assert.False(result.Ready);
+        Assert.Equal(SaveErrorCode.ExistingSaveInvalid, result.ErrorCode);
+        Assert.DoesNotContain(
+            fixture.Access.Opens,
+            open => open.Path.EndsWith(".sl2", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -213,18 +336,54 @@ public sealed class DedicatedSaveServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task PrepareAsync_ParentIsSwappedAfterBoundaryValidation_LeavesOutsideTargetUntouched()
+    {
+        var fixture = await Fixture.CreateAsync(_root);
+        fixture.CreateNormalSave();
+        var outside = Path.Combine(_root, "outside");
+        var displaced = Path.Combine(_root, "displaced-save-directory");
+        Directory.CreateDirectory(outside);
+        fixture.Access.AfterMutationLeaseAcquired = path =>
+        {
+            if (!path.Equals(fixture.SaveDirectory, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            fixture.Access.ParentSwapAttempted = true;
+            try
+            {
+                Directory.Move(path, displaced);
+                Directory.CreateDirectory(path);
+                fixture.Access.RedirectFrom = path;
+                fixture.Access.RedirectTo = outside;
+            }
+            catch (IOException)
+            {
+                // A no-delete directory lease must make this interleaving fail.
+            }
+        };
+
+        await fixture.Service.PrepareAsync(fixture.SteamId, default);
+
+        Assert.True(fixture.Access.ParentSwapAttempted);
+        Assert.False(fixture.Access.RedirectedMutationObserved);
+        Assert.Empty(Directory.EnumerateFileSystemEntries(outside));
+    }
+
+    [Fact]
     public async Task ResetForSeedAsync_MetadataPublishFailure_RestoresPreviousSaveAndMetadata()
     {
         var fixture = await Fixture.CreateAsync(_root);
         fixture.CreateNormalSave(fill: 0x41);
-        fixture.CreateValidExternalRmm(fill: 0x22, seed: new SeedBinding("old-seed", "old-placement"));
+        fixture.CreateValidExternalRmm(fill: 0x22, seed: Fixture.OldSeed);
         var priorSave = File.ReadAllBytes(fixture.DedicatedPath);
         var priorMetadata = File.ReadAllBytes(fixture.MetadataPath);
         fixture.Access.FailNextMetadataReplace = true;
 
         var result = await fixture.Service.ResetForSeedAsync(
             fixture.SteamId,
-            new SeedBinding("new-seed", "new-placement"),
+            Fixture.NewSeed,
             default);
 
         Assert.False(result.Ready);
@@ -239,18 +398,18 @@ public sealed class DedicatedSaveServiceTests : IDisposable
     {
         var fixture = await Fixture.CreateAsync(_root);
         fixture.CreateNormalSave(fill: 0x41);
-        fixture.CreateValidExternalRmm(fill: 0x22, seed: new SeedBinding("old-seed", "old-placement"));
+        fixture.CreateValidExternalRmm(fill: 0x22, seed: Fixture.OldSeed);
 
         var result = await fixture.Service.ResetForSeedAsync(
             fixture.SteamId,
-            new SeedBinding("new-seed", "new-placement"),
+            Fixture.NewSeed,
             default);
 
         Assert.True(result.Ready);
         Assert.Equal(fixture.NormalBytes, File.ReadAllBytes(fixture.DedicatedPath));
         var metadata = fixture.ReadMetadata();
         Assert.Equal("new-seed", metadata.ActiveSeedId);
-        Assert.Equal("new-placement", metadata.PlacementSha256);
+        Assert.Equal(Fixture.NewSeed.PlacementSha256, metadata.PlacementSha256);
         Assert.True(metadata.CleanExit);
         Assert.Contains(
             Directory.EnumerateFiles(Path.Combine(fixture.SaveDirectory, "archive")),
@@ -262,19 +421,198 @@ public sealed class DedicatedSaveServiceTests : IDisposable
     {
         var fixture = await Fixture.CreateAsync(_root);
         fixture.CreateNormalSave(fill: 0x41);
-        fixture.CreateValidExternalRmm(fill: 0x22, seed: new SeedBinding("old-seed", "old-placement"));
+        fixture.CreateValidExternalRmm(fill: 0x22, seed: Fixture.OldSeed);
         var priorSave = File.ReadAllBytes(fixture.DedicatedPath);
         var priorMetadata = File.ReadAllBytes(fixture.MetadataPath);
-        fixture.Access.CorruptOnSecondHashPath = fixture.DedicatedPath;
+        fixture.Access.CorruptOnHashPath = fixture.DedicatedPath;
+        fixture.Access.CorruptOnHashPathCall = 3;
 
         var result = await fixture.Service.ResetForSeedAsync(
             fixture.SteamId,
-            new SeedBinding("new-seed", "new-placement"),
+            Fixture.NewSeed,
             default);
 
         Assert.False(result.Ready);
         Assert.Equal(priorSave, File.ReadAllBytes(fixture.DedicatedPath));
         Assert.Equal(priorMetadata, File.ReadAllBytes(fixture.MetadataPath));
+    }
+
+    [Theory]
+    [InlineData("placement")]
+    [InlineData("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz")]
+    public async Task ResetForSeedAsync_InvalidPlacementHash_IsRejectedBeforeSourceOpen(string placementHash)
+    {
+        var fixture = await Fixture.CreateAsync(_root);
+        fixture.CreateNormalSave();
+        fixture.CreateValidExternalRmm(seed: Fixture.OldSeed);
+
+        var result = await fixture.Service.ResetForSeedAsync(
+            fixture.SteamId,
+            new SeedBinding("new-seed", placementHash),
+            default);
+
+        Assert.False(result.Ready);
+        Assert.Equal(SaveErrorCode.SeedMismatch, result.ErrorCode);
+        Assert.DoesNotContain(
+            fixture.Access.Opens,
+            open => open.Path.EndsWith(".sl2", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task ResetForSeedAsync_CancellationAfterArchive_RestoresPreviousPairAndRethrows()
+    {
+        var fixture = await Fixture.CreateAsync(_root);
+        fixture.CreateNormalSave(fill: 0x41);
+        fixture.CreateValidExternalRmm(fill: 0x22, seed: Fixture.OldSeed);
+        var priorSave = File.ReadAllBytes(fixture.DedicatedPath);
+        var priorMetadata = File.ReadAllBytes(fixture.MetadataPath);
+        using var cancellation = new CancellationTokenSource();
+        fixture.Access.AfterMoveCreateNew = (source, destination) =>
+        {
+            if (source.Equals(fixture.DedicatedPath, StringComparison.OrdinalIgnoreCase)
+                && destination.EndsWith(".rmm", StringComparison.OrdinalIgnoreCase))
+            {
+                cancellation.Cancel();
+            }
+        };
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            fixture.Service.ResetForSeedAsync(
+                fixture.SteamId,
+                Fixture.NewSeed,
+                cancellation.Token));
+
+        Assert.True(
+            File.Exists(fixture.DedicatedPath),
+            string.Join(Environment.NewLine, Directory.EnumerateFiles(_root, "*", SearchOption.AllDirectories)));
+        Assert.Equal(priorSave, File.ReadAllBytes(fixture.DedicatedPath));
+        Assert.Equal(priorMetadata, File.ReadAllBytes(fixture.MetadataPath));
+    }
+
+    [Fact]
+    public async Task ResetForSeedAsync_CancellationAfterNewSavePublication_RestoresPreviousPairAndRethrows()
+    {
+        var fixture = await Fixture.CreateAsync(_root);
+        fixture.CreateNormalSave(fill: 0x41);
+        fixture.CreateValidExternalRmm(fill: 0x22, seed: Fixture.OldSeed);
+        var priorSave = File.ReadAllBytes(fixture.DedicatedPath);
+        var priorMetadata = File.ReadAllBytes(fixture.MetadataPath);
+        using var cancellation = new CancellationTokenSource();
+        var published = false;
+        fixture.Access.AfterMoveCreateNew = (_, destination) =>
+        {
+            if (!published
+                && destination.Equals(fixture.DedicatedPath, StringComparison.OrdinalIgnoreCase))
+            {
+                published = true;
+                cancellation.Cancel();
+            }
+        };
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            fixture.Service.ResetForSeedAsync(
+                fixture.SteamId,
+                Fixture.NewSeed,
+                cancellation.Token));
+
+        Assert.Equal(priorSave, File.ReadAllBytes(fixture.DedicatedPath));
+        Assert.Equal(priorMetadata, File.ReadAllBytes(fixture.MetadataPath));
+    }
+
+    [Fact]
+    public async Task ResetForSeedAsync_CancellationDuringPreMutationSnapshot_RemovesStagingAndPreservesPreviousPair()
+    {
+        var fixture = await Fixture.CreateAsync(_root);
+        fixture.CreateNormalSave(fill: 0x41);
+        fixture.CreateValidExternalRmm(fill: 0x22, seed: Fixture.OldSeed);
+        var priorSave = File.ReadAllBytes(fixture.DedicatedPath);
+        var priorMetadata = File.ReadAllBytes(fixture.MetadataPath);
+        using var cancellation = new CancellationTokenSource();
+        fixture.Access.BeforePathIdentityAndHash = (path, call) =>
+        {
+            if (call == 2 && path.Equals(fixture.DedicatedPath, StringComparison.OrdinalIgnoreCase))
+            {
+                cancellation.Cancel();
+            }
+        };
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            fixture.Service.ResetForSeedAsync(
+                fixture.SteamId,
+                Fixture.NewSeed,
+                cancellation.Token));
+
+        Assert.Empty(Directory.EnumerateFiles(fixture.Layout.Staging));
+        Assert.Equal(priorSave, File.ReadAllBytes(fixture.DedicatedPath));
+        Assert.Equal(priorMetadata, File.ReadAllBytes(fixture.MetadataPath));
+    }
+
+    [Fact]
+    public async Task ResetForSeedAsync_NewSaveIsReplacedBeforeRollback_PreservesForeignWinnerAndArchivesOldPair()
+    {
+        var fixture = await Fixture.CreateAsync(_root);
+        fixture.CreateNormalSave(fill: 0x41);
+        fixture.CreateValidExternalRmm(fill: 0x22, seed: Fixture.OldSeed);
+        var priorSave = File.ReadAllBytes(fixture.DedicatedPath);
+        var priorMetadata = File.ReadAllBytes(fixture.MetadataPath);
+        var foreign = fixture.Bytes(0x7B);
+        fixture.Access.CorruptOnHashPath = fixture.DedicatedPath;
+        fixture.Access.CorruptOnHashPathCall = 3;
+        var replaced = false;
+        fixture.Access.BeforeOwnedDelete = path =>
+        {
+            if (!replaced && path.Equals(fixture.DedicatedPath, StringComparison.OrdinalIgnoreCase))
+            {
+                replaced = true;
+                File.Delete(path);
+                File.WriteAllBytes(path, foreign);
+            }
+        };
+
+        var result = await fixture.Service.ResetForSeedAsync(
+            fixture.SteamId,
+            Fixture.NewSeed,
+            default);
+
+        Assert.False(result.Ready);
+        Assert.Equal(foreign, File.ReadAllBytes(fixture.DedicatedPath));
+        Assert.False(File.Exists(fixture.MetadataPath));
+        fixture.AssertArchiveContains(priorSave, priorMetadata);
+    }
+
+    [Fact]
+    public async Task ResetForSeedAsync_RaceBlocksOldSaveRestore_RearchivesOldMetadataBesideOldSave()
+    {
+        var fixture = await Fixture.CreateAsync(_root);
+        fixture.CreateNormalSave(fill: 0x41);
+        fixture.CreateValidExternalRmm(fill: 0x22, seed: Fixture.OldSeed);
+        var priorSave = File.ReadAllBytes(fixture.DedicatedPath);
+        var priorMetadata = File.ReadAllBytes(fixture.MetadataPath);
+        var foreign = fixture.Bytes(0x7C);
+        fixture.Access.CorruptOnHashPath = fixture.DedicatedPath;
+        fixture.Access.CorruptOnHashPathCall = 3;
+        var raced = false;
+        fixture.Access.BeforeMoveCreateNew = (source, destination) =>
+        {
+            if (!raced
+                && source.Contains("archive", StringComparison.OrdinalIgnoreCase)
+                && source.EndsWith(".rmm", StringComparison.OrdinalIgnoreCase)
+                && destination.Equals(fixture.DedicatedPath, StringComparison.OrdinalIgnoreCase))
+            {
+                raced = true;
+                File.WriteAllBytes(destination, foreign);
+            }
+        };
+
+        var result = await fixture.Service.ResetForSeedAsync(
+            fixture.SteamId,
+            Fixture.NewSeed,
+            default);
+
+        Assert.False(result.Ready);
+        Assert.Equal(foreign, File.ReadAllBytes(fixture.DedicatedPath));
+        Assert.False(File.Exists(fixture.MetadataPath));
+        fixture.AssertArchiveContains(priorSave, priorMetadata);
     }
 
     [Fact]
@@ -285,7 +623,8 @@ public sealed class DedicatedSaveServiceTests : IDisposable
 
         var result = await fixture.Service.BeginSessionAsync(fixture.SteamId, default);
 
-        Assert.True(result.Ready);
+        Assert.True(result.Ready, result.Message);
+        Assert.False(string.IsNullOrWhiteSpace(result.SessionToken));
         Assert.False(fixture.ReadMetadata().CleanExit);
         Assert.True(fixture.Access.MetadataReplaceCompleted);
     }
@@ -295,12 +634,13 @@ public sealed class DedicatedSaveServiceTests : IDisposable
     {
         var fixture = await Fixture.CreateAsync(_root);
         fixture.CreateValidExternalRmm();
-        await fixture.Service.BeginSessionAsync(fixture.SteamId, default);
+        var session = await fixture.Service.BeginSessionAsync(fixture.SteamId, default);
         File.WriteAllBytes(fixture.DedicatedPath, fixture.Bytes(0x66));
         var before = fixture.ReadMetadata();
 
         var result = await fixture.Service.CompleteSessionAsync(
             fixture.SteamId,
+            session.SessionToken!,
             normalGuardedExit: false,
             default);
 
@@ -314,12 +654,13 @@ public sealed class DedicatedSaveServiceTests : IDisposable
     {
         var fixture = await Fixture.CreateAsync(_root);
         fixture.CreateValidExternalRmm();
-        await fixture.Service.BeginSessionAsync(fixture.SteamId, default);
+        var session = await fixture.Service.BeginSessionAsync(fixture.SteamId, default);
         var changed = fixture.Bytes(0x66);
         File.WriteAllBytes(fixture.DedicatedPath, changed);
 
         var result = await fixture.Service.CompleteSessionAsync(
             fixture.SteamId,
+            session.SessionToken!,
             normalGuardedExit: true,
             default);
 
@@ -327,6 +668,49 @@ public sealed class DedicatedSaveServiceTests : IDisposable
         var metadata = fixture.ReadMetadata();
         Assert.True(metadata.CleanExit);
         Assert.Equal(Convert.ToHexString(SHA256.HashData(changed)).ToLowerInvariant(), metadata.LastKnownSha256);
+    }
+
+    [Fact]
+    public async Task CompleteSessionAsync_BeforeBegin_DoesNotMarkMetadataCleanAgain()
+    {
+        var fixture = await Fixture.CreateAsync(_root);
+        fixture.CreateValidExternalRmm();
+        var before = fixture.ReadMetadata();
+
+        var result = await fixture.Service.CompleteSessionAsync(
+            fixture.SteamId,
+            Guid.NewGuid().ToString("N"),
+            normalGuardedExit: true,
+            default);
+
+        Assert.False(result.Ready);
+        Assert.Equal(before, fixture.ReadMetadata());
+    }
+
+    [Fact]
+    public async Task CompleteSessionAsync_StaleBeginToken_DoesNotCompleteNewerSession()
+    {
+        var fixture = await Fixture.CreateAsync(_root);
+        fixture.CreateValidExternalRmm();
+        var first = await fixture.Service.BeginSessionAsync(fixture.SteamId, default);
+        var second = await fixture.Service.BeginSessionAsync(fixture.SteamId, default);
+
+        var stale = await fixture.Service.CompleteSessionAsync(
+            fixture.SteamId,
+            first.SessionToken!,
+            normalGuardedExit: true,
+            default);
+
+        Assert.False(stale.Ready);
+        Assert.False(fixture.ReadMetadata().CleanExit);
+
+        var current = await fixture.Service.CompleteSessionAsync(
+            fixture.SteamId,
+            second.SessionToken!,
+            normalGuardedExit: true,
+            default);
+        Assert.True(current.Ready);
+        Assert.True(fixture.ReadMetadata().CleanExit);
     }
 
     public void Dispose()
@@ -344,6 +728,10 @@ public sealed class DedicatedSaveServiceTests : IDisposable
 
     private sealed class Fixture
     {
+        public static readonly SeedBinding OldSeed =
+            new("old-seed", new string('1', 64));
+        public static readonly SeedBinding NewSeed =
+            new("new-seed", new string('2', 64));
         private static readonly JsonSerializerOptions JsonOptions = new()
         {
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase
@@ -435,6 +823,17 @@ public sealed class DedicatedSaveServiceTests : IDisposable
                 File.ReadAllBytes(MetadataPath),
                 JsonOptions)!;
 
+        public void AssertArchiveContains(byte[] save, byte[] metadata)
+        {
+            var archive = Path.Combine(SaveDirectory, "archive");
+            Assert.Contains(
+                Directory.EnumerateFiles(archive, "*.rmm"),
+                path => File.ReadAllBytes(path).SequenceEqual(save));
+            Assert.Contains(
+                Directory.EnumerateFiles(archive, "*.json"),
+                path => File.ReadAllBytes(path).SequenceEqual(metadata));
+        }
+
         public SourceState CaptureSourceState()
         {
             var info = new FileInfo(SourcePath);
@@ -476,21 +875,53 @@ public sealed class DedicatedSaveServiceTests : IDisposable
         public string? RaceDestinationPath { get; set; }
         public byte[]? RaceDestinationBytes { get; set; }
         public bool FailNextMetadataReplace { get; set; }
+        public bool FailMetadataWriteAfterCreate { get; set; }
         public bool MetadataReplaceCompleted { get; private set; }
-        public string? CorruptOnSecondHashPath { get; set; }
+        public string? CorruptOnHashPath { get; set; }
+        public int CorruptOnHashPathCall { get; set; }
+        public Action<string, int>? BeforePathIdentityAndHash { get; set; }
+        public Action<string, string>? AfterMoveCreateNew { get; set; }
+        public Action<string, string>? BeforeMoveCreateNew { get; set; }
+        public Action<string>? BeforeOwnedDelete { get; set; }
+        public Action<string>? AfterMutationLeaseAcquired { get; set; }
+        public bool ParentSwapAttempted { get; set; }
+        public string? RedirectFrom { get; set; }
+        public string? RedirectTo { get; set; }
+        public bool RedirectedMutationObserved { get; private set; }
         private Dictionary<string, int> HashPathCounts { get; } =
             new(StringComparer.OrdinalIgnoreCase);
 
-        public bool Exists(string path) => inner.Exists(path);
+        public bool Exists(string path) => inner.Exists(Map(path));
 
-        public void CreateDirectory(string path) => inner.CreateDirectory(path);
+        public IFileMutationLease AcquireMutationLease(
+            string rootPath,
+            IReadOnlyCollection<string> directoryPaths)
+        {
+            var lease = inner.AcquireMutationLease(
+                Map(rootPath),
+                directoryPaths.Select(Map).ToArray());
+            try
+            {
+                foreach (var directoryPath in directoryPaths)
+                {
+                    AfterMutationLeaseAcquired?.Invoke(directoryPath);
+                }
 
-        public FileAttributes GetAttributes(string path) => inner.GetAttributes(path);
+                return lease;
+            }
+            catch
+            {
+                lease.Dispose();
+                throw;
+            }
+        }
+
+        public FileAttributes GetAttributes(string path) => inner.GetAttributes(Map(path));
 
         public Stream Open(string path, FileMode mode, FileAccess access, FileShare share)
         {
             Opens.Add(new OpenObservation(Path.GetFullPath(path), mode, access, share));
-            return inner.Open(path, mode, access, share);
+            return inner.Open(Map(path), mode, access, share);
         }
 
         public Task<FileIdentityAndHash> IdentityAndHashAsync(
@@ -505,15 +936,16 @@ public sealed class DedicatedSaveServiceTests : IDisposable
             HashPathCounts.TryGetValue(path, out var count);
             count++;
             HashPathCounts[path] = count;
-            if (count == 2
-                && path.Equals(CorruptOnSecondHashPath, StringComparison.OrdinalIgnoreCase))
+            BeforePathIdentityAndHash?.Invoke(path, count);
+            if (count == CorruptOnHashPathCall
+                && path.Equals(CorruptOnHashPath, StringComparison.OrdinalIgnoreCase))
             {
                 var bytes = File.ReadAllBytes(path);
                 bytes[0] ^= 0xFF;
                 File.WriteAllBytes(path, bytes);
             }
 
-            return inner.IdentityAndHashAsync(path, cancellationToken);
+            return inner.IdentityAndHashAsync(Map(path), cancellationToken);
         }
 
         public async Task CopyAndFlushAsync(
@@ -523,7 +955,8 @@ public sealed class DedicatedSaveServiceTests : IDisposable
         {
             if (CopyBehavior == CopyBehavior.Normal)
             {
-                await inner.CopyAndFlushAsync(source, destinationPath, cancellationToken);
+                ObserveMutation(destinationPath);
+                await inner.CopyAndFlushAsync(source, Map(destinationPath), cancellationToken);
             }
             else
             {
@@ -563,25 +996,53 @@ public sealed class DedicatedSaveServiceTests : IDisposable
             AfterCopy?.Invoke(destinationPath);
         }
 
-        public Task WriteAllBytesAndFlushAsync(
+        public async Task WriteAllBytesAndFlushAsync(
             string path,
             ReadOnlyMemory<byte> bytes,
-            CancellationToken cancellationToken) =>
-            inner.WriteAllBytesAndFlushAsync(path, bytes, cancellationToken);
-
-        public void MoveCreateNew(string sourcePath, string destinationPath)
+            CancellationToken cancellationToken)
         {
+            ObserveMutation(path);
+            await inner.WriteAllBytesAndFlushAsync(Map(path), bytes, cancellationToken);
+            if (FailMetadataWriteAfterCreate
+                && Path.GetFileName(path).StartsWith("save-metadata.", StringComparison.OrdinalIgnoreCase))
+            {
+                FailMetadataWriteAfterCreate = false;
+                throw new IOException("Injected metadata write failure after creation.");
+            }
+        }
+
+        public bool MoveCreateNewIfIdentityMatches(
+            string sourcePath,
+            string destinationPath,
+            string expectedSourceIdentity)
+        {
+            BeforeMoveCreateNew?.Invoke(sourcePath, destinationPath);
+            ObserveMutation(destinationPath);
+            var mappedSource = Map(sourcePath);
+            var mappedDestination = Map(destinationPath);
             if (destinationPath.Equals(RaceDestinationPath, StringComparison.OrdinalIgnoreCase))
             {
-                Directory.CreateDirectory(Path.GetDirectoryName(destinationPath)!);
-                File.WriteAllBytes(destinationPath, RaceDestinationBytes!);
+                Directory.CreateDirectory(Path.GetDirectoryName(mappedDestination)!);
+                File.WriteAllBytes(mappedDestination, RaceDestinationBytes!);
                 throw new IOException("Injected destination race.");
             }
 
-            inner.MoveCreateNew(sourcePath, destinationPath);
+            var moved = inner.MoveCreateNewIfIdentityMatches(
+                mappedSource,
+                mappedDestination,
+                expectedSourceIdentity);
+            if (moved)
+            {
+                AfterMoveCreateNew?.Invoke(sourcePath, destinationPath);
+            }
+
+            return moved;
         }
 
-        public void Replace(string sourcePath, string destinationPath)
+        public bool ReplaceIfSourceIdentityMatches(
+            string sourcePath,
+            string destinationPath,
+            string expectedSourceIdentity)
         {
             if (FailNextMetadataReplace
                 && destinationPath.EndsWith("save-metadata.json", StringComparison.OrdinalIgnoreCase))
@@ -590,14 +1051,52 @@ public sealed class DedicatedSaveServiceTests : IDisposable
                 throw new IOException("Injected metadata publish failure.");
             }
 
-            inner.Replace(sourcePath, destinationPath);
+            ObserveMutation(destinationPath);
+            var replaced = inner.ReplaceIfSourceIdentityMatches(
+                Map(sourcePath),
+                Map(destinationPath),
+                expectedSourceIdentity);
             if (destinationPath.EndsWith("save-metadata.json", StringComparison.OrdinalIgnoreCase))
             {
                 MetadataReplaceCompleted = true;
             }
+
+            return replaced;
         }
 
-        public void Delete(string path) => inner.Delete(path);
+        public bool DeleteIfIdentityMatches(string path, string expectedIdentity)
+        {
+            BeforeOwnedDelete?.Invoke(path);
+            ObserveMutation(path);
+            return inner.DeleteIfIdentityMatches(Map(path), expectedIdentity);
+        }
+
+        private void ObserveMutation(string path)
+        {
+            if (!Map(path).Equals(path, StringComparison.OrdinalIgnoreCase))
+            {
+                RedirectedMutationObserved = true;
+            }
+        }
+
+        private string Map(string path)
+        {
+            if (RedirectFrom is null || RedirectTo is null)
+            {
+                return path;
+            }
+
+            var fullPath = Path.GetFullPath(path);
+            if (!fullPath.Equals(RedirectFrom, StringComparison.OrdinalIgnoreCase)
+                && !fullPath.StartsWith(
+                    RedirectFrom.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return path;
+            }
+
+            return Path.Combine(RedirectTo, Path.GetRelativePath(RedirectFrom, fullPath));
+        }
     }
 
     private sealed class EscapingCanonicalizer : IPathCanonicalizer

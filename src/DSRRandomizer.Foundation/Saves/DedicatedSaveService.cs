@@ -3,6 +3,17 @@ using DSRRandomizer.Foundation.Paths;
 
 namespace DSRRandomizer.Foundation.Saves;
 
+public sealed record DedicatedSaveSessionResult(
+    DedicatedSaveResult Result,
+    string? SessionToken)
+{
+    public bool Ready => Result.Ready;
+    public bool ReusedExisting => Result.ReusedExisting;
+    public string? SavePath => Result.SavePath;
+    public SaveErrorCode ErrorCode => Result.ErrorCode;
+    public string Message => Result.Message;
+}
+
 public sealed class DedicatedSaveService
 {
     private const int MetadataSchemaVersion = 1;
@@ -78,7 +89,7 @@ public sealed class DedicatedSaveService
     {
         ArgumentNullException.ThrowIfNull(binding);
         if (string.IsNullOrWhiteSpace(binding.SeedId)
-            || string.IsNullOrWhiteSpace(binding.PlacementSha256))
+            || !IsSha256(binding.PlacementSha256))
         {
             return DedicatedSaveResult.Fail(SaveErrorCode.SeedMismatch, "Seed binding is incomplete.");
         }
@@ -114,139 +125,227 @@ public sealed class DedicatedSaveService
             return stageResult.Failure;
         }
 
-        var archiveId = $"{DateTime.UtcNow:yyyyMMddHHmmssfff}.{Guid.NewGuid():N}";
-        var archivePath = Path.Combine(
-            locations.ArchiveDirectory,
-            $"DRAKS0005.{archiveId}.rmm");
-        var metadataArchivePath = Path.Combine(
-            locations.ArchiveDirectory,
-            $"save-metadata.{archiveId}.json");
-        string? metadataTemporaryPath = null;
-        var archived = false;
-        var metadataArchived = false;
-        var newDestinationPublished = false;
-        var newMetadataPublished = false;
-
+        IFileMutationLease resetLease;
         try
         {
-            EnsureExternal(locations.ArchiveDirectory, archivePath, metadataArchivePath);
-            _files.CreateDirectory(locations.ArchiveDirectory);
-            _files.MoveCreateNew(locations.DedicatedPath, archivePath);
-            archived = true;
-            _files.MoveCreateNew(locations.MetadataPath, metadataArchivePath);
-            metadataArchived = true;
-            _files.MoveCreateNew(stageResult.StagedPath!, locations.DedicatedPath);
-            newDestinationPublished = true;
-
-            var metadata = CreateMetadata(steamId, stageResult.Source!, binding, cleanExit: true);
-            metadataTemporaryPath = await WriteMetadataTemporaryAsync(
-                locations,
-                metadata,
-                cancellationToken);
-            _files.Replace(metadataTemporaryPath, locations.MetadataPath);
-            metadataTemporaryPath = null;
-            newMetadataPublished = true;
-
-            var published = await _files.IdentityAndHashAsync(
-                locations.DedicatedPath,
-                cancellationToken);
-            if (!MatchesContent(stageResult.Source!, published))
-            {
-                throw new CopyVerificationException("Published reset save failed verification.");
-            }
-
-            return Ready(locations.DedicatedPath, reused: false);
+            resetLease = _files.AcquireMutationLease(
+                _layout.Root,
+                [locations.SaveDirectory, locations.ArchiveDirectory, _layout.Staging]);
+            resetLease.Verify();
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
-            if (newDestinationPublished && _files.Exists(locations.DedicatedPath))
-            {
-                SafeDelete(locations.DedicatedPath);
-            }
-
-            if (newMetadataPublished && _files.Exists(locations.MetadataPath))
-            {
-                SafeDelete(locations.MetadataPath);
-            }
-
-            if (archived && _files.Exists(archivePath) && !_files.Exists(locations.DedicatedPath))
-            {
-                try
-                {
-                    _files.MoveCreateNew(archivePath, locations.DedicatedPath);
-                }
-                catch (IOException)
-                {
-                    // Preserve the archive if an external race prevents restoration.
-                }
-            }
-
-            if (metadataArchived
-                && _files.Exists(metadataArchivePath)
-                && !_files.Exists(locations.MetadataPath))
-            {
-                try
-                {
-                    _files.MoveCreateNew(metadataArchivePath, locations.MetadataPath);
-                }
-                catch (IOException)
-                {
-                    // Preserve the archive if an external race prevents restoration.
-                }
-            }
-
-            return DedicatedSaveResult.Fail(
-                exception is UnauthorizedAccessException
-                    ? SaveErrorCode.PathDenied
-                    : SaveErrorCode.CopyVerificationFailed,
-                exception.Message);
+            SafeDelete(stageResult.StagedFile);
+            return DedicatedSaveResult.Fail(SaveErrorCode.PathDenied, exception.Message);
         }
-        finally
+
+        using (resetLease)
         {
-            SafeDelete(stageResult.StagedPath);
-            SafeDelete(metadataTemporaryPath);
+            FileIdentityAndHash oldSaveSnapshot;
+            FileIdentityAndHash oldMetadataSnapshot;
+            try
+            {
+                oldSaveSnapshot = await _files.IdentityAndHashAsync(
+                    locations.DedicatedPath,
+                    cancellationToken);
+                oldMetadataSnapshot = await _files.IdentityAndHashAsync(
+                    locations.MetadataPath,
+                    cancellationToken);
+            }
+            catch
+            {
+                SafeDelete(stageResult.StagedFile);
+                throw;
+            }
+
+            var oldSave = new OwnedFile(locations.DedicatedPath, oldSaveSnapshot.Identity);
+            var oldMetadata = new OwnedFile(locations.MetadataPath, oldMetadataSnapshot.Identity);
+
+            var archiveId = $"{DateTime.UtcNow:yyyyMMddHHmmssfff}.{Guid.NewGuid():N}";
+            var archiveSave = new OwnedFile(Path.Combine(
+                locations.ArchiveDirectory,
+                $"DRAKS0005.{archiveId}.rmm"), oldSave.Identity);
+            var archiveMetadata = new OwnedFile(Path.Combine(
+                locations.ArchiveDirectory,
+                $"save-metadata.{archiveId}.json"), oldMetadata.Identity);
+            var newSave = new OwnedFile(
+                locations.DedicatedPath,
+                stageResult.StagedFile!.Identity);
+            OwnedFile? metadataTemporary = null;
+            OwnedFile? newMetadata = null;
+
+            try
+            {
+                EnsureExternal(locations.ArchiveDirectory, archiveSave.Path, archiveMetadata.Path);
+                if (!_files.MoveCreateNewIfIdentityMatches(
+                        oldMetadata.Path,
+                        archiveMetadata.Path,
+                        oldMetadata.Identity))
+                {
+                    throw new IOException("Existing metadata ownership changed before archive.");
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!_files.MoveCreateNewIfIdentityMatches(
+                        oldSave.Path,
+                        archiveSave.Path,
+                        oldSave.Identity))
+                {
+                    throw new IOException("Existing save ownership changed before archive.");
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!_files.MoveCreateNewIfIdentityMatches(
+                        stageResult.StagedFile.Path,
+                        newSave.Path,
+                        stageResult.StagedFile.Identity))
+                {
+                    throw new IOException("Staged save ownership changed before publication.");
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var metadata = CreateMetadata(steamId, stageResult.Source!, binding, cleanExit: true);
+                metadataTemporary = await WriteMetadataTemporaryAsync(
+                    locations,
+                    metadata,
+                    cancellationToken);
+                newMetadata = new OwnedFile(locations.MetadataPath, metadataTemporary.Identity);
+                if (!_files.ReplaceIfSourceIdentityMatches(
+                        metadataTemporary.Path,
+                        newMetadata.Path,
+                        metadataTemporary.Identity))
+                {
+                    throw new IOException("Metadata temporary ownership changed before publication.");
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var published = await _files.IdentityAndHashAsync(
+                    locations.DedicatedPath,
+                    cancellationToken);
+                if (!MatchesContent(stageResult.Source!, published))
+                {
+                    throw new CopyVerificationException("Published reset save failed verification.");
+                }
+
+                return Ready(locations.DedicatedPath, reused: false);
+            }
+            catch (Exception exception)
+            {
+                await RollBackResetAsync(
+                    oldSave,
+                    oldMetadata,
+                    archiveSave,
+                    archiveMetadata,
+                    newSave,
+                    newMetadata,
+                    metadataTemporary);
+
+                if (exception is OperationCanceledException)
+                {
+                    throw;
+                }
+
+                return DedicatedSaveResult.Fail(
+                    exception is UnauthorizedAccessException
+                        ? SaveErrorCode.PathDenied
+                        : SaveErrorCode.CopyVerificationFailed,
+                    exception.Message);
+            }
+            finally
+            {
+                SafeDelete(stageResult.StagedFile);
+                SafeDelete(metadataTemporary);
+            }
         }
     }
 
-    public async Task<DedicatedSaveResult> BeginSessionAsync(
+    public async Task<DedicatedSaveSessionResult> BeginSessionAsync(
         string steamId,
         CancellationToken cancellationToken)
     {
         var prepared = await PrepareAsync(steamId, cancellationToken);
         if (!prepared.Ready)
         {
-            return prepared;
+            return new DedicatedSaveSessionResult(prepared, null);
         }
 
+        OwnedFile? sessionTemporary = null;
+        OwnedFile? publishedSession = null;
         try
         {
             var locations = ResolveLocations(steamId);
+            using var sessionLease = _files.AcquireMutationLease(
+                _layout.Root,
+                [locations.SaveDirectory]);
+            sessionLease.Verify();
             var metadata = await ReadMetadataAsync(locations.MetadataPath, cancellationToken);
             if (metadata is null)
             {
-                return DedicatedSaveResult.Fail(
-                    SaveErrorCode.ExistingSaveInvalid,
-                    "Dedicated save metadata is invalid.");
+                return new DedicatedSaveSessionResult(
+                    DedicatedSaveResult.Fail(
+                        SaveErrorCode.ExistingSaveInvalid,
+                        "Dedicated save metadata is invalid."),
+                    null);
+            }
+
+            var sessionToken = Guid.NewGuid().ToString("N");
+            var sessionState = new DedicatedSaveSessionState(
+                1,
+                steamId,
+                sessionToken);
+            sessionTemporary = await WriteSessionTemporaryAsync(
+                locations,
+                sessionState,
+                cancellationToken);
+            publishedSession = new OwnedFile(
+                locations.SessionStatePath,
+                sessionTemporary.Identity);
+            if (!_files.ReplaceIfSourceIdentityMatches(
+                    sessionTemporary.Path,
+                    publishedSession.Path,
+                    sessionTemporary.Identity))
+            {
+                throw new IOException("Session temporary ownership changed before publication.");
             }
 
             await PublishMetadataAsync(
                 locations,
                 metadata with { CleanExit = false },
                 cancellationToken);
-            return Ready(locations.DedicatedPath, prepared.ReusedExisting);
+            return new DedicatedSaveSessionResult(
+                Ready(locations.DedicatedPath, prepared.ReusedExisting),
+                sessionToken);
+        }
+        catch (OperationCanceledException)
+        {
+            SafeDelete(publishedSession);
+            throw;
         }
         catch (UnauthorizedAccessException exception)
         {
-            return DedicatedSaveResult.Fail(SaveErrorCode.PathDenied, exception.Message);
+            SafeDelete(publishedSession);
+            return new DedicatedSaveSessionResult(
+                DedicatedSaveResult.Fail(SaveErrorCode.PathDenied, exception.Message),
+                null);
         }
         catch (Exception exception) when (exception is IOException or JsonException)
         {
-            return DedicatedSaveResult.Fail(SaveErrorCode.ExistingSaveInvalid, exception.Message);
+            SafeDelete(publishedSession);
+            return new DedicatedSaveSessionResult(
+                DedicatedSaveResult.Fail(SaveErrorCode.ExistingSaveInvalid, exception.Message),
+                null);
+        }
+        finally
+        {
+            SafeDelete(sessionTemporary);
         }
     }
 
     public async Task<DedicatedSaveResult> CompleteSessionAsync(
         string steamId,
+        string sessionToken,
         bool normalGuardedExit,
         CancellationToken cancellationToken)
     {
@@ -260,6 +359,10 @@ public sealed class DedicatedSaveService
         try
         {
             var locations = ResolveLocations(steamId);
+            using var sessionLease = _files.AcquireMutationLease(
+                _layout.Root,
+                [locations.SaveDirectory]);
+            sessionLease.Verify();
             if (!_files.Exists(locations.DedicatedPath))
             {
                 return DedicatedSaveResult.Fail(
@@ -267,8 +370,33 @@ public sealed class DedicatedSaveService
                     "Dedicated save is missing.");
             }
 
+            if (string.IsNullOrWhiteSpace(sessionToken)
+                || !_files.Exists(locations.SessionStatePath))
+            {
+                return DedicatedSaveResult.Fail(
+                    SaveErrorCode.ExistingSaveInvalid,
+                    "No matching unclean session is active.");
+            }
+
+            var sessionState = await ReadSessionStateAsync(
+                locations.SessionStatePath,
+                cancellationToken);
+            if (sessionState is null
+                || sessionState.SchemaVersion != 1
+                || !string.Equals(sessionState.SteamId, steamId, StringComparison.Ordinal)
+                || !string.Equals(sessionState.SessionToken, sessionToken, StringComparison.Ordinal))
+            {
+                return DedicatedSaveResult.Fail(
+                    SaveErrorCode.ExistingSaveInvalid,
+                    "The session token is missing, invalid, or stale.");
+            }
+
+            var sessionIdentity = await _files.IdentityAndHashAsync(
+                locations.SessionStatePath,
+                cancellationToken);
+
             var metadata = await ReadMetadataAsync(locations.MetadataPath, cancellationToken);
-            if (!MetadataShapeIsValid(metadata, steamId))
+            if (!MetadataShapeIsValid(metadata, steamId) || metadata!.CleanExit)
             {
                 return DedicatedSaveResult.Fail(
                     SaveErrorCode.ExistingSaveInvalid,
@@ -293,6 +421,9 @@ public sealed class DedicatedSaveService
                     CleanExit = true
                 },
                 cancellationToken);
+            SafeDelete(new OwnedFile(
+                locations.SessionStatePath,
+                sessionIdentity.Identity));
             return Ready(locations.DedicatedPath, reused: true);
         }
         catch (UnauthorizedAccessException exception)
@@ -317,56 +448,108 @@ public sealed class DedicatedSaveService
             return stageResult.Failure;
         }
 
-        string? metadataTemporaryPath = null;
+        IFileMutationLease bootstrapLease;
         try
         {
-            EnsureExternal(locations.SaveDirectory, locations.DedicatedPath, locations.MetadataPath);
-            _files.CreateDirectory(locations.SaveDirectory);
-            try
-            {
-                _files.MoveCreateNew(stageResult.StagedPath!, locations.DedicatedPath);
-            }
-            catch (IOException exception) when (_files.Exists(locations.DedicatedPath))
-            {
-                return DedicatedSaveResult.Fail(SaveErrorCode.DestinationRace, exception.Message);
-            }
-
-            var metadata = CreateMetadata(
-                locations.SteamId,
-                stageResult.Source!,
-                binding,
-                cleanExit: true);
-            metadataTemporaryPath = await WriteMetadataTemporaryAsync(
-                locations,
-                metadata,
-                cancellationToken);
-            _files.Replace(metadataTemporaryPath, locations.MetadataPath);
-            metadataTemporaryPath = null;
-
-            var published = await _files.IdentityAndHashAsync(
-                locations.DedicatedPath,
-                cancellationToken);
-            if (!MatchesContent(stageResult.Source!, published))
-            {
-                return DedicatedSaveResult.Fail(
-                    SaveErrorCode.CopyVerificationFailed,
-                    "Published save failed verification.");
-            }
-
-            return Ready(locations.DedicatedPath, reused: false);
+            bootstrapLease = _files.AcquireMutationLease(
+                _layout.Root,
+                [locations.SaveDirectory, _layout.Staging]);
+            bootstrapLease.Verify();
         }
-        catch (UnauthorizedAccessException exception)
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
+            SafeDelete(stageResult.StagedFile);
             return DedicatedSaveResult.Fail(SaveErrorCode.PathDenied, exception.Message);
         }
-        catch (Exception exception) when (exception is IOException or JsonException)
+
+        using (bootstrapLease)
         {
-            return DedicatedSaveResult.Fail(SaveErrorCode.CopyVerificationFailed, exception.Message);
-        }
-        finally
-        {
-            SafeDelete(stageResult.StagedPath);
-            SafeDelete(metadataTemporaryPath);
+
+            var publishedSave = new OwnedFile(
+                locations.DedicatedPath,
+                stageResult.StagedFile!.Identity);
+            OwnedFile? metadataTemporary = null;
+            OwnedFile? publishedMetadata = null;
+            try
+            {
+                EnsureExternal(locations.SaveDirectory, locations.DedicatedPath, locations.MetadataPath);
+                try
+                {
+                    if (!_files.MoveCreateNewIfIdentityMatches(
+                            stageResult.StagedFile.Path,
+                            locations.DedicatedPath,
+                            stageResult.StagedFile.Identity))
+                    {
+                        throw new IOException("Staged save ownership changed before publication.");
+                    }
+                }
+                catch (IOException exception)
+                {
+                    if (await IsOwnedAtAsync(publishedSave))
+                    {
+                        throw;
+                    }
+
+                    return DedicatedSaveResult.Fail(SaveErrorCode.DestinationRace, exception.Message);
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var metadata = CreateMetadata(
+                    locations.SteamId,
+                    stageResult.Source!,
+                    binding,
+                    cleanExit: true);
+                metadataTemporary = await WriteMetadataTemporaryAsync(
+                    locations,
+                    metadata,
+                    cancellationToken);
+                publishedMetadata = new OwnedFile(
+                    locations.MetadataPath,
+                    metadataTemporary.Identity);
+                if (!_files.ReplaceIfSourceIdentityMatches(
+                        metadataTemporary.Path,
+                        publishedMetadata.Path,
+                        metadataTemporary.Identity))
+                {
+                    throw new IOException("Metadata temporary ownership changed before publication.");
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var published = await _files.IdentityAndHashAsync(
+                    locations.DedicatedPath,
+                    cancellationToken);
+                if (!MatchesContent(stageResult.Source!, published))
+                {
+                    throw new CopyVerificationException("Published save failed verification.");
+                }
+
+                return Ready(locations.DedicatedPath, reused: false);
+            }
+            catch (OperationCanceledException)
+            {
+                SafeDelete(publishedMetadata);
+                SafeDelete(metadataTemporary);
+                SafeDelete(publishedSave);
+                throw;
+            }
+            catch (Exception exception)
+            {
+                SafeDelete(publishedMetadata);
+                SafeDelete(metadataTemporary);
+                SafeDelete(publishedSave);
+                return DedicatedSaveResult.Fail(
+                    exception is UnauthorizedAccessException
+                        ? SaveErrorCode.PathDenied
+                        : SaveErrorCode.CopyVerificationFailed,
+                    exception.Message);
+            }
+            finally
+            {
+                SafeDelete(stageResult.StagedFile);
+                SafeDelete(metadataTemporary);
+            }
         }
     }
 
@@ -383,7 +566,10 @@ public sealed class DedicatedSaveService
         try
         {
             EnsureExternal(_layout.Staging, stagedPath);
-            _files.CreateDirectory(_layout.Staging);
+            using var stagingLease = _files.AcquireMutationLease(
+                _layout.Root,
+                [_layout.Staging]);
+            stagingLease.Verify();
             if (!_files.Exists(sourcePath))
             {
                 return StageResult.Fail(SaveErrorCode.SourceMissing, "Selected normal save is missing.");
@@ -422,7 +608,10 @@ public sealed class DedicatedSaveService
             }
 
             stagedForCaller = true;
-            return new StageResult(stagedPath, before, null);
+            return new StageResult(
+                new OwnedFile(stagedPath, staged.Identity),
+                before,
+                null);
         }
         catch (FileNotFoundException exception)
         {
@@ -440,7 +629,7 @@ public sealed class DedicatedSaveService
         {
             if (!stagedForCaller)
             {
-                SafeDelete(stagedPath);
+                await DeleteUniqueFileIfPresentAsync(stagedPath);
             }
         }
     }
@@ -547,26 +736,151 @@ public sealed class DedicatedSaveService
             cancellationToken);
     }
 
-    private async Task PublishMetadataAsync(
+    private async Task<DedicatedSaveSessionState?> ReadSessionStateAsync(
+        string sessionStatePath,
+        CancellationToken cancellationToken)
+    {
+        await using var stream = _files.Open(
+            sessionStatePath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read);
+        return await JsonSerializer.DeserializeAsync<DedicatedSaveSessionState>(
+            stream,
+            JsonOptions,
+            cancellationToken);
+    }
+
+    private async Task RollBackResetAsync(
+        OwnedFile oldSave,
+        OwnedFile oldMetadata,
+        OwnedFile archiveSave,
+        OwnedFile archiveMetadata,
+        OwnedFile newSave,
+        OwnedFile? newMetadata,
+        OwnedFile? metadataTemporary)
+    {
+        SafeDelete(newMetadata);
+        SafeDelete(metadataTemporary);
+        SafeDelete(newSave);
+
+        var oldSaveLive = await IsOwnedAtAsync(oldSave);
+        var oldMetadataLive = await IsOwnedAtAsync(oldMetadata);
+        if (oldSaveLive && oldMetadataLive)
+        {
+            return;
+        }
+
+        var savePathOccupiedByForeign = _files.Exists(oldSave.Path) && !oldSaveLive;
+        var metadataPathOccupiedByForeign = _files.Exists(oldMetadata.Path) && !oldMetadataLive;
+
+        if (oldSaveLive)
+        {
+            await TryMoveOwnedAsync(oldSave, archiveSave.Path);
+        }
+
+        if (oldMetadataLive)
+        {
+            await TryMoveOwnedAsync(oldMetadata, archiveMetadata.Path);
+        }
+
+        if (savePathOccupiedByForeign || metadataPathOccupiedByForeign)
+        {
+            return;
+        }
+
+        if (!await IsOwnedAtAsync(archiveSave)
+            || !await IsOwnedAtAsync(archiveMetadata)
+            || _files.Exists(oldSave.Path)
+            || _files.Exists(oldMetadata.Path))
+        {
+            return;
+        }
+
+        if (!await TryMoveOwnedAsync(archiveMetadata, oldMetadata.Path))
+        {
+            return;
+        }
+
+        var restoredMetadata = new OwnedFile(oldMetadata.Path, oldMetadata.Identity);
+        if (await TryMoveOwnedAsync(archiveSave, oldSave.Path))
+        {
+            return;
+        }
+
+        await TryMoveOwnedAsync(restoredMetadata, archiveMetadata.Path);
+    }
+
+    private async Task<bool> TryMoveOwnedAsync(OwnedFile source, string destinationPath)
+    {
+        try
+        {
+            if (!await IsOwnedAtAsync(source))
+            {
+                return false;
+            }
+
+            return _files.MoveCreateNewIfIdentityMatches(
+                source.Path,
+                destinationPath,
+                source.Identity);
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or FileNotFoundException)
+        {
+            return false;
+        }
+    }
+
+    private async Task<bool> IsOwnedAtAsync(OwnedFile ownedFile)
+    {
+        try
+        {
+            if (!_files.Exists(ownedFile.Path))
+            {
+                return false;
+            }
+
+            var identity = await _files.IdentityAndHashAsync(
+                ownedFile.Path,
+                CancellationToken.None);
+            return identity.Identity.Equals(ownedFile.Identity, StringComparison.Ordinal);
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or FileNotFoundException)
+        {
+            return false;
+        }
+    }
+
+    private async Task<OwnedFile> PublishMetadataAsync(
         SaveLocations locations,
         DedicatedSaveMetadata metadata,
         CancellationToken cancellationToken)
     {
-        var temporaryPath = await WriteMetadataTemporaryAsync(
+        var temporary = await WriteMetadataTemporaryAsync(
             locations,
             metadata,
             cancellationToken);
         try
         {
-            _files.Replace(temporaryPath, locations.MetadataPath);
+            if (!_files.ReplaceIfSourceIdentityMatches(
+                    temporary.Path,
+                    locations.MetadataPath,
+                    temporary.Identity))
+            {
+                throw new IOException("Metadata temporary file ownership changed before publication.");
+            }
+
+            return new OwnedFile(locations.MetadataPath, temporary.Identity);
         }
         finally
         {
-            SafeDelete(temporaryPath);
+            SafeDelete(temporary);
         }
     }
 
-    private async Task<string> WriteMetadataTemporaryAsync(
+    private async Task<OwnedFile> WriteMetadataTemporaryAsync(
         SaveLocations locations,
         DedicatedSaveMetadata metadata,
         CancellationToken cancellationToken)
@@ -575,10 +889,44 @@ public sealed class DedicatedSaveService
             locations.SaveDirectory,
             $"save-metadata.{Guid.NewGuid():N}.tmp");
         EnsureExternal(locations.SaveDirectory, temporaryPath, locations.MetadataPath);
-        _files.CreateDirectory(locations.SaveDirectory);
         var bytes = JsonSerializer.SerializeToUtf8Bytes(metadata, JsonOptions);
-        await _files.WriteAllBytesAndFlushAsync(temporaryPath, bytes, cancellationToken);
-        return temporaryPath;
+        try
+        {
+            await _files.WriteAllBytesAndFlushAsync(temporaryPath, bytes, cancellationToken);
+            var identity = await _files.IdentityAndHashAsync(temporaryPath, CancellationToken.None);
+            return new OwnedFile(temporaryPath, identity.Identity);
+        }
+        catch
+        {
+            await DeleteUniqueFileIfPresentAsync(temporaryPath);
+            throw;
+        }
+    }
+
+    private async Task<OwnedFile> WriteSessionTemporaryAsync(
+        SaveLocations locations,
+        DedicatedSaveSessionState sessionState,
+        CancellationToken cancellationToken)
+    {
+        var temporaryPath = Path.Combine(
+            locations.SaveDirectory,
+            $"session-state.{Guid.NewGuid():N}.tmp");
+        EnsureExternal(
+            locations.SaveDirectory,
+            temporaryPath,
+            locations.SessionStatePath);
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(sessionState, JsonOptions);
+        try
+        {
+            await _files.WriteAllBytesAndFlushAsync(temporaryPath, bytes, cancellationToken);
+            var identity = await _files.IdentityAndHashAsync(temporaryPath, CancellationToken.None);
+            return new OwnedFile(temporaryPath, identity.Identity);
+        }
+        catch
+        {
+            await DeleteUniqueFileIfPresentAsync(temporaryPath);
+            throw;
+        }
     }
 
     private SaveLocations ResolveLocations(string steamId)
@@ -587,13 +935,21 @@ public sealed class DedicatedSaveService
         var saveDirectory = Path.GetDirectoryName(dedicatedPath)
             ?? throw new IOException("Dedicated save directory could not be resolved.");
         var metadataPath = Path.Combine(saveDirectory, MetadataFileName);
+        var sessionStatePath = Path.Combine(saveDirectory, "session-state.json");
         var archiveDirectory = Path.Combine(saveDirectory, "archive");
-        EnsureExternal(saveDirectory, dedicatedPath, metadataPath, archiveDirectory, _layout.Staging);
+        EnsureExternal(
+            saveDirectory,
+            dedicatedPath,
+            metadataPath,
+            sessionStatePath,
+            archiveDirectory,
+            _layout.Staging);
         return new SaveLocations(
             steamId,
             saveDirectory,
             dedicatedPath,
             metadataPath,
+            sessionStatePath,
             archiveDirectory);
     }
 
@@ -621,14 +977,16 @@ public sealed class DedicatedSaveService
         string steamId) =>
         metadata is not null
         && metadata.SchemaVersion == MetadataSchemaVersion
-        && metadata.SteamId.Equals(steamId, StringComparison.Ordinal)
+        && string.Equals(metadata.SteamId, steamId, StringComparison.Ordinal)
         && metadata.FixedLength == FixedSaveLength
-        && !string.IsNullOrWhiteSpace(metadata.LastKnownSha256)
-        && metadata.LastKnownSha256.Length == 64
-        && metadata.LastKnownSha256.All(Uri.IsHexDigit)
+        && IsSha256(metadata.LastKnownSha256)
         && ((metadata.ActiveSeedId is null && metadata.PlacementSha256 is null)
             || (!string.IsNullOrWhiteSpace(metadata.ActiveSeedId)
-                && !string.IsNullOrWhiteSpace(metadata.PlacementSha256)));
+                && IsSha256(metadata.PlacementSha256)));
+
+    private static bool IsSha256(string? value) =>
+        value is { Length: 64 }
+        && value.All(Uri.IsHexDigit);
 
     private static DedicatedSaveMetadata CreateMetadata(
         string steamId,
@@ -653,24 +1011,42 @@ public sealed class DedicatedSaveService
     private static DedicatedSaveResult Ready(string path, bool reused) =>
         new(true, reused, path, SaveErrorCode.None, string.Empty);
 
-    private void SafeDelete(string? path)
+    private void SafeDelete(OwnedFile? ownedFile)
     {
-        if (path is null)
+        if (ownedFile is null)
         {
             return;
         }
 
         try
         {
-            _boundary.EnsureAllowed(path);
-            if (_files.Exists(path))
-            {
-                _files.Delete(path);
-            }
+            _boundary.EnsureAllowed(ownedFile.Path);
+            _files.DeleteIfIdentityMatches(ownedFile.Path, ownedFile.Identity);
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or FileNotFoundException)
         {
             // Cleanup never widens the transaction or replaces the primary failure.
+        }
+    }
+
+    private async Task DeleteUniqueFileIfPresentAsync(string path)
+    {
+        try
+        {
+            _boundary.EnsureAllowed(path);
+            if (!_files.Exists(path))
+            {
+                return;
+            }
+
+            var identity = await _files.IdentityAndHashAsync(path, CancellationToken.None);
+            _files.DeleteIfIdentityMatches(path, identity.Identity);
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or FileNotFoundException)
+        {
+            // A missing or replaced unique file is not transaction-owned cleanup work.
         }
     }
 
@@ -679,10 +1055,18 @@ public sealed class DedicatedSaveService
         string SaveDirectory,
         string DedicatedPath,
         string MetadataPath,
+        string SessionStatePath,
         string ArchiveDirectory);
 
+    private sealed record DedicatedSaveSessionState(
+        int SchemaVersion,
+        string SteamId,
+        string SessionToken);
+
+    private sealed record OwnedFile(string Path, string Identity);
+
     private sealed record StageResult(
-        string? StagedPath,
+        OwnedFile? StagedFile,
         FileIdentityAndHash? Source,
         DedicatedSaveResult? Failure)
     {

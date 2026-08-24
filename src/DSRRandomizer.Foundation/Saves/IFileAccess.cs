@@ -6,11 +6,18 @@ public sealed record FileIdentityAndHash(
     DateTime LastWriteTimeUtc,
     string Sha256);
 
+public interface IFileMutationLease : IDisposable
+{
+    void Verify();
+}
+
 public interface IFileAccess
 {
     bool Exists(string path);
 
-    void CreateDirectory(string path);
+    IFileMutationLease AcquireMutationLease(
+        string rootPath,
+        IReadOnlyCollection<string> directoryPaths);
 
     FileAttributes GetAttributes(string path);
 
@@ -34,9 +41,15 @@ public interface IFileAccess
         ReadOnlyMemory<byte> bytes,
         CancellationToken cancellationToken);
 
-    void MoveCreateNew(string sourcePath, string destinationPath);
+    bool MoveCreateNewIfIdentityMatches(
+        string sourcePath,
+        string destinationPath,
+        string expectedSourceIdentity);
 
-    void Replace(string sourcePath, string destinationPath);
+    bool ReplaceIfSourceIdentityMatches(
+        string sourcePath,
+        string destinationPath,
+        string expectedSourceIdentity);
 
-    void Delete(string path);
+    bool DeleteIfIdentityMatches(string path, string expectedIdentity);
 }
