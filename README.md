@@ -1,6 +1,6 @@
 # DSR Randomizer
 
-DSR Randomizer is a planned Dark Souls Remastered mod with deterministic item and enemy permutations, automatic equipment on pickup, an isolated save, and a dedicated offline launcher.
+DSR Randomizer is a planned Dark Souls Remastered mod with deterministic item and boss permutations, weighted regular-enemy placement, automatic equipment on pickup, an isolated save, and a dedicated offline launcher.
 
 The project is currently in the design phase. The approved architecture is documented in [`docs/superpowers/specs/2026-08-24-dsr-randomizer-design.md`](docs/superpowers/specs/2026-08-24-dsr-randomizer-design.md).
 

@@ -15,7 +15,7 @@ The existing original-game and Overhaul launch paths remain outside this project
 - Keep the original game installation and existing Overhaul installation unchanged.
 - Store the local runtime, generated seed, save, configuration, and logs outside the Steam installation.
 - Generate reproducible item, regular-enemy, and boss placements from a visible and shareable seed.
-- Preserve the total population of items and enemies through strict permutations rather than independent duplicate-producing rolls.
+- Preserve item quantities and boss populations through strict permutations. Preserve the number of regular-enemy destination slots while allowing weighted, duplicate-producing regular-enemy draws.
 - Place randomized progression items only where the resulting game remains completable.
 - Scale randomized regular enemies and the randomized tutorial boss during the first Undead Asylum visit.
 - Automatically equip newly acquired weapons, shields, casting tools, armor, and rings according to fixed rules.
@@ -170,11 +170,21 @@ Probability-only drops are never the sole required source of a progression item.
 
 ## 9. Enemy randomization
 
-Regular enemies and bosses are separate permutation domains.
+Regular enemies and bosses use separate randomization domains. Regular-enemy slots use weighted draws with replacement; bosses use a strict compatible permutation.
 
 ### 9.1 Regular enemies
 
-Every eligible hostile regular-enemy occurrence is used exactly once as a source and exactly once as a destination. Friendly NPCs, merchants, quest actors, and invisible technical helpers remain in place. Linked bodies, detachable parts, hydra groups, scripted variants, and other inseparable entities move as groups.
+Every eligible hostile regular-enemy destination receives one deterministic weighted draw from its compatible source pool. Draws are made with replacement, so an archetype may appear several times or not appear in a given seed. The number of eligible destination slots remains unchanged, but vanilla per-archetype population counts are not preserved.
+
+The pool includes offline-simulated special online enemies:
+
+- Gravelord Black Phantom variants use the same spawn-weight class as elite regular enemies.
+- Each supported Vagrant variant uses the same unit draw weight as an ordinary regular-enemy archetype.
+- Special enemies may repeat under the same with-replacement rules as their weight class.
+
+The catalog defines ordinary and elite weight classes explicitly so the result does not depend on map order or incidental parameter values. A versioned weight table is part of the seed format. The generator applies map resource limits, navigation and animation compatibility, linked-entity rules, and known unsafe-destination exclusions after weighting. If a drawn assignment cannot satisfy these constraints, it is deterministically redrawn from the compatible subset.
+
+Friendly NPCs, merchants, quest actors, and invisible technical helpers remain in place. Linked bodies, detachable parts, hydra groups, scripted variants, and other inseparable entities move as groups.
 
 Destination maps receive the required AI, effects, projectiles, models, and event adaptations. Resource-budget validation rejects placements that exceed safe simultaneous model limits. Known incompatible animation and event bindings are replaced with safe destination behavior.
 
@@ -189,6 +199,7 @@ Boss randomization is treated as experimental until the full special-encounter t
 Tutorial scaling applies only during the first Undead Asylum visit:
 
 - Randomized regular enemies in tutorial slots receive destination-appropriate early-game combat values.
+- Gravelord Black Phantoms, Vagrants, and other special regular enemies drawn into tutorial slots receive the same destination-appropriate tutorial scaling.
 - The randomized boss occupying the Asylum Demon tutorial encounter receives tutorial-boss combat values.
 - HP, stamina, attack scaling, defenses, resistances, combat effects, and soul rewards use destination-derived values needed to keep the tutorial viable.
 - The return visit and the Stray Demon encounter are not tutorial content and retain ordinary randomized source strength.
@@ -257,7 +268,9 @@ Logs redact local user-specific paths when exported for bug reports.
 
 - Stable seed normalization and independent RNG streams
 - Same seed/config/version produces identical placements and hashes
-- Item and enemy permutation population conservation
+- Item and boss permutation population conservation
+- Regular-enemy destination-slot conservation with deterministic weighted draws and permitted archetype duplication
+- Gravelord Black Phantoms use the elite weight class and Vagrants use the ordinary weight class
 - Progression solver graph fixtures and impossible-seed rejection
 - Progression items never use probability-only required locations
 - Regular-enemy and boss pool separation
@@ -291,7 +304,7 @@ Release sequence:
 
 - `v0.1.0-alpha.1`: launcher and external-runtime isolation
 - `v0.2.0-alpha.1`: item permutation and progression validation
-- `v0.3.0-alpha.1`: regular-enemy and boss permutation plus tutorial scaling
+- `v0.3.0-alpha.1`: weighted regular-enemy placement, boss permutation, special offline spawns, and tutorial scaling
 - `v0.4.0-alpha.1`: auto-equip, save isolation, and official-online blocking
 - `v0.5.0-beta.1`: integrated local runtime and release-candidate testing
 - `v1.0.0`: first stable release
@@ -304,7 +317,7 @@ Every release uses an annotated Git tag, a GitHub Release, release notes derived
 2. Prove that a copied external runtime can launch without loading the installed Overhaul and without modifying the source installation.
 3. Implement catalog import, deterministic seed formatting, and atomic seed packages.
 4. Implement item permutation and progression validation.
-5. Implement regular-enemy permutation and first-visit tutorial scaling.
+5. Implement weighted regular-enemy placement, offline Gravelord Black Phantom and Vagrant spawns, and first-visit tutorial scaling.
 6. Implement compatible boss permutation and tutorial-boss scaling.
 7. Implement auto-equip and persistent ring rotation.
 8. Implement dedicated save redirection and mismatch protection.
