@@ -18,6 +18,9 @@ function(dsr_configure_target target_name)
 endfunction()
 
 add_subdirectory(runtime)
+target_sources(DSRRandomizer.Runtime.Core
+  PRIVATE
+    runtime/save/SavePathPolicy.cpp)
 
 add_executable(DSRRandomizer.SuspendedFixture
   fixtures/SuspendedFixture.cpp)
@@ -43,6 +46,16 @@ set_target_properties(ProtectionBootstrapTests PROPERTIES
   CXX_EXTENSIONS OFF)
 
 add_test(NAME ProtectionBootstrapTests COMMAND ProtectionBootstrapTests)
+
+add_executable(SavePathPolicyTests
+  tests/SavePathPolicyTests.cpp)
+target_compile_features(SavePathPolicyTests PRIVATE cxx_std_20)
+target_link_libraries(SavePathPolicyTests PRIVATE DSRRandomizer.Runtime.Core)
+dsr_configure_target(SavePathPolicyTests)
+set_target_properties(SavePathPolicyTests PROPERTIES
+  CXX_EXTENSIONS OFF)
+
+add_test(NAME SavePathPolicyTests COMMAND SavePathPolicyTests)
 
 add_executable(SuspendedFixtureTests
   tests/SuspendedFixtureTests.cpp)
