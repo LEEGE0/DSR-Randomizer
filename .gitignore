@@ -1,0 +1,40 @@
+# Build output
+bin/
+obj/
+out/
+artifacts/
+.vs/
+.idea/
+
+# Local game-derived data: never commit or distribute
+runtime/
+active-seed/
+saves/
+logs/
+local-data/
+game-catalog.json
+*.sl2
+*.rsl2
+*.dcx
+*.bnd
+*.bhd
+*.bdt
+*.exe
+*.dll
+
+# Local configuration
+*.user
+*.suo
+appsettings.Local.json
+
+# Generated packages and reports
+packages/
+seed-*/
+spoiler-*.txt
+*.zip
+*.sha256
+
+# Operating-system files
+Thumbs.db
+Desktop.ini
+.DS_Store
