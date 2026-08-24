@@ -1,0 +1,29 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test-package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - run: dotnet restore DSR-Randomizer.sln
+      - run: dotnet build DSR-Randomizer.sln -c Release --no-restore
+      - run: dotnet test DSR-Randomizer.sln -c Release --no-build
+      - run: dotnet publish src/DSRRandomizer.Launcher/DSRRandomizer.Launcher.csproj -c Release -r win-x64 --self-contained true -o artifacts/publish
+      - shell: pwsh
+        run: ./packaging/package.ps1 -Version 0.1.0-alpha.1 -PublishPath artifacts/publish -OutputPath artifacts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DSR-Randomizer-win-x64
+          path: |
+            artifacts/*.zip
+            artifacts/*.sha256

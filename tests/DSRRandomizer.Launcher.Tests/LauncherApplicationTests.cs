@@ -51,6 +51,14 @@ public sealed class LauncherApplicationTests
             reference => reference.Name == "System.Diagnostics.Process"));
     }
 
+    [Fact]
+    public void ProgramMain_LaunchRejectionReturnsWithoutEnteringWpfLifetime()
+    {
+        var exitCode = Program.Main(new[] { "--launch" });
+
+        Assert.Equal(2, exitCode);
+    }
+
     private sealed class FakeLauncherService : ILauncherService
     {
         public RuntimeReadinessResult ReadinessResult { get; init; } =

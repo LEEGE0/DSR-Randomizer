@@ -15,17 +15,6 @@ public partial class App : Application
         var localRoot = GetLocalDataRoot();
         var service = new LauncherService(localRoot);
 
-        if (e.Args.Length > 0)
-        {
-            ShutdownMode = ShutdownMode.OnExplicitShutdown;
-            var exitCode = new LauncherApplication(service, Console.Out, Console.Error)
-                .RunAsync(e.Args, CancellationToken.None)
-                .GetAwaiter()
-                .GetResult();
-            Shutdown(exitCode);
-            return;
-        }
-
         var canonicalizer = new WindowsPathCanonicalizer();
         var selectedSource = InstallationSelectionStore
             .CreateReadOnly(localRoot, canonicalizer)

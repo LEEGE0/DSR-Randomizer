@@ -62,10 +62,15 @@ $before = Get-InstallSnapshot -Root $gameRoot
     ($before | ConvertTo-Json -Depth 4),
     [Text.UTF8Encoding]::new($false))
 
-$launcherOutput = & $launcher --initialize-runtime $gameRoot 2>&1 | Out-String
-$launcherExitCode = $LASTEXITCODE
-if ($launcherExitCode -ne 0) {
-    throw "Runtime initialization failed with exit code $launcherExitCode. Output: $launcherOutput"
+$quotedGameRoot = '"' + $gameRoot.Replace('"', '\"') + '"'
+$launcherProcess = Start-Process `
+    -FilePath $launcher `
+    -ArgumentList @('--initialize-runtime', $quotedGameRoot) `
+    -Wait `
+    -PassThru `
+    -WindowStyle Hidden
+if ($launcherProcess.ExitCode -ne 0) {
+    throw "Runtime initialization failed with exit code $($launcherProcess.ExitCode)."
 }
 
 $after = Get-InstallSnapshot -Root $gameRoot
