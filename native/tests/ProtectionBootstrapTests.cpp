@@ -6,6 +6,14 @@
 
 namespace {
 
+static_assert(sizeof(DSRRandomizer::ProtectionInitBlock) == 5428);
+static_assert(offsetof(DSRRandomizer::ProtectionInitBlock, pipeName) == 52);
+static_assert(offsetof(DSRRandomizer::ProtectionInitBlock, virtualDocuments) == 308);
+static_assert(offsetof(DSRRandomizer::ProtectionInitBlock, virtualLogicalSave) == 1332);
+static_assert(offsetof(DSRRandomizer::ProtectionInitBlock, realSaveRoot) == 2356);
+static_assert(offsetof(DSRRandomizer::ProtectionInitBlock, externalSaveRoot) == 3380);
+static_assert(offsetof(DSRRandomizer::ProtectionInitBlock, dedicatedRmm) == 4404);
+
 int Fail(const char* message) {
     std::cerr << message << '\n';
     return 1;
@@ -32,6 +40,38 @@ int main() {
     }
 
     block.version = DSRRandomizer::kProtectionProtocolVersion;
+    block.size = static_cast<std::uint16_t>(sizeof(block) - sizeof(wchar_t));
+    const auto wrongSizeStatus = DSRRandomizer::InitializeForTest(&block);
+    if (wrongSizeStatus != DSRRandomizer::InitStatus::InvalidArgument) {
+        return Fail("wrong protocol block size was not rejected");
+    }
+
+    block.size = static_cast<std::uint16_t>(sizeof(block));
+    block.requiredFlags = static_cast<std::uint64_t>(
+        DSRRandomizer::ProtectionFlags::Bootstrap)
+        | static_cast<std::uint64_t>(
+            DSRRandomizer::ProtectionFlags::SaveFileIo);
+    const auto partialSaveFlagsStatus = DSRRandomizer::InitializeForTest(&block);
+    if (partialSaveFlagsStatus
+        != DSRRandomizer::InitStatus::RequiredProtectionUnavailable) {
+        return Fail("partial save-hook group was not rejected");
+    }
+
+    block.requiredFlags |= static_cast<std::uint64_t>(
+        DSRRandomizer::ProtectionFlags::SaveKnownFolder);
+    const auto missingSaveConfigurationStatus =
+        DSRRandomizer::InitializeForTest(&block);
+    if (missingSaveConfigurationStatus
+        != DSRRandomizer::InitStatus::SaveHookInstallFailed) {
+        return Fail("missing save-hook configuration did not report SAVE_HOOK_INSTALL_FAILED");
+    }
+    if (DSRRandomizer::CurrentProtectionFlags()
+        != DSRRandomizer::ProtectionFlags::None) {
+        return Fail("failed save-hook installation left protection flags active");
+    }
+
+    block.requiredFlags = static_cast<std::uint64_t>(
+        DSRRandomizer::ProtectionFlags::Bootstrap);
     const auto successStatus = DSRRandomizer::InitializeForTest(&block);
     if (successStatus != DSRRandomizer::InitStatus::Success) {
         return Fail("supported protocol did not initialize");

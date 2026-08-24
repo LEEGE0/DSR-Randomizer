@@ -4,11 +4,26 @@
 
 #include <algorithm>
 #include <atomic>
+#include <string>
+
+#include "save/SaveHooks.h"
 
 namespace DSRRandomizer {
 namespace {
 
 std::atomic<std::uint64_t> activeFlags{0};
+
+bool ReadRequiredPath(
+    const wchar_t* source,
+    const std::size_t capacity,
+    std::wstring& destination) {
+    const auto length = wcsnlen_s(source, capacity);
+    if (length == 0 || length == capacity) {
+        return false;
+    }
+    destination.assign(source, length);
+    return true;
+}
 
 InitStatus InitializeCore(ProtectionInitBlock* block) noexcept {
     activeFlags.store(0, std::memory_order_release);
@@ -21,13 +36,52 @@ InitStatus InitializeCore(ProtectionInitBlock* block) noexcept {
         return InitStatus::UnsupportedProtocol;
     }
 
-    constexpr auto installedFlags =
+    constexpr auto bootstrapFlag =
         static_cast<std::uint64_t>(ProtectionFlags::Bootstrap);
-    if (block->requiredFlags != installedFlags) {
+    constexpr auto saveKnownFolderFlag =
+        static_cast<std::uint64_t>(ProtectionFlags::SaveKnownFolder);
+    constexpr auto saveFileIoFlag =
+        static_cast<std::uint64_t>(ProtectionFlags::SaveFileIo);
+    constexpr auto saveFlags = saveKnownFolderFlag | saveFileIoFlag;
+    constexpr auto supportedFlags = bootstrapFlag | saveFlags;
+    if ((block->requiredFlags & bootstrapFlag) == 0
+        || (block->requiredFlags & ~supportedFlags) != 0
+        || ((block->requiredFlags & saveFlags) != 0
+            && (block->requiredFlags & saveFlags) != saveFlags)) {
         return InitStatus::RequiredProtectionUnavailable;
     }
 
-    activeFlags.store(installedFlags, std::memory_order_release);
+    if ((block->requiredFlags & saveFlags) == saveFlags) {
+        Save::SaveHookConfiguration configuration{};
+        configuration.diagnosticMode = block->diagnosticMode != 0;
+        if (!ReadRequiredPath(
+                block->virtualDocuments,
+                kProtectionSavePathCharacters,
+                configuration.virtualDocuments)
+            || !ReadRequiredPath(
+                block->virtualLogicalSave,
+                kProtectionSavePathCharacters,
+                configuration.virtualLogicalSave)
+            || !ReadRequiredPath(
+                block->realSaveRoot,
+                kProtectionSavePathCharacters,
+                configuration.realSaveRoot)
+            || !ReadRequiredPath(
+                block->externalSaveRoot,
+                kProtectionSavePathCharacters,
+                configuration.externalSaveRoot)
+            || !ReadRequiredPath(
+                block->dedicatedRmm,
+                kProtectionSavePathCharacters,
+                configuration.dedicatedRmm)
+            || Save::InstallSaveHooks(configuration)
+                != Save::SaveHookInstallStatus::Success) {
+            Save::UninstallSaveHooks();
+            return InitStatus::SaveHookInstallFailed;
+        }
+    }
+
+    activeFlags.store(block->requiredFlags, std::memory_order_release);
     return InitStatus::Success;
 }
 
@@ -90,6 +144,7 @@ InitStatus InitializeProtection(ProtectionInitBlock* block) noexcept {
     const auto reportStatus = ReportHandshake(*block);
     if (reportStatus != InitStatus::Success) {
         activeFlags.store(0, std::memory_order_release);
+        Save::UninstallSaveHooks();
     }
 
     return reportStatus;

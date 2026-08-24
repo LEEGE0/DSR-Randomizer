@@ -29,6 +29,17 @@ dsr_configure_target(DSRRandomizer.SuspendedFixture)
 set_target_properties(DSRRandomizer.SuspendedFixture PROPERTIES
   CXX_EXTENSIONS OFF)
 
+add_executable(DSRRandomizer.SaveClientFixture
+  fixtures/SaveClientFixture.cpp)
+target_compile_features(DSRRandomizer.SaveClientFixture PRIVATE cxx_std_20)
+target_link_libraries(DSRRandomizer.SaveClientFixture PRIVATE Shell32 Ole32)
+target_include_directories(DSRRandomizer.SaveClientFixture
+  PRIVATE
+    ${CMAKE_SOURCE_DIR}/native/include)
+dsr_configure_target(DSRRandomizer.SaveClientFixture)
+set_target_properties(DSRRandomizer.SaveClientFixture PROPERTIES
+  CXX_EXTENSIONS OFF)
+
 add_library(DSRRandomizer.StalledRuntime SHARED
   fixtures/StalledGuard.cpp)
 target_compile_features(DSRRandomizer.StalledRuntime PRIVATE cxx_std_20)
@@ -67,3 +78,20 @@ set_target_properties(SuspendedFixtureTests PROPERTIES
 add_test(
   NAME SuspendedFixtureTests
   COMMAND SuspendedFixtureTests $<TARGET_FILE:DSRRandomizer.SuspendedFixture>)
+
+add_executable(SaveHookIntegrationTests
+  tests/SaveHookIntegrationTests.cpp)
+target_compile_features(SaveHookIntegrationTests PRIVATE cxx_std_20)
+target_link_libraries(SaveHookIntegrationTests PRIVATE DSRRandomizer.Runtime.Core)
+target_include_directories(SaveHookIntegrationTests
+  PRIVATE
+    ${CMAKE_SOURCE_DIR}/native/include)
+dsr_configure_target(SaveHookIntegrationTests)
+set_target_properties(SaveHookIntegrationTests PROPERTIES
+  CXX_EXTENSIONS OFF)
+
+add_test(
+  NAME SaveHookIntegrationTests
+  COMMAND SaveHookIntegrationTests
+    $<TARGET_FILE:DSRRandomizer.SaveClientFixture>
+    $<TARGET_FILE:DSRRandomizer.Runtime>)

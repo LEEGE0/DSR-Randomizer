@@ -21,7 +21,7 @@ public sealed class CompatibilityProfileCatalogTests
 
         Assert.Equal("dsr-steam-a45aaa36", profile.Id);
         Assert.Equal(4326608, profile.FixedSaveLength);
-        Assert.Equal(1, profile.ProtocolVersion);
+        Assert.Equal(2, profile.ProtocolVersion);
     }
 
     [Theory]

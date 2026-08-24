@@ -3,6 +3,7 @@
 #include <cstdint>
 
 #include "ProtectionBootstrap.h"
+#include "save/SaveHooks.h"
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
@@ -15,4 +16,14 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
 extern "C" __declspec(dllexport) std::uint32_t __stdcall InitializeProtection(
     DSRRandomizer::ProtectionInitBlock* block) {
     return static_cast<std::uint32_t>(DSRRandomizer::InitializeProtection(block));
+}
+
+extern "C" __declspec(dllexport) std::uint32_t __stdcall QuerySaveAuditCounters(
+    DSRRandomizer::Save::SaveAuditCounters* counters,
+    const std::uint32_t size) {
+    if (counters == nullptr || size != sizeof(*counters)) {
+        return ERROR_INVALID_PARAMETER;
+    }
+    *counters = DSRRandomizer::Save::CurrentSaveAuditCounters();
+    return ERROR_SUCCESS;
 }

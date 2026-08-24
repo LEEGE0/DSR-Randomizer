@@ -10,7 +10,7 @@ namespace DSRRandomizer.Launcher.Native;
 public sealed class ProtectionPipeServer : IAsyncDisposable
 {
     private const uint ProtectionMagic = 0x44535252;
-    private const ushort ProtocolVersion = 1;
+    private const ushort ProtocolVersion = 2;
     private const int NonceLength = 32;
     private const int MessageLength = 52;
 

@@ -39,7 +39,7 @@ public sealed class CompatibilityProfileCatalog
                     0x6344ca56,
                     52015104),
                 4326608,
-                1)
+                2)
         });
 
     public CompatibilityProfile Select(ExecutableIdentity executable)

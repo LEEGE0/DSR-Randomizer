@@ -10,8 +10,17 @@ namespace DSRRandomizer.Launcher.Native;
 public enum ProtectionFlags : ulong
 {
     None = 0,
-    Bootstrap = 1UL << 0
+    Bootstrap = 1UL << 0,
+    SaveKnownFolder = 1UL << 1,
+    SaveFileIo = 1UL << 2
 }
+
+public sealed record GuardSavePathConfiguration(
+    string VirtualDocuments,
+    string VirtualLogicalSave,
+    string RealSaveRoot,
+    string ExternalSaveRoot,
+    string DedicatedRmm);
 
 public sealed record GuardConfiguration(
     string GuardDllPath,
@@ -21,7 +30,8 @@ public sealed record GuardConfiguration(
     byte[] ExpectedNonce,
     byte[] InitializationNonce,
     TimeSpan OperationTimeout,
-    TimeSpan HandshakeTimeout)
+    TimeSpan HandshakeTimeout,
+    GuardSavePathConfiguration? SavePaths)
 {
     public static GuardConfiguration Create(
         string guardDllPath,
@@ -38,15 +48,23 @@ public sealed record GuardConfiguration(
             nonce,
             (byte[])nonce.Clone(),
             TimeSpan.FromSeconds(10),
-            TimeSpan.FromSeconds(10));
+            TimeSpan.FromSeconds(10),
+            null);
     }
 }
 
 public sealed class RemoteDllInjector
 {
     private const uint ProtectionMagic = 0x44535252;
-    private const int InitBlockLength = 308;
+    private const int InitBlockLength = 5428;
     private const int PipeNameCharacters = 128;
+    private const int SavePathCharacters = 512;
+    private const int PipeNameOffset = 52;
+    private const int VirtualDocumentsOffset = 308;
+    private const int VirtualLogicalSaveOffset = 1332;
+    private const int RealSaveRootOffset = 2356;
+    private const int ExternalSaveRootOffset = 3380;
+    private const int DedicatedRmmOffset = 4404;
 
     public async Task<ProtectionHandshake> InitializeAsync(
         IProtectedProcess child,
@@ -147,7 +165,7 @@ public sealed class RemoteDllInjector
         }
     }
 
-    private static byte[] CreateInitBlock(
+    internal static byte[] CreateInitBlock(
         GuardConfiguration configuration,
         string fullPipeName)
     {
@@ -166,8 +184,86 @@ public sealed class RemoteDllInjector
             block.AsSpan(16),
             configuration.DiagnosticMode ? 1U : 0U);
         configuration.InitializationNonce.CopyTo(block, 20);
-        pipeNameBytes.CopyTo(block, 52);
+        pipeNameBytes.CopyTo(block, PipeNameOffset);
+
+        const ProtectionFlags saveMask =
+            ProtectionFlags.SaveKnownFolder | ProtectionFlags.SaveFileIo;
+        var requestedSaveFlags = (ProtectionFlags)configuration.RequiredFlags & saveMask;
+        if (requestedSaveFlags != ProtectionFlags.None && requestedSaveFlags != saveMask)
+        {
+            throw new ArgumentException(
+                "Known Folder and file-I/O save protections must be requested together.",
+                nameof(configuration));
+        }
+        if (requestedSaveFlags == saveMask)
+        {
+            if (configuration.SavePaths is null)
+            {
+                throw new ArgumentException(
+                    "Canonical save paths are required when save protections are requested.",
+                    nameof(configuration));
+            }
+
+            WriteCanonicalPath(
+                block,
+                VirtualDocumentsOffset,
+                configuration.SavePaths.VirtualDocuments,
+                configuration);
+            WriteCanonicalPath(
+                block,
+                VirtualLogicalSaveOffset,
+                configuration.SavePaths.VirtualLogicalSave,
+                configuration);
+            WriteCanonicalPath(
+                block,
+                RealSaveRootOffset,
+                configuration.SavePaths.RealSaveRoot,
+                configuration);
+            WriteCanonicalPath(
+                block,
+                ExternalSaveRootOffset,
+                configuration.SavePaths.ExternalSaveRoot,
+                configuration);
+            WriteCanonicalPath(
+                block,
+                DedicatedRmmOffset,
+                configuration.SavePaths.DedicatedRmm,
+                configuration);
+        }
+        else if (configuration.SavePaths is not null)
+        {
+            throw new ArgumentException(
+                "Save paths cannot be marshalled unless both save protections are requested.",
+                nameof(configuration));
+        }
         return block;
+    }
+
+    private static void WriteCanonicalPath(
+        byte[] block,
+        int offset,
+        string path,
+        GuardConfiguration configuration)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        var canonical = Path.GetFullPath(path);
+        if (!string.Equals(canonical, path, StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith(@"\\", StringComparison.Ordinal) ||
+            path.Contains('~'))
+        {
+            throw new ArgumentException(
+                "Save hook paths must be unambiguous canonical DOS paths.",
+                nameof(configuration));
+        }
+
+        var bytes = Encoding.Unicode.GetBytes(path + '\0');
+        if (bytes.Length > SavePathCharacters * sizeof(char))
+        {
+            throw new ArgumentException(
+                "A save hook path exceeds the protocol capacity.",
+                nameof(configuration));
+        }
+        bytes.CopyTo(block, offset);
     }
 
     private static IntPtr AllocateWriteAndVerify(

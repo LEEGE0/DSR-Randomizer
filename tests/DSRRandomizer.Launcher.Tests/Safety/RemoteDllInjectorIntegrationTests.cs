@@ -1,8 +1,10 @@
+using System.Buffers.Binary;
 using System.Diagnostics;
 using System.IO.Pipes;
 using System.Security.Cryptography;
 using System.Security.AccessControl;
 using System.Security.Principal;
+using System.Text;
 using DSRRandomizer.Foundation.Safety;
 using DSRRandomizer.Launcher.Native;
 using DSRRandomizer.Launcher.Safety;
@@ -12,13 +14,76 @@ namespace DSRRandomizer.Launcher.Tests.Safety;
 public sealed class RemoteDllInjectorIntegrationTests
 {
     [Fact]
+    public void CreateInitBlock_MarshalsVersionedCanonicalSavePathsAtExactOffsets()
+    {
+        var configuration = GuardConfiguration.Create(
+            @"C:\fixture\DSRRandomizer.Runtime.dll",
+            ProtocolVersion: 2,
+            RequiredFlags: (ulong)(ProtectionFlags.Bootstrap |
+                                   ProtectionFlags.SaveKnownFolder |
+                                   ProtectionFlags.SaveFileIo),
+            DiagnosticMode: true) with
+        {
+            SavePaths = new GuardSavePathConfiguration(
+                @"C:\fixture\virtual-documents",
+                @"C:\fixture\virtual-documents\NBGI\DARK SOULS REMASTERED\12345678901234567\DRAKS0005.sl2",
+                @"C:\fixture\real-normal",
+                @"C:\fixture\external",
+                @"C:\fixture\external\DRAKS0005.rmm")
+        };
+
+        var block = RemoteDllInjector.CreateInitBlock(
+            configuration,
+            @"\\.\pipe\fixture");
+
+        Assert.Equal(5428, block.Length);
+        Assert.Equal((ushort)2, BinaryPrimitives.ReadUInt16LittleEndian(block.AsSpan(4)));
+        Assert.Equal((ushort)5428, BinaryPrimitives.ReadUInt16LittleEndian(block.AsSpan(6)));
+        Assert.Equal(7UL, BinaryPrimitives.ReadUInt64LittleEndian(block.AsSpan(8)));
+        Assert.Equal(@"\\.\pipe\fixture", ReadFixedWide(block, 52));
+        Assert.Equal(configuration.SavePaths.VirtualDocuments, ReadFixedWide(block, 308));
+        Assert.Equal(configuration.SavePaths.VirtualLogicalSave, ReadFixedWide(block, 1332));
+        Assert.Equal(configuration.SavePaths.RealSaveRoot, ReadFixedWide(block, 2356));
+        Assert.Equal(configuration.SavePaths.ExternalSaveRoot, ReadFixedWide(block, 3380));
+        Assert.Equal(configuration.SavePaths.DedicatedRmm, ReadFixedWide(block, 4404));
+    }
+
+    [Fact]
+    public void CreateInitBlock_RequiresBothSaveFlagsAndCanonicalConfiguration()
+    {
+        var missingPaths = GuardConfiguration.Create(
+            @"C:\fixture\DSRRandomizer.Runtime.dll",
+            ProtocolVersion: 2,
+            RequiredFlags: (ulong)(ProtectionFlags.Bootstrap |
+                                   ProtectionFlags.SaveKnownFolder |
+                                   ProtectionFlags.SaveFileIo),
+            DiagnosticMode: false);
+        var partialFlags = missingPaths with
+        {
+            RequiredFlags = (ulong)(ProtectionFlags.Bootstrap |
+                                    ProtectionFlags.SaveFileIo),
+            SavePaths = new GuardSavePathConfiguration(
+                @"C:\fixture\virtual-documents",
+                @"C:\fixture\virtual-documents\NBGI\DARK SOULS REMASTERED\12345678901234567\DRAKS0005.sl2",
+                @"C:\fixture\real-normal",
+                @"C:\fixture\external",
+                @"C:\fixture\external\DRAKS0005.rmm")
+        };
+
+        Assert.Throws<ArgumentException>(
+            () => RemoteDllInjector.CreateInitBlock(missingPaths, @"\\.\pipe\fixture"));
+        Assert.Throws<ArgumentException>(
+            () => RemoteDllInjector.CreateInitBlock(partialFlags, @"\\.\pipe\fixture"));
+    }
+
+    [Fact]
     public async Task InitializeAsync_ReturnsCompleteFixtureHandshakeBeforeResume()
     {
         var paths = FindNativeArtifacts();
         await using var child = await CreateSuspendedFixtureAsync(paths.FixturePath);
         var configuration = GuardConfiguration.Create(
             paths.GuardPath,
-            ProtocolVersion: 1,
+            ProtocolVersion: 2,
             RequiredFlags: (ulong)ProtectionFlags.Bootstrap,
             DiagnosticMode: true);
 
@@ -40,7 +105,7 @@ public sealed class RemoteDllInjectorIntegrationTests
         await using var child = await CreateSuspendedFixtureAsync(paths.FixturePath);
         var configuration = GuardConfiguration.Create(
             paths.GuardPath,
-            ProtocolVersion: 1,
+            ProtocolVersion: 2,
             RequiredFlags: (ulong)ProtectionFlags.Bootstrap,
             DiagnosticMode: true) with
         {
@@ -103,7 +168,7 @@ public sealed class RemoteDllInjectorIntegrationTests
         await using var child = await CreateSuspendedFixtureAsync(paths.FixturePath);
         var configuration = GuardConfiguration.Create(
             paths.GuardPath,
-            ProtocolVersion: 2,
+            ProtocolVersion: 99,
             RequiredFlags: (ulong)ProtectionFlags.Bootstrap,
             DiagnosticMode: true);
 
@@ -125,7 +190,7 @@ public sealed class RemoteDllInjectorIntegrationTests
         await using var child = await CreateSuspendedFixtureAsync(paths.FixturePath);
         var configuration = GuardConfiguration.Create(
             paths.StalledGuardPath,
-            ProtocolVersion: 1,
+            ProtocolVersion: 2,
             RequiredFlags: (ulong)ProtectionFlags.Bootstrap,
             DiagnosticMode: true) with
         {
@@ -149,7 +214,7 @@ public sealed class RemoteDllInjectorIntegrationTests
         await using var child = await CreateSuspendedFixtureAsync(paths.FixturePath);
         var configuration = GuardConfiguration.Create(
             paths.StalledGuardPath,
-            ProtocolVersion: 1,
+            ProtocolVersion: 2,
             RequiredFlags: (ulong)ProtectionFlags.Bootstrap,
             DiagnosticMode: true);
         using var cancellation = new CancellationTokenSource(
@@ -282,6 +347,12 @@ public sealed class RemoteDllInjectorIntegrationTests
         }
 
         return false;
+    }
+
+    private static string ReadFixedWide(byte[] block, int offset)
+    {
+        var value = Encoding.Unicode.GetString(block, offset, 512 * sizeof(char));
+        return value[..value.IndexOf('\0')];
     }
 
     private sealed record NativeArtifacts(
