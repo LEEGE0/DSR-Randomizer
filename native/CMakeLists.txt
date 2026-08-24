@@ -20,6 +20,7 @@ endfunction()
 add_subdirectory(runtime)
 target_sources(DSRRandomizer.Runtime.Core
   PRIVATE
+    runtime/network/NetworkPolicy.cpp
     runtime/save/SavePathPolicy.cpp)
 
 add_executable(DSRRandomizer.SuspendedFixture
@@ -67,6 +68,16 @@ set_target_properties(SavePathPolicyTests PROPERTIES
   CXX_EXTENSIONS OFF)
 
 add_test(NAME SavePathPolicyTests COMMAND SavePathPolicyTests)
+
+add_executable(NetworkPolicyTests
+  tests/NetworkPolicyTests.cpp)
+target_compile_features(NetworkPolicyTests PRIVATE cxx_std_20)
+target_link_libraries(NetworkPolicyTests PRIVATE DSRRandomizer.Runtime.Core Ws2_32)
+dsr_configure_target(NetworkPolicyTests)
+set_target_properties(NetworkPolicyTests PROPERTIES
+  CXX_EXTENSIONS OFF)
+
+add_test(NAME NetworkPolicyTests COMMAND NetworkPolicyTests)
 
 add_executable(SuspendedFixtureTests
   tests/SuspendedFixtureTests.cpp)
