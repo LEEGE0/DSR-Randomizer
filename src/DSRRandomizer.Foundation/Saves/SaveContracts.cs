@@ -35,5 +35,6 @@ public enum SaveErrorCode
     SourceChanged,
     DestinationRace,
     SeedMismatch,
-    PathDenied
+    PathDenied,
+    FirstCopyConfirmationRequired
 }

@@ -163,7 +163,7 @@ public sealed class LauncherService : ILauncherService
         if (!firstCopyConfirmed)
         {
             return DedicatedSaveResult.Fail(
-                SaveErrorCode.MultipleProfilesRequireSelection,
+                SaveErrorCode.FirstCopyConfirmationRequired,
                 "First-copy confirmation is required before reading the normal DRAKS0005.sl2 save.");
         }
 

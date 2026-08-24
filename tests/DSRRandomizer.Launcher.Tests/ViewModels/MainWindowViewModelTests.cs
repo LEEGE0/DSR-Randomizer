@@ -91,7 +91,7 @@ public sealed class MainWindowViewModelTests
         {
             SaveProfiles = [new SaveProfileCandidate(SteamId, source)],
             PrepareResult = DedicatedSaveResult.Fail(
-                SaveErrorCode.MultipleProfilesRequireSelection,
+                SaveErrorCode.FirstCopyConfirmationRequired,
                 "First-copy confirmation is required.")
         };
         var local = Path.Combine("C:\\Local", "DSR-Randomizer");

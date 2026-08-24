@@ -237,7 +237,7 @@ public sealed class MainWindowViewModel : ObservableObject
             }
 
             Status = !FirstCopyConfirmed
-                && result.ErrorCode == SaveErrorCode.MultipleProfilesRequireSelection
+                && result.ErrorCode == SaveErrorCode.FirstCopyConfirmationRequired
                 ? $"First-copy confirmation required. Source: {SelectedSaveSourcePath} Destination: {DedicatedSavePath}"
                 : $"Dedicated save preparation failed: {result.Message}";
         }

@@ -79,7 +79,7 @@ public sealed class LauncherServiceTests : IDisposable
             CancellationToken.None);
 
         Assert.False(result.Ready);
-        Assert.Equal(SaveErrorCode.MultipleProfilesRequireSelection, result.ErrorCode);
+        Assert.Equal(SaveErrorCode.FirstCopyConfirmationRequired, result.ErrorCode);
         Assert.Contains("confirmation", result.Message, StringComparison.OrdinalIgnoreCase);
         Assert.False(File.Exists(Path.Combine(
             _container,

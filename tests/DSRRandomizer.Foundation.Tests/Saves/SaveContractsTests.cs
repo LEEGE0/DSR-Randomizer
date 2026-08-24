@@ -68,9 +68,13 @@ public sealed class SaveContractsTests
                 SaveErrorCode.SourceChanged,
                 SaveErrorCode.DestinationRace,
                 SaveErrorCode.SeedMismatch,
-                SaveErrorCode.PathDenied
+                SaveErrorCode.PathDenied,
+                SaveErrorCode.FirstCopyConfirmationRequired
             },
             Enum.GetValues<SaveErrorCode>());
+        Assert.Equal(3, (int)SaveErrorCode.MultipleProfilesRequireSelection);
+        Assert.Equal(9, (int)SaveErrorCode.PathDenied);
+        Assert.Equal(10, (int)SaveErrorCode.FirstCopyConfirmationRequired);
     }
 
     private sealed class FakeCanonicalizer(IReadOnlyDictionary<string, string> mappings) : IPathCanonicalizer

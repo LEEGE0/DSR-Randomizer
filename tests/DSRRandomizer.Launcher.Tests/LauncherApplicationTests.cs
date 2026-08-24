@@ -63,7 +63,7 @@ public sealed class LauncherApplicationTests
         var service = new FakeLauncherService
         {
             PrepareResult = DedicatedSaveResult.Fail(
-                SaveErrorCode.MultipleProfilesRequireSelection,
+                SaveErrorCode.FirstCopyConfirmationRequired,
                 "First-copy confirmation is required in the UI.")
         };
         var application = new LauncherApplication(service, output, new StringWriter());
@@ -74,7 +74,14 @@ public sealed class LauncherApplicationTests
 
         Assert.Equal(7, exitCode);
         Assert.Equal(("12345678901234567", false), Assert.Single(service.PrepareCalls));
-        Assert.Contains("confirmation", output.ToString(), StringComparison.OrdinalIgnoreCase);
+        using var document = JsonDocument.Parse(output.ToString());
+        Assert.Equal(
+            10,
+            document.RootElement.GetProperty("errorCode").GetInt32());
+        Assert.Contains(
+            "confirmation",
+            document.RootElement.GetProperty("error").GetString(),
+            StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
