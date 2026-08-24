@@ -1,6 +1,8 @@
 add_library(DSRRandomizer.Runtime.Core STATIC
   ProtectionBootstrap.cpp
   ProtectionBootstrap.h
+  network/WinsockHooks.cpp
+  network/WinsockHooks.h
   save/SaveHooks.cpp
   save/SaveHooks.h)
 target_compile_features(DSRRandomizer.Runtime.Core PUBLIC cxx_std_20)
@@ -13,7 +15,8 @@ target_link_libraries(DSRRandomizer.Runtime.Core
   PUBLIC
     minhook
     Shell32
-    Ole32)
+    Ole32
+    Ws2_32)
 set_target_properties(DSRRandomizer.Runtime.Core PROPERTIES
   CXX_EXTENSIONS OFF
   POSITION_INDEPENDENT_CODE ON)

@@ -10,15 +10,30 @@ inline constexpr std::uint16_t kProtectionProtocolVersion = 2;
 inline constexpr std::size_t kProtectionNonceSize = 32;
 inline constexpr std::size_t kProtectionPipeNameCharacters = 128;
 inline constexpr std::size_t kProtectionSavePathCharacters = 512;
+inline constexpr std::size_t kProtectionSocketEndpointCapacity = 2;
+
+enum class SocketTransport : std::uint16_t {
+    Tcp = 1,
+    Udp = 2,
+};
 
 enum class ProtectionFlags : std::uint64_t {
     None = 0,
     Bootstrap = 1ULL << 0,
     SaveKnownFolder = 1ULL << 1,
     SaveFileIo = 1ULL << 2,
+    Winsock = 1ULL << 3,
 };
 
 #pragma pack(push, 1)
+struct ProtectionSocketEndpoint {
+    std::uint16_t transport;
+    std::uint16_t family;
+    std::uint16_t port;
+    std::uint16_t reserved;
+    std::uint8_t address[16];
+};
+
 struct ProtectionInitBlock {
     std::uint32_t magic;
     std::uint16_t version;
@@ -32,6 +47,8 @@ struct ProtectionInitBlock {
     wchar_t realSaveRoot[kProtectionSavePathCharacters];
     wchar_t externalSaveRoot[kProtectionSavePathCharacters];
     wchar_t dedicatedRmm[kProtectionSavePathCharacters];
+    std::uint32_t socketEndpointCount;
+    ProtectionSocketEndpoint socketEndpoints[kProtectionSocketEndpointCapacity];
 };
 
 struct ProtectionHandshakeMessage {

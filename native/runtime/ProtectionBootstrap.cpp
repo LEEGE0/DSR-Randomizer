@@ -6,12 +6,70 @@
 #include <atomic>
 #include <string>
 
+#include "network/WinsockHooks.h"
 #include "save/SaveHooks.h"
 
 namespace DSRRandomizer {
 namespace {
 
 std::atomic<std::uint64_t> activeFlags{0};
+
+bool IsZeroEndpoint(const ProtectionSocketEndpoint& endpoint) noexcept {
+    return endpoint.transport == 0
+        && endpoint.family == 0
+        && endpoint.port == 0
+        && endpoint.reserved == 0
+        && std::all_of(
+            std::begin(endpoint.address),
+            std::end(endpoint.address),
+            [](const std::uint8_t value) { return value == 0; });
+}
+
+bool ReadSocketConfiguration(
+    const ProtectionInitBlock& block,
+    Network::WinsockHookConfiguration& configuration) noexcept {
+    if (block.socketEndpointCount > kProtectionSocketEndpointCapacity) {
+        return false;
+    }
+    configuration.endpointCount = block.socketEndpointCount;
+    for (std::size_t index = 0; index < kProtectionSocketEndpointCapacity; ++index) {
+        const auto& source = block.socketEndpoints[index];
+        if (index >= block.socketEndpointCount) {
+            if (!IsZeroEndpoint(source)) {
+                return false;
+            }
+            continue;
+        }
+        if (source.reserved != 0) {
+            return false;
+        }
+        auto& destination = configuration.endpoints[index];
+        destination.transport = static_cast<SocketTransport>(source.transport);
+        destination.family = static_cast<ADDRESS_FAMILY>(source.family);
+        destination.port = source.port;
+        std::copy(std::begin(source.address), std::end(source.address),
+            destination.address.begin());
+    }
+    return true;
+}
+
+bool SocketConfigurationIsEmpty(const ProtectionInitBlock& block) noexcept {
+    return block.socketEndpointCount == 0
+        && std::all_of(
+            std::begin(block.socketEndpoints),
+            std::end(block.socketEndpoints),
+            [](const ProtectionSocketEndpoint& endpoint) {
+                return IsZeroEndpoint(endpoint);
+            });
+}
+
+bool UninstallProtectionGroups() noexcept {
+    if (Save::UninstallSaveHooks() != Save::SaveHookCleanupStatus::Success) {
+        return false;
+    }
+    return Network::UninstallWinsockHooks()
+        == Network::WinsockHookCleanupStatus::Success;
+}
 
 bool ReadRequiredPath(
     const wchar_t* source,
@@ -44,8 +102,10 @@ InitStatus InitializeCore(
         static_cast<std::uint64_t>(ProtectionFlags::SaveKnownFolder);
     constexpr auto saveFileIoFlag =
         static_cast<std::uint64_t>(ProtectionFlags::SaveFileIo);
+    constexpr auto winsockFlag =
+        static_cast<std::uint64_t>(ProtectionFlags::Winsock);
     constexpr auto saveFlags = saveKnownFolderFlag | saveFileIoFlag;
-    constexpr auto supportedFlags = bootstrapFlag | saveFlags;
+    constexpr auto supportedFlags = bootstrapFlag | saveFlags | winsockFlag;
     if ((block->requiredFlags & bootstrapFlag) == 0
         || (block->requiredFlags & ~supportedFlags) != 0
         || ((block->requiredFlags & saveFlags) != 0
@@ -53,10 +113,25 @@ InitStatus InitializeCore(
         return InitStatus::RequiredProtectionUnavailable;
     }
 
+    if ((block->requiredFlags & winsockFlag) == 0) {
+        if (!SocketConfigurationIsEmpty(*block)) {
+            return InitStatus::InvalidArgument;
+        }
+    }
+    else {
+        Network::WinsockHookConfiguration socketConfiguration{};
+        if (!ReadSocketConfiguration(*block, socketConfiguration)
+            || Network::InstallWinsockHooks(socketConfiguration)
+                != Network::WinsockHookInstallStatus::Success) {
+            static_cast<void>(Network::UninstallWinsockHooks());
+            return InitStatus::WinsockHookInstallFailed;
+        }
+    }
+
     if ((block->requiredFlags & saveFlags) == saveFlags) {
         try {
             if (pathReader == nullptr) {
-                static_cast<void>(Save::UninstallSaveHooks());
+                static_cast<void>(UninstallProtectionGroups());
                 return InitStatus::SaveHookInstallFailed;
             }
             Save::SaveHookConfiguration configuration{};
@@ -83,12 +158,12 @@ InitStatus InitializeCore(
                     configuration.dedicatedRmm)
                 || Save::InstallSaveHooks(configuration)
                     != Save::SaveHookInstallStatus::Success) {
-                static_cast<void>(Save::UninstallSaveHooks());
+                static_cast<void>(UninstallProtectionGroups());
                 return InitStatus::SaveHookInstallFailed;
             }
         }
         catch (...) {
-            static_cast<void>(Save::UninstallSaveHooks());
+            static_cast<void>(UninstallProtectionGroups());
             return InitStatus::SaveHookInstallFailed;
         }
     }
@@ -156,7 +231,7 @@ InitStatus InitializeProtection(ProtectionInitBlock* block) noexcept {
     const auto reportStatus = ReportHandshake(*block);
     if (reportStatus != InitStatus::Success) {
         activeFlags.store(0, std::memory_order_release);
-        static_cast<void>(Save::UninstallSaveHooks());
+        static_cast<void>(UninstallProtectionGroups());
     }
 
     return reportStatus;

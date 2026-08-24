@@ -41,6 +41,18 @@ dsr_configure_target(DSRRandomizer.SaveClientFixture)
 set_target_properties(DSRRandomizer.SaveClientFixture PROPERTIES
   CXX_EXTENSIONS OFF)
 
+add_executable(DSRRandomizer.NetworkClientFixture
+  fixtures/NetworkClientFixture.cpp)
+target_compile_features(DSRRandomizer.NetworkClientFixture PRIVATE cxx_std_20)
+target_link_libraries(DSRRandomizer.NetworkClientFixture PRIVATE Ws2_32)
+target_include_directories(DSRRandomizer.NetworkClientFixture
+  PRIVATE
+    ${CMAKE_SOURCE_DIR}/native/include
+    ${CMAKE_SOURCE_DIR}/native/runtime)
+dsr_configure_target(DSRRandomizer.NetworkClientFixture)
+set_target_properties(DSRRandomizer.NetworkClientFixture PROPERTIES
+  CXX_EXTENSIONS OFF)
+
 add_library(DSRRandomizer.StalledRuntime SHARED
   fixtures/StalledGuard.cpp)
 target_compile_features(DSRRandomizer.StalledRuntime PRIVATE cxx_std_20)
@@ -78,6 +90,26 @@ set_target_properties(NetworkPolicyTests PROPERTIES
   CXX_EXTENSIONS OFF)
 
 add_test(NAME NetworkPolicyTests COMMAND NetworkPolicyTests)
+
+add_executable(WinsockHookIntegrationTests
+  tests/WinsockHookIntegrationTests.cpp)
+target_compile_features(WinsockHookIntegrationTests PRIVATE cxx_std_20)
+target_link_libraries(WinsockHookIntegrationTests
+  PRIVATE
+    DSRRandomizer.Runtime.Core
+    Ws2_32)
+target_include_directories(WinsockHookIntegrationTests
+  PRIVATE
+    ${CMAKE_SOURCE_DIR}/native/include)
+dsr_configure_target(WinsockHookIntegrationTests)
+set_target_properties(WinsockHookIntegrationTests PROPERTIES
+  CXX_EXTENSIONS OFF)
+
+add_test(
+  NAME WinsockHookIntegrationTests
+  COMMAND WinsockHookIntegrationTests
+    $<TARGET_FILE:DSRRandomizer.NetworkClientFixture>
+    $<TARGET_FILE:DSRRandomizer.Runtime>)
 
 add_executable(SuspendedFixtureTests
   tests/SuspendedFixtureTests.cpp)

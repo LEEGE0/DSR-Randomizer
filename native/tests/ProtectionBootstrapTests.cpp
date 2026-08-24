@@ -8,13 +8,16 @@
 
 namespace {
 
-static_assert(sizeof(DSRRandomizer::ProtectionInitBlock) == 5428);
+static_assert(sizeof(DSRRandomizer::ProtectionSocketEndpoint) == 24);
+static_assert(sizeof(DSRRandomizer::ProtectionInitBlock) == 5480);
 static_assert(offsetof(DSRRandomizer::ProtectionInitBlock, pipeName) == 52);
 static_assert(offsetof(DSRRandomizer::ProtectionInitBlock, virtualDocuments) == 308);
 static_assert(offsetof(DSRRandomizer::ProtectionInitBlock, virtualLogicalSave) == 1332);
 static_assert(offsetof(DSRRandomizer::ProtectionInitBlock, realSaveRoot) == 2356);
 static_assert(offsetof(DSRRandomizer::ProtectionInitBlock, externalSaveRoot) == 3380);
 static_assert(offsetof(DSRRandomizer::ProtectionInitBlock, dedicatedRmm) == 4404);
+static_assert(offsetof(DSRRandomizer::ProtectionInitBlock, socketEndpointCount) == 5428);
+static_assert(offsetof(DSRRandomizer::ProtectionInitBlock, socketEndpoints) == 5432);
 
 int Fail(const char* message) {
     std::cerr << message << '\n';

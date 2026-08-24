@@ -3,6 +3,7 @@
 #include <cstdint>
 
 #include "ProtectionBootstrap.h"
+#include "network/WinsockHooks.h"
 #include "save/SaveHooks.h"
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
@@ -25,5 +26,15 @@ extern "C" __declspec(dllexport) std::uint32_t __stdcall QuerySaveAuditCounters(
         return ERROR_INVALID_PARAMETER;
     }
     *counters = DSRRandomizer::Save::CurrentSaveAuditCounters();
+    return ERROR_SUCCESS;
+}
+
+extern "C" __declspec(dllexport) std::uint32_t __stdcall QueryWinsockAuditCounters(
+    DSRRandomizer::Network::WinsockAuditCounters* counters,
+    const std::uint32_t size) {
+    if (counters == nullptr || size != sizeof(*counters)) {
+        return ERROR_INVALID_PARAMETER;
+    }
+    *counters = DSRRandomizer::Network::CurrentWinsockAuditCounters();
     return ERROR_SUCCESS;
 }

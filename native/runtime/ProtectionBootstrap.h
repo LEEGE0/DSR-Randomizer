@@ -15,6 +15,7 @@ enum class InitStatus : std::uint32_t {
     SupervisorUnavailable = 4,
     SupervisorReportFailed = 5,
     SaveHookInstallFailed = 6,
+    WinsockHookInstallFailed = 7,
 };
 
 InitStatus InitializeProtection(ProtectionInitBlock* block) noexcept;
