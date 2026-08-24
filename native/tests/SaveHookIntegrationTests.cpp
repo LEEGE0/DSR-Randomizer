@@ -278,6 +278,46 @@ SaveHookConfiguration HookConfigurationFor(const fs::path& root) {
     };
 }
 
+void PrintPathDiagnostic(
+    const std::wstring_view label,
+    const std::wstring& path) {
+    SetLastError(ERROR_SUCCESS);
+    const HANDLE handle = CreateFileW(
+        path.c_str(),
+        FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+        nullptr);
+    const DWORD openError = GetLastError();
+    std::wcerr << label << L" path=" << path
+               << L" open=" << (handle != INVALID_HANDLE_VALUE)
+               << L" error=" << openError;
+    if (handle != INVALID_HANDLE_VALUE) {
+        BY_HANDLE_FILE_INFORMATION information{};
+        std::array<wchar_t, 32768> finalPath{};
+        const auto finalLength = GetFinalPathNameByHandleW(
+            handle,
+            finalPath.data(),
+            static_cast<DWORD>(finalPath.size()),
+            0);
+        if (GetFileInformationByHandle(handle, &information)) {
+            std::wcerr << L" attrs=" << information.dwFileAttributes
+                       << L" links=" << information.nNumberOfLinks;
+        }
+        std::wcerr << L" final=";
+        if (finalLength > 0 && finalLength < finalPath.size()) {
+            std::wcerr << std::wstring_view(finalPath.data(), finalLength);
+        }
+        else {
+            std::wcerr << L"<error:" << GetLastError() << L">";
+        }
+        CloseHandle(handle);
+    }
+    std::wcerr << L'\n';
+}
+
 int VerifyHookInstallRollback(const fs::path& root) {
     const auto configuration = HookConfigurationFor(root);
 
@@ -296,6 +336,11 @@ int VerifyHookInstallRollback(const fs::path& root) {
                   << " enabled=" << missingTarget.EnabledCount()
                   << " installed="
                   << DSRRandomizer::Save::SaveHooksAreInstalled() << '\n';
+        PrintPathDiagnostic(L"virtualDocuments", configuration.virtualDocuments);
+        PrintPathDiagnostic(L"virtualLogicalSave", configuration.virtualLogicalSave);
+        PrintPathDiagnostic(L"realSaveRoot", configuration.realSaveRoot);
+        PrintPathDiagnostic(L"externalSaveRoot", configuration.externalSaveRoot);
+        PrintPathDiagnostic(L"dedicatedRmm", configuration.dedicatedRmm);
         return Fail("missing hook target did not roll back the save group");
     }
 
