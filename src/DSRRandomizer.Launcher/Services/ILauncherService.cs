@@ -1,5 +1,6 @@
 using DSRRandomizer.Foundation.Installation;
 using DSRRandomizer.Foundation.Runtime;
+using DSRRandomizer.Foundation.Saves;
 
 namespace DSRRandomizer.Launcher.Services;
 
@@ -15,5 +16,13 @@ public interface ILauncherService
         CancellationToken cancellationToken);
 
     Task<RuntimeReadinessResult> GetReadinessAsync(
+        CancellationToken cancellationToken);
+
+    Task<IReadOnlyList<SaveProfileCandidate>> DiscoverSaveProfilesAsync(
+        CancellationToken cancellationToken);
+
+    Task<DedicatedSaveResult> PrepareDedicatedSaveAsync(
+        string steamId,
+        bool firstCopyConfirmed,
         CancellationToken cancellationToken);
 }

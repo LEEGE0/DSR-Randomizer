@@ -1,5 +1,6 @@
 using DSRRandomizer.Foundation.Installation;
 using DSRRandomizer.Foundation.Runtime;
+using DSRRandomizer.Foundation.Saves;
 using DSRRandomizer.Launcher.Services;
 
 namespace DSRRandomizer.Launcher.Tests;
@@ -81,5 +82,15 @@ public sealed class LauncherApplicationPackageTests : IDisposable
 
         public Task<RuntimeReadinessResult> GetReadinessAsync(CancellationToken cancellationToken) =>
             throw new InvalidOperationException("Package validation must not read runtime status.");
+
+        public Task<IReadOnlyList<SaveProfileCandidate>> DiscoverSaveProfilesAsync(
+            CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("Package validation must not discover save profiles.");
+
+        public Task<DedicatedSaveResult> PrepareDedicatedSaveAsync(
+            string steamId,
+            bool firstCopyConfirmed,
+            CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("Package validation must not prepare a save.");
     }
 }

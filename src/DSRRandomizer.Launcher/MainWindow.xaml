@@ -3,7 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="DSR Randomizer — Isolation Foundation"
         Width="720"
-        Height="520"
+        Height="700"
         MinWidth="640"
         MinHeight="460"
         WindowStartupLocation="CenterScreen">
@@ -48,6 +48,34 @@
                          Minimum="0"
                          Maximum="100"
                          Value="{Binding ProgressPercent}" />
+
+            <TextBlock Margin="0,20,0,0"
+                       FontWeight="SemiBold"
+                       Text="Dedicated randomizer save" />
+            <TextBlock Margin="0,6,0,8"
+                       TextWrapping="Wrap"
+                       Text="Choose the exact SteamID. An existing external save can be reused without reading the normal save; the first copy requires explicit confirmation." />
+            <ComboBox Margin="0,0,0,8"
+                      MinHeight="30"
+                      ItemsSource="{Binding SaveProfiles}"
+                      SelectedItem="{Binding SelectedSaveProfile}"
+                      DisplayMemberPath="SteamId" />
+            <TextBlock Text="Source normal save" />
+            <TextBlock Margin="0,3,0,8"
+                       Text="{Binding SelectedSaveSourcePath}"
+                       TextWrapping="Wrap" />
+            <TextBlock Text="External dedicated destination" />
+            <TextBlock Margin="0,3,0,8"
+                       Text="{Binding DedicatedSavePath}"
+                       TextWrapping="Wrap" />
+            <CheckBox Margin="0,0,0,8"
+                      IsChecked="{Binding FirstCopyConfirmed}"
+                      Content="I confirm the first copy from the exact source shown above." />
+            <Button MinWidth="180"
+                    HorizontalAlignment="Left"
+                    Padding="12,7"
+                    Content="Discover / prepare dedicated save"
+                    Command="{Binding PrepareSaveCommand}" />
 
             <Button Margin="0,18,0,14"
                     Padding="12,9"

@@ -58,6 +58,46 @@ public sealed class LauncherApplication
             return 2;
         }
 
+        if (args is ["--prepare-save", var steamId])
+        {
+            if (steamId.Length is < 16 or > 20 || !steamId.All(char.IsAsciiDigit))
+            {
+                await WriteJsonAsync(new
+                {
+                    success = false,
+                    error = "SteamID must contain exactly 16 to 20 decimal digits."
+                });
+                return 2;
+            }
+
+            try
+            {
+                var result = await _service.PrepareDedicatedSaveAsync(
+                    steamId,
+                    firstCopyConfirmed: false,
+                    cancellationToken);
+                await WriteJsonAsync(new
+                {
+                    success = result.Ready,
+                    reusedExisting = result.ReusedExisting,
+                    savePath = result.SavePath,
+                    errorCode = result.ErrorCode,
+                    error = result.Message
+                });
+                return result.Ready ? 0 : 7;
+            }
+            catch (Exception exception) when (
+                exception is IOException
+                    or UnauthorizedAccessException
+                    or ArgumentException
+                    or JsonException)
+            {
+                await _error.WriteLineAsync(exception.Message);
+                await WriteJsonAsync(new { success = false, error = exception.Message });
+                return 7;
+            }
+        }
+
         if (args is ["--verify", var gamePath])
         {
             var result = await _service.VerifyAsync(gamePath, cancellationToken);
@@ -115,7 +155,7 @@ public sealed class LauncherApplication
         await WriteJsonAsync(new
         {
             success = false,
-            error = "Invalid arguments. Supported commands: --verify <game-path>, --initialize-runtime <game-path>, --status."
+            error = "Invalid arguments. Supported commands: --verify <game-path>, --initialize-runtime <game-path>, --prepare-save <SteamID>, --status."
         });
         return 2;
     }

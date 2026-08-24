@@ -28,7 +28,8 @@ public partial class App : Application
         var layout = LocalDataLayout.Create(localRoot, boundary);
         var viewModel = new MainWindowViewModel(
             service,
-            new FileExternalLogger(layout, boundary))
+            new FileExternalLogger(layout, boundary),
+            localRoot)
         {
             GamePath = selectedSource ?? string.Empty
         };
