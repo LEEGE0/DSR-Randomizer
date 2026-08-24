@@ -45,7 +45,9 @@ public:
         std::wstring_view canonicalPath) const;
 
 private:
-    [[nodiscard]] static std::wstring Normalize(std::wstring_view path);
+    [[nodiscard]] static std::wstring Normalize(
+        std::wstring_view path,
+        bool allowForwardSlashes);
     [[nodiscard]] static bool IsBelow(
         std::wstring_view path,
         std::wstring_view root) noexcept;
