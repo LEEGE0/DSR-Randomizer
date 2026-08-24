@@ -302,7 +302,7 @@ Development uses `feat/*` and `fix/*` branches. Commits follow Conventional Comm
 
 Release sequence:
 
-- `v0.1.0-alpha.1`: launcher and external-runtime isolation
+- `v0.1.0-alpha.1`: launcher and external-runtime isolation with game launch locked
 - `v0.2.0-alpha.1`: item permutation and progression validation
 - `v0.3.0-alpha.1`: weighted regular-enemy placement, boss permutation, special offline spawns, and tutorial scaling
 - `v0.4.0-alpha.1`: auto-equip, save isolation, and official-online blocking
@@ -314,14 +314,14 @@ Every release uses an annotated Git tag, a GitHub Release, release notes derived
 ## 16. Delivery phases
 
 1. Establish the public repository, safety guardrails, build, and test skeleton.
-2. Prove that a copied external runtime can launch without loading the installed Overhaul and without modifying the source installation.
+2. Prove that a full copied external runtime can be constructed and verified without copying the installed Overhaul or modifying the source installation; keep game launch locked.
 3. Implement catalog import, deterministic seed formatting, and atomic seed packages.
 4. Implement item permutation and progression validation.
 5. Implement weighted regular-enemy placement, offline Gravelord Black Phantom and Vagrant spawns, and first-visit tutorial scaling.
 6. Implement compatible boss permutation and tutorial-boss scaling.
 7. Implement auto-equip and persistent ring rotation.
 8. Implement dedicated save redirection and mismatch protection.
-9. Implement and verify official-online blocking.
+9. Implement and verify official-online blocking, then perform the first permitted copied-runtime launch and prove that it neither loads the installed Overhaul nor modifies the source installation.
 10. Complete integration, seed stress, release-content, and original-install immutability tests.
 
 Each phase is committed and pushed only after its applicable tests pass. Tags and releases follow the sequence in Section 15.
