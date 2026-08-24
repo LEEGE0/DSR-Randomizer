@@ -4,21 +4,21 @@ namespace DSRRandomizer.Foundation.Paths;
 
 public static partial class SavePaths
 {
-    public static string GetDedicatedSave(string localDataRoot, string steamId)
+    public static string GetDedicatedSave(string localDataRoot, string steamId, WriteBoundary boundary)
+    {
+        ArgumentNullException.ThrowIfNull(boundary);
+
+        var destination = ResolveDedicatedSave(localDataRoot, steamId);
+        boundary.EnsureAllowed(destination);
+        return destination;
+    }
+
+    private static string ResolveDedicatedSave(string localDataRoot, string steamId)
     {
         ValidateSteamId(steamId);
 
         var root = Path.GetFullPath(localDataRoot);
         return Path.GetFullPath(Path.Combine(root, "saves", steamId, "DRAKS0005.rmm"));
-    }
-
-    public static string GetDedicatedSave(string localDataRoot, string steamId, WriteBoundary boundary)
-    {
-        ArgumentNullException.ThrowIfNull(boundary);
-
-        var destination = GetDedicatedSave(localDataRoot, steamId);
-        boundary.EnsureAllowed(destination);
-        return destination;
     }
 
     private static void ValidateSteamId(string steamId)

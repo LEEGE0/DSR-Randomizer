@@ -8,10 +8,24 @@ public sealed class SaveContractsTests
     [Fact]
     public void DedicatedPath_IsNamespacedByNumericSteamId()
     {
-        var path = SavePaths.GetDedicatedSave(@"C:\Local\DSR", "12345678901234567");
+        var path = SavePaths.GetDedicatedSave(
+            @"C:\Local\DSR",
+            "12345678901234567",
+            CreateBoundary());
 
         Assert.Equal(@"C:\Local\DSR\saves\12345678901234567\DRAKS0005.rmm", path);
-        Assert.Throws<ArgumentException>(() => SavePaths.GetDedicatedSave(@"C:\Local\DSR", "../escape"));
+        Assert.Throws<ArgumentException>(
+            () => SavePaths.GetDedicatedSave(@"C:\Local\DSR", "../escape", CreateBoundary()));
+    }
+
+    [Fact]
+    public void DedicatedPath_PublicApiRequiresWriteBoundary()
+    {
+        var uncheckedResolver = typeof(SavePaths).GetMethod(
+            nameof(SavePaths.GetDedicatedSave),
+            [typeof(string), typeof(string)]);
+
+        Assert.Null(uncheckedResolver);
     }
 
     [Fact]
@@ -65,4 +79,9 @@ public sealed class SaveContractsTests
             ? mapped
             : Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar);
     }
+
+    private static WriteBoundary CreateBoundary() => WriteBoundary.Create(
+        @"C:\Steam\DSR",
+        @"C:\Local\DSR",
+        new FakeCanonicalizer(new Dictionary<string, string>()));
 }
