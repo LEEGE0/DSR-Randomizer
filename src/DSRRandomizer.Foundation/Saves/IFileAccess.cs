@@ -13,6 +13,9 @@ public interface IFileMutationLease : IDisposable
     void Verify();
 }
 
+public sealed class ProfileSessionAlreadyActiveException(string message, Exception innerException)
+    : IOException(message, innerException);
+
 public interface IFileAccess
 {
     bool Exists(string path);
@@ -21,7 +24,11 @@ public interface IFileAccess
         string rootPath,
         IReadOnlyCollection<string> directoryPaths);
 
+    IFileMutationLease AcquireSessionLock(string rootPath, string lockPath);
+
     FileAttributes GetAttributes(string path);
+
+    bool IsSingleLinkFile(string path);
 
     Stream Open(string path, FileMode mode, FileAccess access, FileShare share);
 

@@ -501,6 +501,15 @@ struct EvaluatedPath {
         PinnedHandle(const PinnedHandle&) = delete;
         PinnedHandle& operator=(const PinnedHandle&) = delete;
 
+        [[nodiscard]] HANDLE Get() const noexcept { return handle_; }
+
+        void Close() noexcept {
+            if (handle_ != INVALID_HANDLE_VALUE) {
+                CloseHandle(handle_);
+                handle_ = INVALID_HANDLE_VALUE;
+            }
+        }
+
     private:
         HANDLE handle_ = INVALID_HANDLE_VALUE;
     };
@@ -1039,6 +1048,141 @@ HRESULT WINAPI HookLegacyFolder(
     }
 }
 
+bool IsPrivateRegularHandle(
+    const HANDLE handle,
+    const std::wstring_view expectedPath) {
+    BY_HANDLE_FILE_INFORMATION information{};
+    if (!GetFileInformationByHandle(handle, &information)
+        || (information.dwFileAttributes
+            & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0
+        || information.nNumberOfLinks != 1) {
+        return false;
+    }
+    std::wstring finalPath;
+    return FinalDosPath(handle, finalPath)
+        && EqualsOrdinalIgnoreCase(finalPath, expectedPath);
+}
+
+bool IsPrivateRegularFile(
+    const std::wstring& path,
+    const CreateFileFunction open) {
+    const HANDLE handle = open(
+        path.c_str(),
+        FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT,
+        nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    const bool safe = IsPrivateRegularHandle(handle, path);
+    CloseHandle(handle);
+    return safe;
+}
+
+DWORD ReopenFlags(const DWORD flags) noexcept {
+    return flags & (
+        FILE_FLAG_BACKUP_SEMANTICS
+        | FILE_FLAG_DELETE_ON_CLOSE
+        | FILE_FLAG_NO_BUFFERING
+        | FILE_FLAG_OPEN_NO_RECALL
+        | FILE_FLAG_OPEN_REPARSE_POINT
+        | FILE_FLAG_OVERLAPPED
+        | FILE_FLAG_RANDOM_ACCESS
+        | FILE_FLAG_SEQUENTIAL_SCAN
+        | FILE_FLAG_WRITE_THROUGH);
+}
+
+HANDLE ReopenPinnedLeaf(
+    EvaluatedPath& evaluated,
+    const DWORD desiredAccess,
+    const DWORD shareMode,
+    const LPSECURITY_ATTRIBUTES security,
+    const DWORD creation,
+    const DWORD flags,
+    bool& handled) {
+    handled = false;
+    if (!evaluated.guarded || evaluated.pins.empty()) {
+        return INVALID_HANDLE_VALUE;
+    }
+
+    std::wstring expected;
+    if (!CanonicalizeLexical(evaluated.effective, expected)) {
+        return INVALID_HANDLE_VALUE;
+    }
+    auto& strongPin = evaluated.pins.back();
+    if (!IsPrivateRegularHandle(strongPin.Get(), expected)) {
+        return INVALID_HANDLE_VALUE;
+    }
+    handled = true;
+    if (creation == CREATE_NEW) {
+        SetLastError(ERROR_FILE_EXISTS);
+        return INVALID_HANDLE_VALUE;
+    }
+    if (creation != OPEN_EXISTING
+        && creation != OPEN_ALWAYS
+        && creation != CREATE_ALWAYS
+        && creation != TRUNCATE_EXISTING) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return INVALID_HANDLE_VALUE;
+    }
+
+    const HANDLE weakPin = ReOpenFile(
+        strongPin.Get(),
+        0,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        0);
+    if (weakPin == INVALID_HANDLE_VALUE) {
+        return INVALID_HANDLE_VALUE;
+    }
+    strongPin.Close();
+
+    const HANDLE result = ReOpenFile(
+        weakPin,
+        desiredAccess,
+        shareMode,
+        ReopenFlags(flags));
+    const auto reopenError = GetLastError();
+    CloseHandle(weakPin);
+    if (result == INVALID_HANDLE_VALUE) {
+        SetLastError(reopenError);
+        return INVALID_HANDLE_VALUE;
+    }
+    if (!IsPrivateRegularHandle(result, expected)) {
+        CloseHandle(result);
+        SetLastError(ERROR_ACCESS_DENIED);
+        return INVALID_HANDLE_VALUE;
+    }
+    if (security != nullptr && security->bInheritHandle
+        && !SetHandleInformation(
+            result,
+            HANDLE_FLAG_INHERIT,
+            HANDLE_FLAG_INHERIT)) {
+        const auto inheritError = GetLastError();
+        CloseHandle(result);
+        SetLastError(inheritError);
+        return INVALID_HANDLE_VALUE;
+    }
+
+    if (creation == CREATE_ALWAYS || creation == TRUNCATE_EXISTING) {
+        LARGE_INTEGER beginning{};
+        if (!SetFilePointerEx(result, beginning, nullptr, FILE_BEGIN)
+            || !SetEndOfFile(result)) {
+            const auto truncateError = GetLastError();
+            CloseHandle(result);
+            SetLastError(truncateError);
+            return INVALID_HANDLE_VALUE;
+        }
+    }
+    SetLastError(
+        creation == CREATE_ALWAYS || creation == OPEN_ALWAYS
+            ? ERROR_ALREADY_EXISTS
+            : ERROR_SUCCESS);
+    return result;
+}
+
 HANDLE WINAPI HookCreateFile(
     const LPCWSTR fileName,
     const DWORD desiredAccess,
@@ -1054,7 +1198,7 @@ HANDLE WINAPI HookCreateFile(
             SetLastError(ERROR_ACCESS_DENIED);
             return INVALID_HANDLE_VALUE;
         }
-        const auto evaluated = EvaluatePath(
+        auto evaluated = EvaluatePath(
             *context,
             fileName,
             OpenOperation(desiredAccess),
@@ -1063,16 +1207,22 @@ HANDLE WINAPI HookCreateFile(
             return INVALID_HANDLE_VALUE;
         }
         InvokeBeforeOriginalApiCallback();
-        // The guarded leaf pin owns read access so a checked save cannot be
-        // renamed before this open. Permit that internal reader while keeping
-        // the caller's write/delete sharing restrictions unchanged.
-        const DWORD effectiveShareMode = evaluated.guarded
-            ? shareMode | FILE_SHARE_READ
-            : shareMode;
+        bool reopenedPinnedLeaf = false;
+        const HANDLE pinnedResult = ReopenPinnedLeaf(
+            evaluated,
+            desiredAccess,
+            shareMode,
+            security,
+            creation,
+            flags,
+            reopenedPinnedLeaf);
+        if (reopenedPinnedLeaf) {
+            return pinnedResult;
+        }
         return context->trampolines.createFile(
             evaluated.effective.c_str(),
             desiredAccess,
-            effectiveShareMode,
+            shareMode,
             security,
             creation,
             flags,
@@ -1435,7 +1585,8 @@ bool ValidateConfiguration(
         || !InspectExistingComponents(canonical.virtualLogicalSave, &CreateFileW)
         || !InspectExistingComponents(canonical.realSaveRoot, &CreateFileW)
         || !InspectExistingComponents(canonical.externalSaveRoot, &CreateFileW)
-        || !InspectExistingComponents(canonical.dedicatedRmm, &CreateFileW)) {
+        || !InspectExistingComponents(canonical.dedicatedRmm, &CreateFileW)
+        || !IsPrivateRegularFile(canonical.dedicatedRmm, &CreateFileW)) {
         return false;
     }
 

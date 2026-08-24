@@ -286,7 +286,7 @@ public sealed class DedicatedSaveService
         OwnedFile? sessionTemporary = null;
         OwnedFile? publishedSession = null;
         IFileMutationLease? retainedLease = null;
-        Stream? profileSessionLock = null;
+        IFileMutationLease? profileSessionLock = null;
         try
         {
             SaveLocations locations;
@@ -297,11 +297,10 @@ public sealed class DedicatedSaveService
                     _layout.Root,
                     [locations.SaveDirectory]);
                 retainedLease.Verify();
-                profileSessionLock = _files.Open(
-                    locations.SessionLockPath,
-                    FileMode.OpenOrCreate,
-                    FileAccess.ReadWrite,
-                    FileShare.None);
+                profileSessionLock = _files.AcquireSessionLock(
+                    _layout.Root,
+                    locations.SessionLockPath);
+                profileSessionLock.Verify();
             }
             catch (ArgumentException exception)
             {
@@ -315,9 +314,15 @@ public sealed class DedicatedSaveService
                     DedicatedSaveResult.Fail(SaveErrorCode.PathDenied, exception.Message),
                     null);
             }
-            catch (IOException exception)
+            catch (ProfileSessionAlreadyActiveException exception)
             {
                 return SessionAlreadyActive(exception.Message);
+            }
+            catch (IOException exception)
+            {
+                return new DedicatedSaveSessionResult(
+                    DedicatedSaveResult.Fail(SaveErrorCode.PathDenied, exception.Message),
+                    null);
             }
 
             var prepared = await PrepareAsync(steamId, cancellationToken);
@@ -424,6 +429,8 @@ public sealed class DedicatedSaveService
                     SaveErrorCode.ExistingSaveInvalid,
                     "No matching live session lease is active.");
             }
+
+            _liveSessionLeases.Remove(steamId);
         }
 
         try
@@ -437,11 +444,11 @@ public sealed class DedicatedSaveService
                     "The guarded session did not exit normally.");
             }
 
-            if (!_files.Exists(locations.DedicatedPath))
+            if (!IsRegularFile(locations.DedicatedPath))
             {
                 return DedicatedSaveResult.Fail(
                     SaveErrorCode.ExistingSaveInvalid,
-                    "Dedicated save is missing.");
+                    "Dedicated save is missing, linked, or not a regular file.");
             }
 
             if (!_files.Exists(locations.SessionStatePath))
@@ -509,7 +516,8 @@ public sealed class DedicatedSaveService
         }
         finally
         {
-            ReleaseLiveSession(steamId, liveSession);
+            liveSession.Lease.Dispose();
+            liveSession.ProfileLock.Dispose();
         }
     }
 
@@ -521,20 +529,6 @@ public sealed class DedicatedSaveService
                     ? "A guarded session is already active for this profile."
                     : $"A guarded session lease could not be acquired: {message}"),
             null);
-
-    private void ReleaseLiveSession(string steamId, LiveSessionLease expected)
-    {
-        lock (_sessionLeaseGate)
-        {
-            if (_liveSessionLeases.TryGetValue(steamId, out var current)
-                && ReferenceEquals(current, expected))
-            {
-                _liveSessionLeases.Remove(steamId);
-                current.Lease.Dispose();
-                current.ProfileLock.Dispose();
-            }
-        }
-    }
 
     private async Task<DedicatedSaveResult> BootstrapAsync(
         SaveLocations locations,
@@ -1077,8 +1071,7 @@ public sealed class DedicatedSaveService
             return false;
         }
 
-        var attributes = _files.GetAttributes(path);
-        return (attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) == 0;
+        return _files.IsSingleLinkFile(path);
     }
 
     private static bool MetadataShapeIsValid(
@@ -1156,7 +1149,7 @@ public sealed class DedicatedSaveService
     private sealed record LiveSessionLease(
         string SessionToken,
         IFileMutationLease Lease,
-        Stream ProfileLock);
+        IFileMutationLease ProfileLock);
 
     private sealed record OwnedFile(string Path, string Identity);
 

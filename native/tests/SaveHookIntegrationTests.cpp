@@ -510,6 +510,38 @@ int VerifyMissingRealRootIsAllowed(const fs::path& root) {
     return 0;
 }
 
+int VerifyHardLinkedDedicatedIsRejected(const fs::path& root) {
+    const auto testRoot = root / L"hard-linked-dedicated";
+    const auto configuration = HookConfigurationFor(testRoot);
+    const auto profile = testRoot / L"virtual-documents" / L"NBGI"
+        / L"DARK SOULS REMASTERED" / L"12345678901234567";
+    const auto hardLinkTarget = testRoot / L"real-normal" / L"normal-save.bin";
+    if (!CreateDirectories(profile)
+        || !CreateDirectories(testRoot / L"real-normal")
+        || !CreateDirectories(testRoot / L"external")
+        || !WriteFixtureFile(hardLinkTarget, "normal-save")
+        || !CreateHardLinkW(
+            configuration.dedicatedRmm.c_str(),
+            hardLinkTarget.c_str(),
+            nullptr)) {
+        return Fail("hard-link fixture setup failed");
+    }
+    const auto installStatus = DSRRandomizer::Save::InstallSaveHooks(configuration);
+    if (installStatus != SaveHookInstallStatus::InvalidConfiguration) {
+        const auto cleanup = DSRRandomizer::Save::UninstallSaveHooks();
+        (void)cleanup;
+        std::error_code cleanupError;
+        fs::remove_all(testRoot, cleanupError);
+        return Fail("hard-linked dedicated save configuration was accepted");
+    }
+    std::error_code cleanupError;
+    fs::remove_all(testRoot, cleanupError);
+    if (cleanupError) {
+        return Fail("hard-link fixture cleanup failed");
+    }
+    return 0;
+}
+
 int VerifyInspectUseSwapIsPinned(const fs::path& root) {
     const auto testRoot = root / L"inspect-use";
     const auto virtualDocuments = testRoot / L"virtual-documents";
@@ -636,6 +668,10 @@ int RunFixture(const wchar_t* fixturePath, const wchar_t* guardPath) {
     if (const auto missingRootResult = VerifyMissingRealRootIsAllowed(root.Path());
         missingRootResult != 0) {
         return missingRootResult;
+    }
+    if (const auto hardLinkResult = VerifyHardLinkedDedicatedIsRejected(root.Path());
+        hardLinkResult != 0) {
+        return hardLinkResult;
     }
     if (const auto pinResult = VerifyInspectUseSwapIsPinned(root.Path());
         pinResult != 0) {

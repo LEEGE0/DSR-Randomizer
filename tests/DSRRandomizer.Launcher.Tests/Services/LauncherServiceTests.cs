@@ -303,7 +303,12 @@ public sealed class LauncherServiceTests : IDisposable
             IReadOnlyCollection<string> directoryPaths) =>
             _inner.AcquireMutationLease(rootPath, directoryPaths);
 
+        public IFileMutationLease AcquireSessionLock(string rootPath, string lockPath) =>
+            _inner.AcquireSessionLock(rootPath, lockPath);
+
         public FileAttributes GetAttributes(string path) => _inner.GetAttributes(path);
+
+        public bool IsSingleLinkFile(string path) => _inner.IsSingleLinkFile(path);
 
         public Stream Open(string path, FileMode mode, FileAccess access, FileShare share)
         {

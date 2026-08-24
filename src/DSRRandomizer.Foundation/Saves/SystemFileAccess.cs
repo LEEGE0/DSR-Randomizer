@@ -14,7 +14,42 @@ public sealed class SystemFileAccess : IFileAccess
         IReadOnlyCollection<string> directoryPaths) =>
         new DirectoryMutationLease(rootPath, directoryPaths);
 
+    public IFileMutationLease AcquireSessionLock(string rootPath, string lockPath) =>
+        new SessionFileLease(rootPath, lockPath);
+
     public FileAttributes GetAttributes(string path) => File.GetAttributes(path);
+
+    public bool IsSingleLinkFile(string path)
+    {
+        const uint fileReadAttributes = 0x00000080;
+        const uint shareRead = 0x00000001;
+        const uint shareWrite = 0x00000002;
+        const uint shareDelete = 0x00000004;
+        const uint openExisting = 3;
+        const uint openReparsePoint = 0x00200000;
+        using var handle = CreateFileW(
+            path,
+            fileReadAttributes,
+            shareRead | shareWrite | shareDelete,
+            IntPtr.Zero,
+            openExisting,
+            openReparsePoint,
+            IntPtr.Zero);
+        if (handle.IsInvalid)
+        {
+            throw new IOException(
+                $"Unable to inspect external file: {path}",
+                new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error()));
+        }
+
+        var information = GetInformation(handle);
+        var attributes = (FileAttributes)information.FileAttributes;
+        return (attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) == 0
+            && information.NumberOfLinks == 1
+            && ResolveFinalPath(handle).Equals(
+                Path.GetFullPath(path),
+                StringComparison.OrdinalIgnoreCase);
+    }
 
     public Stream Open(string path, FileMode mode, FileAccess access, FileShare share) =>
         new FileStream(
@@ -392,7 +427,7 @@ public sealed class SystemFileAccess : IFileAccess
         {
             foreach (var (expectedPath, handle) in _handles)
             {
-                var actualPath = ResolveFinalPath(handle);
+                var actualPath = SystemFileAccess.ResolveFinalPath(handle);
                 if (!actualPath.Equals(expectedPath, StringComparison.OrdinalIgnoreCase))
                 {
                     throw new UnauthorizedAccessException(
@@ -420,36 +455,137 @@ public sealed class SystemFileAccess : IFileAccess
         private static int PathDepth(string path) =>
             path.Count(character => character == Path.DirectorySeparatorChar);
 
-        private static string ResolveFinalPath(SafeFileHandle handle)
+    }
+
+    private sealed class SessionFileLease : IFileMutationLease
+    {
+        private readonly string _expectedPath;
+        private readonly string _identity;
+        private SafeFileHandle? _handle;
+
+        public SessionFileLease(string rootPath, string lockPath)
         {
-            var capacity = 512;
-            while (true)
+            ArgumentException.ThrowIfNullOrWhiteSpace(rootPath);
+            ArgumentException.ThrowIfNullOrWhiteSpace(lockPath);
+            var root = Path.GetFullPath(rootPath).TrimEnd(Path.DirectorySeparatorChar);
+            _expectedPath = Path.GetFullPath(lockPath);
+            if (!_expectedPath.StartsWith(
+                    root + Path.DirectorySeparatorChar,
+                    StringComparison.OrdinalIgnoreCase))
             {
-                var buffer = new StringBuilder(capacity);
-                var length = GetFinalPathNameByHandleW(
-                    handle,
-                    buffer,
-                    (uint)buffer.Capacity,
-                    0);
-                if (length == 0)
-                {
-                    throw new IOException(
-                        "Unable to verify external mutation directory identity.",
-                        new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error()));
-                }
-
-                if (length < buffer.Capacity)
-                {
-                    const string devicePrefix = @"\\?\";
-                    var value = buffer.ToString();
-                    return (value.StartsWith(devicePrefix, StringComparison.OrdinalIgnoreCase)
-                            ? value[devicePrefix.Length..]
-                            : value)
-                        .TrimEnd(Path.DirectorySeparatorChar);
-                }
-
-                capacity = checked((int)length + 1);
+                throw new UnauthorizedAccessException(
+                    $"Session lock is outside the external root: {_expectedPath}");
             }
+
+            const uint genericRead = 0x80000000;
+            const uint genericWrite = 0x40000000;
+            const uint openAlways = 4;
+            const uint openReparsePoint = 0x00200000;
+            _handle = CreateFileW(
+                _expectedPath,
+                genericRead | genericWrite,
+                0,
+                IntPtr.Zero,
+                openAlways,
+                openReparsePoint,
+                IntPtr.Zero);
+            if (_handle.IsInvalid)
+            {
+                var error = Marshal.GetLastWin32Error();
+                _handle.Dispose();
+                _handle = null;
+                var inner = new System.ComponentModel.Win32Exception(error);
+                if (error is 32 or 33)
+                {
+                    throw new ProfileSessionAlreadyActiveException(
+                        $"A guarded session is already active for {_expectedPath}.",
+                        inner);
+                }
+
+                throw new IOException($"Unable to acquire session lock: {_expectedPath}", inner);
+            }
+
+            try
+            {
+                var information = ValidateHandle(_handle);
+                _identity = Identity(information);
+            }
+            catch
+            {
+                _handle.Dispose();
+                _handle = null;
+                throw;
+            }
+        }
+
+        public void Verify()
+        {
+            if (_handle is null || _handle.IsInvalid || _handle.IsClosed)
+            {
+                throw new IOException("The profile session lock is no longer active.");
+            }
+
+            var information = ValidateHandle(_handle);
+            if (!Identity(information).Equals(_identity, StringComparison.Ordinal))
+            {
+                throw new UnauthorizedAccessException(
+                    $"Profile session lock identity changed: {_expectedPath}");
+            }
+        }
+
+        public void Dispose()
+        {
+            _handle?.Dispose();
+            _handle = null;
+        }
+
+        private ByHandleFileInformation ValidateHandle(SafeFileHandle handle)
+        {
+            var information = GetInformation(handle);
+            var attributes = (FileAttributes)information.FileAttributes;
+            if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0
+                || information.NumberOfLinks != 1
+                || !SystemFileAccess.ResolveFinalPath(handle).Equals(
+                    _expectedPath,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new UnauthorizedAccessException(
+                    $"Profile session lock is not a private regular file: {_expectedPath}");
+            }
+
+            return information;
+        }
+    }
+
+    private static string ResolveFinalPath(SafeFileHandle handle)
+    {
+        var capacity = 512;
+        while (true)
+        {
+            var buffer = new StringBuilder(capacity);
+            var length = GetFinalPathNameByHandleW(
+                handle,
+                buffer,
+                (uint)buffer.Capacity,
+                0);
+            if (length == 0)
+            {
+                throw new IOException(
+                    "Unable to verify external path identity.",
+                    new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error()));
+            }
+
+            if (length < buffer.Capacity)
+            {
+                const string devicePrefix = @"\\?\";
+                var value = buffer.ToString();
+                return (value.StartsWith(devicePrefix, StringComparison.OrdinalIgnoreCase)
+                        ? value[devicePrefix.Length..]
+                        : value)
+                    .TrimEnd(Path.DirectorySeparatorChar);
+            }
+
+            capacity = checked((int)length + 1);
         }
     }
 

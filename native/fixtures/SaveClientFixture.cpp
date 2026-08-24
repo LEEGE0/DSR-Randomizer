@@ -125,6 +125,34 @@ bool ReadExact(const std::wstring_view path, const std::string_view expected) {
         && std::string_view(buffer.data(), read) == expected;
 }
 
+int ExclusiveOpenResult(const std::wstring_view path) {
+    const HANDLE exclusive = CreateFileW(
+        std::wstring(path).c_str(),
+        GENERIC_READ | GENERIC_WRITE,
+        0,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (exclusive == INVALID_HANDLE_VALUE) {
+        return 1;
+    }
+    const HANDLE competing = CreateFileW(
+        std::wstring(path).c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    const bool rejected = competing == INVALID_HANDLE_VALUE;
+    if (competing != INVALID_HANDLE_VALUE) {
+        CloseHandle(competing);
+    }
+    CloseHandle(exclusive);
+    return rejected ? 0 : 2;
+}
+
 bool IsAccessDeniedCreate(const std::wstring_view path) {
     SetLastError(ERROR_SUCCESS);
     const HANDLE file = CreateFileW(
@@ -623,9 +651,15 @@ int RunFileOperations(
         return 35;
     }
 
-    if (!WriteExactWithoutSharing(logicalSave, kSentinel)
-        || !ReadExact(logicalSave, kSentinel)) {
+    if (!WriteExactWithoutSharing(logicalSave, kSentinel)) {
         return 22;
+    }
+    if (!ReadExact(logicalSave, kSentinel)) {
+        return 76;
+    }
+    const auto exclusiveResult = ExclusiveOpenResult(logicalSave);
+    if (exclusiveResult != 0) {
+        return 76 + exclusiveResult;
     }
 
     const auto realProfileSeparator = realSave.find_last_of(L'\\');

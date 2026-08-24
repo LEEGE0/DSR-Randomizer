@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using DSRRandomizer.Foundation.Paths;
 using DSRRandomizer.Foundation.Saves;
@@ -26,6 +27,21 @@ public sealed class DedicatedSaveServiceTests : IDisposable
         Assert.DoesNotContain(
             fixture.Access.Opens,
             open => open.Path.EndsWith(".sl2", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task PrepareAsync_HardLinkedRmm_IsRejectedWithoutChangingNormalSave()
+    {
+        var fixture = await Fixture.CreateAsync(_root);
+        fixture.CreateNormalSave();
+        fixture.CreateHardLinkedExternalRmmToNormal();
+        var before = fixture.CaptureSourceState();
+
+        var result = await fixture.Service.PrepareAsync(fixture.SteamId, default);
+
+        Assert.False(result.Ready);
+        Assert.Equal(SaveErrorCode.ExistingSaveInvalid, result.ErrorCode);
+        Assert.Equal(before, fixture.CaptureSourceState());
     }
 
     [Fact]
@@ -839,6 +855,72 @@ public sealed class DedicatedSaveServiceTests : IDisposable
         Assert.True(secondCompleted.Ready, secondCompleted.Message);
     }
 
+    [Fact]
+    public async Task BeginSessionAsync_HardLinkedSessionLock_IsRejected()
+    {
+        var fixture = await Fixture.CreateAsync(_root);
+        fixture.CreateValidExternalRmm();
+        var lockTarget = Path.Combine(_root, "lock-target.bin");
+        File.WriteAllBytes(lockTarget, []);
+        if (!CreateHardLinkW(
+                Path.Combine(fixture.SaveDirectory, ".session.lock"),
+                lockTarget,
+                IntPtr.Zero))
+        {
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        }
+
+        var result = await fixture.Service.BeginSessionAsync(fixture.SteamId, default);
+
+        Assert.False(result.Ready);
+        Assert.Equal(SaveErrorCode.PathDenied, result.ErrorCode);
+    }
+
+    [Fact]
+    public async Task CompleteSessionAsync_ConcurrentSecondCompletion_IsRejectedBeforeLockRelease()
+    {
+        var fixture = await Fixture.CreateAsync(_root);
+        fixture.CreateValidExternalRmm();
+        var session = await fixture.Service.BeginSessionAsync(fixture.SteamId, default);
+        using var enteredHash = new ManualResetEventSlim();
+        using var releaseHash = new ManualResetEventSlim();
+        var blocked = 0;
+        fixture.Access.BeforePathIdentityAndHash = (path, _) =>
+        {
+            if (path.Equals(fixture.DedicatedPath, StringComparison.OrdinalIgnoreCase)
+                && Interlocked.CompareExchange(ref blocked, 1, 0) == 0)
+            {
+                enteredHash.Set();
+                releaseHash.Wait(TimeSpan.FromSeconds(10));
+            }
+        };
+
+        var firstCompletion = Task.Run(() => fixture.Service.CompleteSessionAsync(
+            fixture.SteamId,
+            session.SessionToken!,
+            normalGuardedExit: true,
+            default));
+        Assert.True(enteredHash.Wait(TimeSpan.FromSeconds(10)));
+
+        DedicatedSaveResult second;
+        try
+        {
+            second = await fixture.Service.CompleteSessionAsync(
+                fixture.SteamId,
+                session.SessionToken!,
+                normalGuardedExit: true,
+                default);
+        }
+        finally
+        {
+            releaseHash.Set();
+        }
+
+        var first = await firstCompletion;
+        Assert.False(second.Ready);
+        Assert.True(first.Ready, first.Message);
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_root))
@@ -966,6 +1048,25 @@ public sealed class DedicatedSaveServiceTests : IDisposable
                 JsonOptions));
         }
 
+        public void CreateHardLinkedExternalRmmToNormal()
+        {
+            Directory.CreateDirectory(SaveDirectory);
+            if (!CreateHardLinkW(DedicatedPath, SourcePath, IntPtr.Zero))
+            {
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+            }
+
+            var bytes = File.ReadAllBytes(SourcePath);
+            WriteMetadata(new DedicatedSaveMetadata(
+                1,
+                SteamId,
+                FixedSaveLength,
+                Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant(),
+                null,
+                null,
+                true));
+        }
+
         public DedicatedSaveService CreateService() =>
             new(Layout, Boundary, new SaveSelectionStore(Layout, Boundary), new SystemFileAccess());
 
@@ -1070,7 +1171,12 @@ public sealed class DedicatedSaveServiceTests : IDisposable
             }
         }
 
+        public IFileMutationLease AcquireSessionLock(string rootPath, string lockPath) =>
+            inner.AcquireSessionLock(Map(rootPath), Map(lockPath));
+
         public FileAttributes GetAttributes(string path) => inner.GetAttributes(Map(path));
+
+        public bool IsSingleLinkFile(string path) => inner.IsSingleLinkFile(Map(path));
 
         public Stream Open(string path, FileMode mode, FileAccess access, FileShare share)
         {
@@ -1310,4 +1416,11 @@ public sealed class DedicatedSaveServiceTests : IDisposable
             return fullPath;
         }
     }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CreateHardLinkW(
+        string fileName,
+        string existingFileName,
+        IntPtr securityAttributes);
 }

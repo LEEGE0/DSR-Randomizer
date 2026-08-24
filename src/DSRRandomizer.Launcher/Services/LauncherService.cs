@@ -261,10 +261,19 @@ internal sealed class NormalSaveBlockingFileAccess(IFileAccess inner) : IFileAcc
         IReadOnlyCollection<string> directoryPaths) =>
         inner.AcquireMutationLease(rootPath, directoryPaths);
 
+    public IFileMutationLease AcquireSessionLock(string rootPath, string lockPath) =>
+        inner.AcquireSessionLock(rootPath, lockPath);
+
     public FileAttributes GetAttributes(string path)
     {
         ThrowIfNormalSave(path);
         return inner.GetAttributes(path);
+    }
+
+    public bool IsSingleLinkFile(string path)
+    {
+        ThrowIfNormalSave(path);
+        return inner.IsSingleLinkFile(path);
     }
 
     public Stream Open(string path, FileMode mode, FileAccess access, FileShare share)
