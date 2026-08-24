@@ -9,7 +9,7 @@ namespace DSRRandomizer.Launcher.Tests.ViewModels;
 public sealed class MainWindowViewModelTests
 {
     [Fact]
-    public async Task InitializeCommand_ReportsReadyButKeepsLaunchSafetyLocked()
+    public async Task InitializeCommand_NativeFoundationStillKeepsPublicLaunchLocked()
     {
         var service = new FakeLauncherService();
         var viewModel = new MainWindowViewModel(service, new RecordingLogger())

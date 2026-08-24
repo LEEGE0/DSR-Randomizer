@@ -52,7 +52,7 @@ public sealed class LauncherApplicationTests
     }
 
     [Fact]
-    public void ProgramMain_LaunchRejectionReturnsWithoutEnteringWpfLifetime()
+    public void ProductLaunch_RemainsLockedAfterNativeFoundation()
     {
         var exitCode = Program.Main(new[] { "--launch" });
 

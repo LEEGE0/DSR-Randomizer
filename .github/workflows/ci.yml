@@ -16,8 +16,18 @@ jobs:
         with:
           dotnet-version: 8.0.x
       - run: dotnet restore DSR-Randomizer.sln
+      - run: cmake --preset windows-x64-release
+      - run: cmake --build --preset windows-x64-release
+      - run: ctest --preset windows-x64-release --output-on-failure
       - run: dotnet build DSR-Randomizer.sln -c Release --no-restore
       - run: dotnet test DSR-Randomizer.sln -c Release --no-build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-supervisor-test-artifacts
+          path: |
+            native/out/build/windows-x64-release/native/Release/DSRRandomizer.SuspendedFixture.exe
+            native/out/build/windows-x64-release/native/runtime/Release/DSRRandomizer.Runtime.dll
+          retention-days: 7
       - run: dotnet publish src/DSRRandomizer.Launcher/DSRRandomizer.Launcher.csproj -c Release -r win-x64 --self-contained true -o artifacts/publish
       - shell: pwsh
         run: ./packaging/package.ps1 -Version 0.1.0-alpha.1 -PublishPath artifacts/publish -OutputPath artifacts
