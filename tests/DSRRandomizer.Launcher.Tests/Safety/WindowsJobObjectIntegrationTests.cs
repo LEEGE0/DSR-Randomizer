@@ -59,6 +59,58 @@ public sealed class WindowsJobObjectIntegrationTests
         }
     }
 
+    [Fact]
+    public async Task Dispose_KillsFixtureAndConfirmedDescendantProcess()
+    {
+        var fixturePath = FindFixturePath();
+        var platform = new WindowsProtectedProcessPlatform();
+        var request = CreateRequest(fixturePath) with
+        {
+            Arguments = new[] { "--spawn-child" }
+        };
+        IProtectedProcess? process = null;
+        var childProcessId = 0;
+        string? childPidPath = null;
+
+        try
+        {
+            process = await platform.CreateSuspendedAsync(request, CancellationToken.None);
+            var parentProcessId = process.ProcessId;
+            childPidPath = Path.Combine(
+                Path.GetTempPath(),
+                $"DSRRandomizerFixtureChild-{parentProcessId}.txt");
+            File.Delete(childPidPath);
+            process.AssignKillOnCloseJob();
+            Assert.Equal(1u, process.ResumeMainThread());
+            childProcessId = await WaitForChildProcessIdAsync(
+                childPidPath,
+                TimeSpan.FromSeconds(5));
+
+            await process.DisposeAsync();
+            process = null;
+
+            Assert.True(await WaitForExitAsync(parentProcessId, TimeSpan.FromSeconds(5)));
+            Assert.True(await WaitForExitAsync(childProcessId, TimeSpan.FromSeconds(5)));
+        }
+        finally
+        {
+            if (process is not null)
+            {
+                await process.DisposeAsync();
+            }
+
+            if (childProcessId != 0)
+            {
+                KillIfRunning(childProcessId);
+            }
+
+            if (childPidPath is not null)
+            {
+                File.Delete(childPidPath);
+            }
+        }
+    }
+
     private static SafetyLaunchRequest CreateRequest(string fixturePath) => new(
         fixturePath,
         Path.GetDirectoryName(fixturePath)!,
@@ -143,5 +195,32 @@ public sealed class WindowsJobObjectIntegrationTests
         {
             // The fixture already exited and Windows released its process id.
         }
+    }
+
+    private static async Task<int> WaitForChildProcessIdAsync(
+        string path,
+        TimeSpan timeout)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        while (stopwatch.Elapsed < timeout)
+        {
+            try
+            {
+                if (File.Exists(path) &&
+                    int.TryParse(await File.ReadAllTextAsync(path), out var processId) &&
+                    processId > 0)
+                {
+                    return processId;
+                }
+            }
+            catch (IOException)
+            {
+                // The fixture may still be flushing its child-process id.
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(25));
+        }
+
+        throw new Xunit.Sdk.XunitException($"Fixture child PID was not reported: {path}");
     }
 }

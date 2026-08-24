@@ -27,6 +27,11 @@ public sealed class WindowsProtectedProcessPlatform : IProtectedProcessPlatform
                 Size = checked((uint)Marshal.SizeOf<NativeMethods.StartupInfo>())
             };
             var commandLine = new StringBuilder(QuoteCommandLineArgument(request.ExecutablePath));
+            foreach (var argument in request.Arguments ?? Array.Empty<string>())
+            {
+                commandLine.Append(' ');
+                commandLine.Append(QuoteCommandLineArgument(argument));
+            }
             environment = Marshal.StringToHGlobalUni(CreateMinimalEnvironmentBlock());
             if (!NativeMethods.CreateProcessW(
                     request.ExecutablePath,

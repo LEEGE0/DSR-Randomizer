@@ -8,7 +8,8 @@ public sealed record SafetyLaunchRequest(
     string GuardDllPath,
     CompatibilityProfile Profile,
     ulong RequiredProtectionFlags,
-    bool DiagnosticMode);
+    bool DiagnosticMode,
+    IReadOnlyList<string>? Arguments = null);
 
 public sealed record ProtectionHandshake(
     bool Success,
