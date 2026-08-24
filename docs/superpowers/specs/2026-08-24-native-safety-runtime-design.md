@@ -1,7 +1,7 @@
 # Native Safety Runtime Design
 
 Date: 2026-08-24
-Status: Proposed written specification, pending user review
+Status: Approved design
 
 ## 1. Purpose
 
@@ -122,6 +122,7 @@ No partial-success state is resumable. On any failure, installed hooks are disab
 Each supported game build has a release-pinned, project-authored profile containing:
 
 - PE machine type, image size, timestamp, and SHA-256
+- Fixed supported save length (`4326608` bytes for the first profile)
 - Required module names and minimum/maximum image ranges
 - Version-specific FromSoftware login/offline targets
 - Steam interface versions and required methods
@@ -347,14 +348,14 @@ Before launch, the explicitly invoked diagnostic audit records hashes, sizes, an
 - Every detected Overhaul save
 - The installed Overhaul proxy/configuration files
 
-The launcher bootstraps or validates `.rmm`, starts the copied executable suspended, verifies all protections, resumes it for at most 30 seconds, observes protection heartbeat and denied-network counters, and terminates it automatically through the Job Object. Network observation must show no non-loopback traffic from the copied process. File auditing must show writes only beneath the external DSR Randomizer root.
+The launcher bootstraps or validates `.rmm`, makes a verified diagnostic `.rmm` clone beneath external staging, and redirects only the smoke process to that clone so forced termination cannot corrupt the user's active dedicated save. It starts the copied executable suspended, verifies all protections, resumes it for at most 30 seconds, observes protection heartbeat and denied-network counters, and terminates it automatically through the Job Object. Network observation must show no non-loopback traffic from the copied process. File auditing must show writes only beneath the external DSR Randomizer root. The diagnostic clone is discarded after the audit; the active `.rmm` remains unchanged.
 
 After exit, the snapshots must prove:
 
 - Original game and Overhaul installation changed files: zero
 - Normal `.sl2` content, size, and timestamps changed: zero
 - Copied-game and production-launcher Overhaul save reads and writes: zero; only the separate read-only audit may hash it
-- Dedicated `.rmm` exists externally and is the only game save opened for write
+- A diagnostic `.rmm` clone exists externally during the test and is the only game save opened for write; the active `.rmm` remains unchanged
 - Official connection attempts that occurred were denied before leaving the process
 
 Any mismatch is a release blocker. The smoke switch remains disabled in distributed builds until its explicit release phase.
@@ -377,6 +378,13 @@ The release guard allowlists the project-built native DLL and its debug-symbol p
 10. Keep the public launch control locked until a validated seed package can be bound to `.rmm` metadata.
 
 Each step is test-driven and committed only after its applicable verification passes. The implementation plan must split these steps into independently reviewable commits and must not combine the first real-game smoke launch with unfinished hook work.
+
+The approved implementation is decomposed into four sequential plans:
+
+1. `docs/superpowers/plans/2026-08-24-native-launch-supervisor.md`
+2. `docs/superpowers/plans/2026-08-24-dedicated-rmm-save.md`
+3. `docs/superpowers/plans/2026-08-24-official-online-guard.md`
+4. `docs/superpowers/plans/2026-08-24-safety-integration-smoke.md`
 
 ## 14. Acceptance criteria
 
