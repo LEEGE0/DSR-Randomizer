@@ -1,0 +1,36 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{50169EFC-27EC-4AC0-BCDF-59CD90800909}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DSRRandomizer.Foundation", "src\DSRRandomizer.Foundation\DSRRandomizer.Foundation.csproj", "{3EA0B402-FEF4-4C42-98CC-FF0A13FF1D5D}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{224834C4-3549-405B-849B-96846E528EAD}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DSRRandomizer.Foundation.Tests", "tests\DSRRandomizer.Foundation.Tests\DSRRandomizer.Foundation.Tests.csproj", "{4DE420AC-60F2-4EF7-BD42-DD0EFA76D88A}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{3EA0B402-FEF4-4C42-98CC-FF0A13FF1D5D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{3EA0B402-FEF4-4C42-98CC-FF0A13FF1D5D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{3EA0B402-FEF4-4C42-98CC-FF0A13FF1D5D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{3EA0B402-FEF4-4C42-98CC-FF0A13FF1D5D}.Release|Any CPU.Build.0 = Release|Any CPU
+		{4DE420AC-60F2-4EF7-BD42-DD0EFA76D88A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{4DE420AC-60F2-4EF7-BD42-DD0EFA76D88A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{4DE420AC-60F2-4EF7-BD42-DD0EFA76D88A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{4DE420AC-60F2-4EF7-BD42-DD0EFA76D88A}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{3EA0B402-FEF4-4C42-98CC-FF0A13FF1D5D} = {50169EFC-27EC-4AC0-BCDF-59CD90800909}
+		{4DE420AC-60F2-4EF7-BD42-DD0EFA76D88A} = {224834C4-3549-405B-849B-96846E528EAD}
+	EndGlobalSection
+EndGlobal
