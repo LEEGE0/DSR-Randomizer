@@ -4,6 +4,7 @@
 #include <atomic>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace DSRRandomizer::Steam {
@@ -48,6 +49,11 @@ enum class SteamFactorySlotStatus {
     SlotUnavailable,
 };
 
+enum class SteamInterfaceLayout {
+    ProductionPinned,
+    SyntheticOneSlotForTesting,
+};
+
 class SteamFactoryCallbackBlock final {
 public:
     SteamFactoryCallbackBlock() noexcept;
@@ -63,11 +69,19 @@ private:
 [[nodiscard]] SteamFactorySlotStatus RegisterSteamFactorySlot(
     std::size_t slot,
     const std::vector<std::string>& declaredInterfaces,
-    const std::shared_ptr<FatalState>& fatalState) noexcept;
+    const std::shared_ptr<FatalState>& fatalState,
+    SteamInterfaceLayout layout) noexcept;
 [[nodiscard]] bool SetSteamFactoryOriginal(
     std::size_t slot,
     Synthetic::FactoryFunction original) noexcept;
 [[nodiscard]] void* SteamFactoryDetourAddress(std::size_t slot) noexcept;
 void UnregisterSteamFactorySlot(std::size_t slot) noexcept;
+
+namespace Testing {
+
+[[nodiscard]] std::size_t ProductionInterfaceSlotCount(
+    std::string_view version) noexcept;
+
+}  // namespace Testing
 
 }  // namespace DSRRandomizer::Steam

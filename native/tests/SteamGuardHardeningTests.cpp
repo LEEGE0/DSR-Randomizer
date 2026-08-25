@@ -262,6 +262,22 @@ DeferredModuleGateConfiguration Configuration(
     return configuration;
 }
 
+DeferredModuleGateConfiguration ProductionConfiguration(
+    const std::wstring& path,
+    const bool deferred,
+    const DSRRandomizer::Steam::FatalReporter reporter =
+        &ReturningFatalReporter) {
+    auto configuration = Configuration(path, deferred, reporter);
+    configuration.modules.front().declaredInterfaces = {
+        "SteamClient017",
+        "SteamMatchMaking009",
+        "SteamNetworking005",
+        "STEAMREMOTESTORAGE_INTERFACE_VERSION014",
+        "SteamUser019",
+    };
+    return configuration;
+}
+
 DeferredModuleGateConfiguration ProtectedOuterConfiguration(
     const std::wstring& path,
     const std::string& factoryExport) {
@@ -1528,16 +1544,130 @@ int RunRollbackFailure(const std::wstring& fakePath) {
     return 0;
 }
 
-int RunProductionInvariant(const std::wstring& fakePath) {
-    if (DSRRandomizer::Modules::InstallDeferredModuleGate(
-            Configuration(fakePath, true))
-        != DeferredModuleGateInstallStatus::Success) {
-        return Fail("production suspended-initializer gate was not armed");
+int RunRemoveFailureDenyOnly(const std::wstring& fakePath) {
+    const HMODULE module = LoadLibraryW(fakePath.c_str());
+    if (module == nullptr) {
+        return Fail("remove-failure fixture did not load");
     }
-    return DSRRandomizer::Modules::UninstallDeferredModuleGate()
-            == DeferredModuleGateCleanupStatus::Success
+    const auto rawFactory = Resolve<Factory>(module, "FakeSteamFactory");
+    if (rawFactory == nullptr
+        || InstallTestGate(Configuration(fakePath, false))
+            != DeferredModuleGateInstallStatus::Success) {
+        return Fail("remove-failure gate did not arm");
+    }
+    void* const identity = rawFactory("SteamUser023");
+    if (identity == nullptr || !InvokeSynthetic(identity)) {
+        return Fail("remove-failure identity fixture was not live before cleanup");
+    }
+
+    DSRRandomizer::Hooks::Testing::SetMinHookFaults({0, 0, 64});
+    const auto firstCleanup =
+        DSRRandomizer::Modules::UninstallDeferredModuleGate();
+    const auto retained = DSRRandomizer::Modules::Testing::CurrentGateLifecycle();
+    const HMODULE deniedLoad = LoadLibraryW(fakePath.c_str());
+    const auto deniedSymbol = GetProcAddress(module, "FakeSteamFactory");
+    const bool retainedBehavior = firstCleanup
+            == DeferredModuleGateCleanupStatus::Incomplete
+        && retained.contextRetained && retained.denyOnly
+        && retained.hooksRetained != 0 && retained.factorySlotsRetained != 0
+        && deniedLoad == nullptr && deniedSymbol == nullptr
+        && rawFactory("SteamMatchMaking009") == nullptr
+        && !InvokeSynthetic(identity);
+    if (deniedLoad != nullptr) {
+        FreeLibrary(deniedLoad);
+    }
+
+    DSRRandomizer::Hooks::Testing::SetMinHookFaults({});
+    const auto retry = DSRRandomizer::Modules::UninstallDeferredModuleGate();
+    const HMODULE restoredLoad = LoadLibraryW(fakePath.c_str());
+    const auto restoredSymbol = GetProcAddress(module, "FakeSteamFactory");
+    const bool restored = retry == DeferredModuleGateCleanupStatus::Success
+        && restoredLoad != nullptr && restoredSymbol != nullptr
+        && rawFactory("SteamMatchMaking009") != nullptr
+        && DSRRandomizer::Hooks::Testing::MinHookReferenceCount() == 0;
+    if (restoredLoad != nullptr) {
+        FreeLibrary(restoredLoad);
+    }
+    FreeLibrary(module);
+    return retainedBehavior && restored
         ? 0
-        : Fail("production suspended-initializer gate did not clean up");
+        : Fail("remove failure did not retain enabled deny-only Steam hooks");
+}
+
+int RunRemoveFailureReenableFailure(const std::wstring& fakePath) {
+    const HMODULE module = LoadLibraryW(fakePath.c_str());
+    if (module == nullptr
+        || InstallTestGate(Configuration(fakePath, false))
+            != DeferredModuleGateInstallStatus::Success) {
+        return Fail("re-enable-failure gate did not arm");
+    }
+    DSRRandomizer::Hooks::Testing::SetMinHookFaults({1, 0, 64});
+    const auto firstCleanup =
+        DSRRandomizer::Modules::UninstallDeferredModuleGate();
+    const auto retained = DSRRandomizer::Modules::Testing::CurrentGateLifecycle();
+    DSRRandomizer::Hooks::Testing::SetMinHookFaults({});
+    const auto retry = DSRRandomizer::Modules::UninstallDeferredModuleGate();
+    const auto queueInstall = InstallTestGate(Configuration(fakePath, false));
+    DSRRandomizer::Hooks::Testing::SetMinHookFaults({0, 0, 64, 1});
+    const auto queueCleanup =
+        DSRRandomizer::Modules::UninstallDeferredModuleGate();
+    const auto queueRetained =
+        DSRRandomizer::Modules::Testing::CurrentGateLifecycle();
+    DSRRandomizer::Hooks::Testing::SetMinHookFaults({});
+    const auto queueRetry =
+        DSRRandomizer::Modules::UninstallDeferredModuleGate();
+    const auto partialInstall = InstallTestGate(Configuration(fakePath, false));
+    DSRRandomizer::Hooks::Testing::SetMinHookFaults({0, 0, 1});
+    const auto partialCleanup =
+        DSRRandomizer::Modules::UninstallDeferredModuleGate();
+    const auto partialRetained =
+        DSRRandomizer::Modules::Testing::CurrentGateLifecycle();
+    DSRRandomizer::Hooks::Testing::SetMinHookFaults({});
+    const auto partialRetry =
+        DSRRandomizer::Modules::UninstallDeferredModuleGate();
+    const bool result = firstCleanup == DeferredModuleGateCleanupStatus::Incomplete
+        && retained.contextRetained && !retained.denyOnly
+        && retained.hooksRetained != 0
+        && retry == DeferredModuleGateCleanupStatus::Success
+        && queueInstall == DeferredModuleGateInstallStatus::Success
+        && queueCleanup == DeferredModuleGateCleanupStatus::Incomplete
+        && queueRetained.contextRetained && !queueRetained.denyOnly
+        && queueRetained.hooksRetained != 0
+        && queueRetry == DeferredModuleGateCleanupStatus::Success
+        && partialInstall == DeferredModuleGateInstallStatus::Success
+        && partialCleanup == DeferredModuleGateCleanupStatus::Incomplete
+        && partialRetained.contextRetained && !partialRetained.denyOnly
+        && partialRetained.hooksRetained != 0
+        && partialRetry == DeferredModuleGateCleanupStatus::Success
+        && DSRRandomizer::Hooks::Testing::MinHookReferenceCount() == 0;
+    FreeLibrary(module);
+    return result
+        ? 0
+        : Fail("re-enable failure was not propagated and retried");
+}
+
+int RunProductionProfileContract(const std::wstring& fakePath) {
+    const HMODULE module = LoadLibraryW(fakePath.c_str());
+    if (module == nullptr) {
+        return Fail("production profile fixture did not load");
+    }
+    const auto rejected = DSRRandomizer::Modules::InstallDeferredModuleGate(
+        Configuration(fakePath, false));
+    const auto rejectedCleanup =
+        DSRRandomizer::Modules::UninstallDeferredModuleGate();
+    const auto accepted = DSRRandomizer::Modules::InstallDeferredModuleGate(
+        ProductionConfiguration(fakePath, false));
+    const auto acceptedCleanup =
+        DSRRandomizer::Modules::UninstallDeferredModuleGate();
+    FreeLibrary(module);
+    if (rejected == DeferredModuleGateInstallStatus::Success
+        || rejectedCleanup != DeferredModuleGateCleanupStatus::Success) {
+        return Fail("production accepted a synthetic one-slot interface profile");
+    }
+    return accepted == DeferredModuleGateInstallStatus::Success
+            && acceptedCleanup == DeferredModuleGateCleanupStatus::Success
+        ? 0
+        : Fail("production rejected the exact version-pinned interface profile");
 }
 
 DWORD RunChild(
@@ -1623,7 +1753,9 @@ int RunParent(
         L"native-cleanup",
         L"concurrent-groups",
         L"rollback-failure",
-        L"production-invariant",
+        L"remove-failure-deny-only",
+        L"remove-failure-reenable-failure",
+        L"production-profile-contract",
     };
     for (const auto* const mode : modes) {
         const auto exit = RunChild(
@@ -1783,8 +1915,14 @@ int wmain(const int argc, wchar_t** const argv) {
         if (mode == L"rollback-failure") {
             return RunRollbackFailure(fakePath);
         }
-        if (mode == L"production-invariant") {
-            return RunProductionInvariant(fakePath);
+        if (mode == L"remove-failure-deny-only") {
+            return RunRemoveFailureDenyOnly(fakePath);
+        }
+        if (mode == L"remove-failure-reenable-failure") {
+            return RunRemoveFailureReenableFailure(fakePath);
+        }
+        if (mode == L"production-profile-contract") {
+            return RunProductionProfileContract(fakePath);
         }
     }
     return Fail("invalid SteamGuardHardeningTests arguments");

@@ -22,6 +22,7 @@ using OfflineSetter = void(*)(bool) noexcept;
 struct HookEntry {
     void* address = nullptr;
     InternalTargetAction action = InternalTargetAction::DenyCall;
+    bool enabled = false;
 };
 
 struct GuardState {
@@ -31,6 +32,7 @@ struct GuardState {
     bool acquired = false;
     bool installed = false;
     bool cleanupIncomplete = false;
+    bool coverageComplete = false;
 };
 
 struct ResolvedTarget {
@@ -218,10 +220,9 @@ GameServiceGuardInstallStatus ResolveAndVerify(
 
 bool CleanupLocked() noexcept {
     bool complete = true;
-    std::vector<HookEntry> disabledHooks;
+    bool removedAny = false;
     std::vector<HookEntry> remaining;
     try {
-        disabledHooks.reserve(guardState.hooks.size());
         remaining.reserve(guardState.hooks.size());
     }
     catch (...) {
@@ -232,25 +233,67 @@ bool CleanupLocked() noexcept {
     for (auto current = guardState.hooks.rbegin();
          current != guardState.hooks.rend();
          ++current) {
-        const bool disabled = guardState.backend.disable(current->address);
+        bool disabled = !current->enabled;
+        if (current->enabled) {
+            disabled = guardState.backend.disable(current->address);
+            if (disabled) {
+                current->enabled = false;
+            }
+        }
         if (!disabled) {
+            complete = false;
+            remaining.push_back(*current);
+            continue;
+        }
+        if (!guardState.backend.remove(current->address)) {
             complete = false;
             remaining.push_back(*current);
         }
         else {
-            disabledHooks.push_back(*current);
-        }
-    }
-    for (const auto& current : disabledHooks) {
-        const bool removed = guardState.backend.remove(current.address);
-        if (!removed) {
-            complete = false;
-            remaining.push_back(current);
+            removedAny = true;
         }
     }
     std::reverse(remaining.begin(), remaining.end());
     guardState.hooks = std::move(remaining);
     guardState.installed = false;
+    if (removedAny && !guardState.hooks.empty()) {
+        guardState.coverageComplete = false;
+    }
+
+    std::vector<HookEntry*> queued;
+    try {
+        queued.reserve(guardState.hooks.size());
+        for (auto& hook : guardState.hooks) {
+            if (hook.enabled) {
+                continue;
+            }
+            if (guardState.backend.queueEnable(hook.address)) {
+                queued.push_back(&hook);
+            }
+            else {
+                complete = false;
+            }
+        }
+        if (!queued.empty()) {
+            if (guardState.backend.applyQueued()) {
+                for (auto* const hook : queued) {
+                    hook->enabled = true;
+                }
+            }
+            else {
+                complete = false;
+            }
+        }
+    }
+    catch (...) {
+        complete = false;
+    }
+    if (std::any_of(
+            guardState.hooks.begin(),
+            guardState.hooks.end(),
+            [](const HookEntry& hook) { return !hook.enabled; })) {
+        complete = false;
+    }
 
     if (std::none_of(
             guardState.hooks.begin(),
@@ -321,7 +364,7 @@ GameServiceGuardInstallStatus InstallWithBackend(
                     reinterpret_cast<OfflineSetter>(original),
                     std::memory_order_release);
             }
-            guardState.hooks.push_back({target.address, target.action});
+            guardState.hooks.push_back({target.address, target.action, false});
         }
         for (const auto& target : resolved) {
             if (!backend.queueEnable(target.address)) {
@@ -333,6 +376,10 @@ GameServiceGuardInstallStatus InstallWithBackend(
             static_cast<void>(CleanupLocked());
             return GameServiceGuardInstallStatus::HookFailed;
         }
+        for (auto& hook : guardState.hooks) {
+            hook.enabled = true;
+        }
+        guardState.coverageComplete = true;
         const auto setter = offlineSetter.load(std::memory_order_acquire);
         if (setter == nullptr) {
             static_cast<void>(CleanupLocked());
@@ -387,7 +434,12 @@ GameServiceGuardLifecycleSnapshot CurrentGameServiceGuardLifecycle() noexcept {
     return {
         guardState.installed,
         guardState.cleanupIncomplete,
-        guardState.cleanupIncomplete && !guardState.hooks.empty(),
+        guardState.cleanupIncomplete && guardState.coverageComplete
+            && !guardState.hooks.empty()
+            && std::all_of(
+                guardState.hooks.begin(),
+                guardState.hooks.end(),
+                [](const HookEntry& hook) { return hook.enabled; }),
         guardState.hooks.size(),
     };
 }

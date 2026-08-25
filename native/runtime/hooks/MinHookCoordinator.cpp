@@ -16,6 +16,7 @@ std::atomic<std::uint32_t> applyCallCount{};
 std::atomic<std::uint32_t> failApplyCall{};
 std::atomic<std::uint32_t> failDisableCount{};
 std::atomic<std::uint32_t> failRemoveCount{};
+std::atomic<std::uint32_t> failQueueEnableCount{};
 std::atomic<HANDLE> afterLeaseAcquireEvent{};
 std::atomic<HANDLE> allowLeaseReleaseEvent{};
 
@@ -112,7 +113,9 @@ MH_STATUS CreateHook(
 
 MH_STATUS QueueEnableHook(void* const target) noexcept {
     std::scoped_lock lock(mutationMutex);
-    return MH_QueueEnableHook(target);
+    return Consume(failQueueEnableCount)
+        ? MH_ERROR_MEMORY_ALLOC
+        : MH_QueueEnableHook(target);
 }
 
 MH_STATUS ApplyQueuedHooks() noexcept {
@@ -146,6 +149,9 @@ void SetMinHookFaults(const MinHookFaults& faults) noexcept {
     failApplyCall.store(faults.failApplyCall, std::memory_order_release);
     failDisableCount.store(faults.failDisableCount, std::memory_order_release);
     failRemoveCount.store(faults.failRemoveCount, std::memory_order_release);
+    failQueueEnableCount.store(
+        faults.failQueueEnableCount,
+        std::memory_order_release);
 }
 
 std::size_t MinHookReferenceCount() noexcept {

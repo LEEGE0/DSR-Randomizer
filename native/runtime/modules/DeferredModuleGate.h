@@ -59,9 +59,9 @@ struct NativeSymbolDelegationProbeSnapshot {
     bool resultPublished;
 };
 
-// Synthetic test subprocesses are started before worker threads and act as the
-// Task 5 suspended-launch proof seam. Production callers cannot use the normal
-// install API until Task 5 supplies a verifiable proof.
+// This entry point selects the legacy one-slot interface ABI used only by the
+// synthetic Task 3 fixtures. It does not prove launcher suspension; Task 5 owns
+// the end-to-end suspended-launch contract.
 [[nodiscard]] DeferredModuleGateInstallStatus
 InstallDeferredModuleGateForSyntheticSuspendedProcess(
     const DeferredModuleGateConfiguration& configuration) noexcept;

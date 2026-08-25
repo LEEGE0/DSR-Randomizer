@@ -29,8 +29,7 @@ bool IsProtectedPrefix(const std::string_view version) noexcept {
         || HasPrefix(version, "STEAMREMOTESTORAGE_INTERFACE_VERSION");
 }
 
-constexpr std::array<std::string_view, 17> kPinnedRawInterfaces{
-    "SteamClient017",
+constexpr std::array<std::string_view, 16> kPinnedRawInterfaces{
     "SteamFriends015",
     "SteamUtils009",
     "SteamMatchMakingServers002",
@@ -74,6 +73,9 @@ bool IsRemoteStorageMethod(const SteamMethod method) noexcept {
 
 InterfaceDecision SteamPolicy::EvaluateInterface(
     const std::string_view version) const noexcept {
+    if (version == "SteamClient017") {
+        return InterfaceDecision::WrapClient;
+    }
     if (version == kMatchmaking
         || version == kNetworking
         || version == kPinnedNetworking

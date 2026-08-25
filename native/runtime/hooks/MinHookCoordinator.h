@@ -38,6 +38,7 @@ struct MinHookFaults {
     std::uint32_t failApplyCall = 0;
     std::uint32_t failDisableCount = 0;
     std::uint32_t failRemoveCount = 0;
+    std::uint32_t failQueueEnableCount = 0;
 };
 
 void SetMinHookFaults(const MinHookFaults& faults) noexcept;

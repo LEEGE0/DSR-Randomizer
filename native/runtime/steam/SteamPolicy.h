@@ -28,6 +28,7 @@ enum class MethodDecision {
 
 enum class InterfaceDecision {
     Wrap,
+    WrapClient,
     AllowOwnershipIdentity,
     AllowRaw,
     UnknownProtectedFatal,

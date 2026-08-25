@@ -1,10 +1,13 @@
 #include <Windows.h>
 #include <bcrypt.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <initializer_list>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -34,6 +37,128 @@ using Factory = DSRRandomizer::Steam::Synthetic::FactoryFunction;
 using ResetCounters = void(__cdecl*)() noexcept;
 using QueryCounter = std::uint32_t(__cdecl*)() noexcept;
 using SetUnexpectedFactoryExit = void(__cdecl*)(DWORD) noexcept;
+
+std::array<void*, 29> productionUserVTable{};
+std::array<void*, 36> productionClientVTable{};
+std::array<void*, 38> productionMatchmakingVTable{};
+std::array<void*, 22> productionNetworkingVTable{};
+std::array<void*, 55> productionRemoteStorageVTable{};
+struct ProductionRawInterface {
+    void** vtable;
+};
+ProductionRawInterface productionUser{productionUserVTable.data()};
+ProductionRawInterface productionClient{productionClientVTable.data()};
+ProductionRawInterface productionMatchmaking{productionMatchmakingVTable.data()};
+ProductionRawInterface productionNetworking{productionNetworkingVTable.data()};
+ProductionRawInterface productionRemoteStorage{productionRemoteStorageVTable.data()};
+std::uint32_t productionRawProtectedCalls = 0;
+std::uint32_t productionRawIdentityCalls = 0;
+std::uint32_t productionRawClientGetterCalls = 0;
+std::uint32_t productionAbiFatalCalls = 0;
+constexpr std::uint64_t kProductionSteamId = 0x0110000101234567ULL;
+
+#pragma pack(push, 1)
+class ProductionSteamId final {
+public:
+    ProductionSteamId() noexcept : value_(0) {}
+    explicit ProductionSteamId(const std::uint64_t value) noexcept
+        : value_(value) {}
+
+    [[nodiscard]] std::uint64_t Value() const noexcept { return value_; }
+
+private:
+    std::uint64_t value_;
+};
+#pragma pack(pop)
+
+static_assert(sizeof(ProductionSteamId) == sizeof(std::uint64_t));
+
+void* __cdecl ProductionRawFactory(const char* version) noexcept;
+
+std::uintptr_t ProductionRawProtected(void*, ...) noexcept {
+    ++productionRawProtectedCalls;
+    return UINTPTR_MAX;
+}
+
+ProductionSteamId ProductionRawSteamId(void*) noexcept {
+    ++productionRawIdentityCalls;
+    return ProductionSteamId(kProductionSteamId);
+}
+
+void* ProductionRawClientGetter(
+    void*,
+    std::int32_t,
+    std::int32_t,
+    const char* const version) noexcept {
+    ++productionRawClientGetterCalls;
+    return ProductionRawFactory(version);
+}
+
+void* ProductionRawClientUtilsGetter(
+    void*,
+    std::int32_t,
+    const char* const version) noexcept {
+    ++productionRawClientGetterCalls;
+    return ProductionRawFactory(version);
+}
+
+void* __cdecl ProductionRawFactory(const char* const version) noexcept {
+    if (version == nullptr) {
+        return nullptr;
+    }
+    if (std::strcmp(version, "SteamUser019") == 0) {
+        return &productionUser;
+    }
+    if (std::strcmp(version, "SteamClient017") == 0) {
+        return &productionClient;
+    }
+    if (std::strcmp(version, "SteamMatchMaking009") == 0) {
+        return &productionMatchmaking;
+    }
+    if (std::strcmp(version, "SteamNetworking005") == 0) {
+        return &productionNetworking;
+    }
+    if (std::strcmp(
+            version,
+            "STEAMREMOTESTORAGE_INTERFACE_VERSION014") == 0) {
+        return &productionRemoteStorage;
+    }
+    return reinterpret_cast<void*>(1);
+}
+
+void ProductionAbiFatalReporter(const char*) noexcept {
+    ++productionAbiFatalCalls;
+}
+
+template <typename Result, typename... Arguments>
+Result CallProductionSlot(
+    void* const interfaceValue,
+    const std::size_t slot,
+    Arguments... arguments) {
+    auto** const vtable = *reinterpret_cast<void***>(interfaceValue);
+    const auto method = reinterpret_cast<Result(*)(void*, Arguments...) noexcept>(
+        vtable[slot]);
+    return method(interfaceValue, arguments...);
+}
+
+bool CallEveryProductionSlot(
+    void* const value,
+    const std::size_t count,
+    const std::initializer_list<std::size_t> classReturnSlots = {}) {
+    if (value == nullptr) {
+        return false;
+    }
+    for (std::size_t slot = 0; slot < count; ++slot) {
+        if (std::find(
+                classReturnSlots.begin(),
+                classReturnSlots.end(),
+                slot) != classReturnSlots.end()) {
+            continue;
+        }
+        static_cast<void>(CallProductionSlot<std::uintptr_t>(value, slot));
+    }
+    return true;
+}
 
 const DeferredModuleGateConfiguration* activeBootstrapConfiguration = nullptr;
 
@@ -388,12 +513,176 @@ int VerifyPolicy() {
         || policy.Evaluate("SteamUser019", SteamMethod::GetSteamID)
             != MethodDecision::Allow
         || policy.EvaluateInterface("SteamClient017")
-            != InterfaceDecision::AllowRaw
+            != InterfaceDecision::WrapClient
         || policy.Evaluate("SteamMatchMaking999", SteamMethod::CreateLobby)
             != MethodDecision::UnknownInterfaceFatal) {
         return Fail("Steam interface policy matrix was not fail closed");
     }
     return 0;
+}
+
+int VerifyProductionPinnedAbi() {
+    productionUserVTable.fill(reinterpret_cast<void*>(&ProductionRawProtected));
+    productionClientVTable.fill(reinterpret_cast<void*>(&ProductionRawProtected));
+    productionMatchmakingVTable.fill(
+        reinterpret_cast<void*>(&ProductionRawProtected));
+    productionNetworkingVTable.fill(
+        reinterpret_cast<void*>(&ProductionRawProtected));
+    productionRemoteStorageVTable.fill(
+        reinterpret_cast<void*>(&ProductionRawProtected));
+    productionUserVTable[2] = reinterpret_cast<void*>(&ProductionRawSteamId);
+    for (const auto slot : {5U, 6U, 8U, 10U, 11U, 12U, 13U, 14U, 15U,
+                            16U, 17U, 18U, 23U, 24U, 25U, 26U, 27U, 28U,
+                            29U, 30U, 34U, 35U}) {
+        productionClientVTable[slot] =
+            reinterpret_cast<void*>(&ProductionRawClientGetter);
+    }
+    productionClientVTable[9] =
+        reinterpret_cast<void*>(&ProductionRawClientUtilsGetter);
+    productionRawProtectedCalls = 0;
+    productionRawIdentityCalls = 0;
+    productionRawClientGetterCalls = 0;
+    productionAbiFatalCalls = 0;
+
+    constexpr std::size_t slot = 7;
+    const std::vector<std::string> declared{
+        "SteamClient017",
+        "SteamUser019",
+        "SteamMatchMaking009",
+        "SteamNetworking005",
+        "STEAMREMOTESTORAGE_INTERFACE_VERSION014",
+    };
+    const auto fatalState = std::make_shared<DSRRandomizer::Steam::FatalState>(
+        &ProductionAbiFatalReporter);
+    if (DSRRandomizer::Steam::RegisterSteamFactorySlot(
+            slot,
+            declared,
+            fatalState,
+            DSRRandomizer::Steam::SteamInterfaceLayout::ProductionPinned)
+            != DSRRandomizer::Steam::SteamFactorySlotStatus::Success
+        || !DSRRandomizer::Steam::SetSteamFactoryOriginal(
+            slot,
+            &ProductionRawFactory)) {
+        return Fail("production ABI factory slot could not be registered");
+    }
+    const auto factory = reinterpret_cast<Factory>(
+        DSRRandomizer::Steam::SteamFactoryDetourAddress(slot));
+    void* const client = factory("SteamClient017");
+    void* const user = CallProductionSlot<void*>(
+        client, 5, std::int32_t{}, std::int32_t{}, "SteamUser019");
+    void* const matchmaking = CallProductionSlot<void*>(
+        client, 10, std::int32_t{}, std::int32_t{}, "SteamMatchMaking009");
+    void* const networking = CallProductionSlot<void*>(
+        client, 16, std::int32_t{}, std::int32_t{}, "SteamNetworking005");
+    void* const remoteStorage = CallProductionSlot<void*>(
+        client, 17, std::int32_t{}, std::int32_t{},
+        "STEAMREMOTESTORAGE_INTERFACE_VERSION014");
+    const bool noRawProtectedObject = client != &productionClient
+        && user != &productionUser
+        && matchmaking != &productionMatchmaking
+        && networking != &productionNetworking
+        && remoteStorage != &productionRemoteStorage;
+    const bool exactIdentity = CallProductionSlot<ProductionSteamId>(user, 2)
+            .Value() == kProductionSteamId
+        && productionRawIdentityCalls == 1;
+    const bool representativeSlots =
+        CallProductionSlot<std::int32_t>(user, 0) == 0
+        && CallProductionSlot<std::int32_t>(
+            user, 14, static_cast<const void*>(nullptr), 0,
+            std::uint64_t{}) == 0
+        && !CallProductionSlot<bool>(user, 28)
+        && CallProductionSlot<std::int32_t>(matchmaking, 0) == 0
+        && std::strcmp(
+            CallProductionSlot<const char*>(
+                matchmaking, 19, std::uint64_t{}, "key"),
+            "") == 0
+        && CallProductionSlot<std::uint64_t>(
+            matchmaking, 13, std::int32_t{}, 4) == 0
+        && CallProductionSlot<ProductionSteamId>(
+            matchmaking, 12, std::int32_t{}).Value() == 0
+        && CallProductionSlot<ProductionSteamId>(
+            matchmaking, 18, std::uint64_t{}, std::int32_t{}).Value() == 0
+        && CallProductionSlot<ProductionSteamId>(
+            matchmaking, 35, std::uint64_t{}).Value() == 0
+        && !CallProductionSlot<bool>(
+            matchmaking, 37, std::uint64_t{}, std::uint64_t{})
+        && !CallProductionSlot<bool>(
+            networking, 0, std::uint64_t{}, nullptr, std::uint32_t{},
+            std::int32_t{}, 0)
+        && !CallProductionSlot<bool>(
+            networking, 11, std::uint32_t{}, false)
+        && CallProductionSlot<std::int32_t>(
+            networking, 21, std::uint32_t{}) == 0
+        && !CallProductionSlot<bool>(
+            remoteStorage, 0, "save", nullptr, std::int32_t{})
+        && CallProductionSlot<std::uint64_t>(
+            remoteStorage, 29, std::int32_t{}) == UINT64_MAX
+        && CallProductionSlot<std::uint64_t>(
+            remoteStorage, 54, std::uint64_t{}, "path", std::uint32_t{}) == 0;
+    const bool everySlotCallable = CallEveryProductionSlot(user, 29, {2})
+        && CallEveryProductionSlot(matchmaking, 38, {12, 18, 35})
+        && CallEveryProductionSlot(networking, 22)
+        && CallEveryProductionSlot(remoteStorage, 55);
+    const bool exactWindowsSlotCounts =
+        DSRRandomizer::Steam::Testing::ProductionInterfaceSlotCount(
+            "SteamClient017") == 36
+        && DSRRandomizer::Steam::Testing::ProductionInterfaceSlotCount(
+            "SteamUser019") == 29
+        && DSRRandomizer::Steam::Testing::ProductionInterfaceSlotCount(
+            "SteamMatchMaking009") == 38
+        && DSRRandomizer::Steam::Testing::ProductionInterfaceSlotCount(
+            "SteamNetworking005") == 22
+        && DSRRandomizer::Steam::Testing::ProductionInterfaceSlotCount(
+            "STEAMREMOTESTORAGE_INTERFACE_VERSION014") == 55;
+    const bool protectedRawNeverCalled = productionRawProtectedCalls == 0
+        && productionRawClientGetterCalls >= 4;
+
+    const auto clientGetterCallsBeforeUnknown = productionRawClientGetterCalls;
+    const bool unknownClientGatewayDenied = CallProductionSlot<void*>(
+            client,
+            12,
+            std::int32_t{},
+            std::int32_t{},
+            "SteamNetworking999") == nullptr
+        && productionRawClientGetterCalls == clientGetterCallsBeforeUnknown
+        && fatalState->IsFatal();
+
+    fatalState->EnterDenyOnly();
+    DSRRandomizer::Steam::UnregisterSteamFactorySlot(slot);
+    const bool teardownDeny = CallProductionSlot<ProductionSteamId>(user, 2)
+            .Value() == 0
+        && !CallProductionSlot<bool>(
+            networking, 0, std::uint64_t{}, nullptr, std::uint32_t{},
+            std::int32_t{}, 0)
+        && factory("SteamUser019") == nullptr
+        && productionRawIdentityCalls == 1;
+
+    productionAbiFatalCalls = 0;
+    const auto returningFatal = std::make_shared<DSRRandomizer::Steam::FatalState>(
+        &ProductionAbiFatalReporter);
+    const bool returningFatalRegistered =
+        DSRRandomizer::Steam::RegisterSteamFactorySlot(
+            slot,
+            declared,
+            returningFatal,
+            DSRRandomizer::Steam::SteamInterfaceLayout::ProductionPinned)
+            == DSRRandomizer::Steam::SteamFactorySlotStatus::Success
+        && DSRRandomizer::Steam::SetSteamFactoryOriginal(
+            slot,
+            &ProductionRawFactory);
+    const bool returningFatalDenied = returningFatalRegistered
+        && factory("SteamMatchMaking999") == nullptr
+        && productionAbiFatalCalls == 1
+        && factory("SteamUser019") == nullptr;
+    DSRRandomizer::Steam::UnregisterSteamFactorySlot(slot);
+
+    return noRawProtectedObject && exactIdentity && representativeSlots
+            && everySlotCallable && exactWindowsSlotCounts
+            && protectedRawNeverCalled && unknownClientGatewayDenied
+            && teardownDeny
+            && returningFatalDenied
+        ? 0
+        : Fail("production version-pinned Steam ABI was not offline-safe");
 }
 
 DWORD RunChild(
@@ -444,6 +733,9 @@ std::wstring FileName(const std::wstring& path) {
 
 int RunParent(const std::wstring& fakePath) {
     if (VerifyPolicy() != 0) {
+        return 1;
+    }
+    if (VerifyProductionPinnedAbi() != 0) {
         return 1;
     }
     if (RunChild(L"eager", fakePath) != 0) {

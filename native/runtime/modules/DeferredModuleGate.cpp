@@ -158,6 +158,8 @@ struct GateContext {
     std::array<bool, Steam::kSteamFactorySlotCapacity> slots{};
     std::mutex quarantineMutex;
     std::vector<HMODULE> quarantinedModules;
+    Steam::SteamInterfaceLayout interfaceLayout =
+        Steam::SteamInterfaceLayout::ProductionPinned;
 
     ~GateContext() {
         for (const auto module : quarantinedModules) {
@@ -173,13 +175,14 @@ struct HookEntry {
     bool created = false;
     bool factory = false;
     std::size_t factorySlot = Steam::kSteamFactorySlotCapacity;
+    bool enabled = false;
 };
 
 struct Lifecycle {
     std::shared_ptr<GateContext> context;
     std::vector<HookEntry> hooks;
     bool initialized = false;
-    bool mayBeEnabled = false;
+    bool coverageComplete = false;
 };
 
 std::atomic<std::shared_ptr<GateContext>> activeContext;
@@ -1008,6 +1011,55 @@ bool ConsumeFactoryPostCreateFault() noexcept {
     return false;
 }
 
+bool AllCreatedHooksEnabledLocked() noexcept {
+    bool found = false;
+    for (const auto& hook : lifecycle.hooks) {
+        if (!hook.created) {
+            continue;
+        }
+        found = true;
+        if (!hook.enabled) {
+            return false;
+        }
+    }
+    return found;
+}
+
+bool EnsureRetainedHooksEnabled() noexcept {
+    std::vector<std::size_t> queued;
+    bool complete = true;
+    try {
+        std::scoped_lock lifecycleLock(hooksMutex);
+        queued.reserve(lifecycle.hooks.size());
+        for (std::size_t index = 0; index < lifecycle.hooks.size(); ++index) {
+            auto& hook = lifecycle.hooks[index];
+            if (!hook.created || hook.enabled) {
+                continue;
+            }
+            if (Hooks::QueueEnableHook(hook.target) == MH_OK) {
+                queued.push_back(index);
+            }
+            else {
+                complete = false;
+            }
+        }
+        if (!queued.empty()) {
+            if (Hooks::ApplyQueuedHooks() == MH_OK) {
+                for (const auto index : queued) {
+                    lifecycle.hooks[index].enabled = true;
+                }
+            }
+            else {
+                complete = false;
+            }
+        }
+        return complete && AllCreatedHooksEnabledLocked();
+    }
+    catch (...) {
+        return false;
+    }
+}
+
 bool RollBackFactoryHooks(
     GateContext& context,
     std::vector<HookEntry>& created) noexcept {
@@ -1023,7 +1075,7 @@ bool RollBackFactoryHooks(
     Steam::SteamFactoryCallbackBlock factoryCallbackBlock;
     std::array<HookEntry, Steam::kSteamFactorySlotCapacity> retained{};
     std::size_t retainedCount = 0;
-    bool mayBeEnabled = false;
+    bool removedAny = false;
     {
         Hooks::MinHookMutationLease mutation;
         for (std::size_t index = created.size(); index > 0; --index) {
@@ -1039,20 +1091,26 @@ bool RollBackFactoryHooks(
                 Steam::UnregisterSteamFactorySlot(hook.factorySlot);
                 ReleaseFactorySlot(context, hook.factorySlot);
                 hook.created = false;
+                removedAny = true;
             }
             else {
                 retained[retainedCount++] = hook;
-                mayBeEnabled = mayBeEnabled || !disabled;
             }
         }
     }
     if (retainedCount != 0) {
-        std::scoped_lock lifecycleLock(hooksMutex);
-        lifecycle.mayBeEnabled = lifecycle.mayBeEnabled || mayBeEnabled;
-        lifecycle.hooks.insert(
-            lifecycle.hooks.end(),
-            retained.begin(),
-            retained.begin() + static_cast<std::ptrdiff_t>(retainedCount));
+        {
+            std::scoped_lock lifecycleLock(hooksMutex);
+            if (removedAny) {
+                lifecycle.coverageComplete = false;
+            }
+            lifecycle.hooks.insert(
+                lifecycle.hooks.end(),
+                retained.begin(),
+                retained.begin() + static_cast<std::ptrdiff_t>(retainedCount));
+        }
+        Hooks::MinHookMutationLease mutation;
+        static_cast<void>(EnsureRetainedHooksEnabled());
     }
     created.clear();
     return retainedCount == 0;
@@ -1060,7 +1118,9 @@ bool RollBackFactoryHooks(
 
 void RetainAppliedFactoryHooks(std::vector<HookEntry>& created) noexcept {
     std::scoped_lock lifecycleLock(hooksMutex);
-    lifecycle.mayBeEnabled = true;
+    for (auto& hook : created) {
+        hook.enabled = true;
+    }
     lifecycle.hooks.insert(
         lifecycle.hooks.end(),
         created.begin(),
@@ -1095,7 +1155,8 @@ bool ProtectFactoryExports(
                 || Steam::RegisterSteamFactorySlot(
                     slot,
                     record.declaredInterfaces,
-                    context->fatalState)
+                    context->fatalState,
+                    context->interfaceLayout)
                     != Steam::SteamFactorySlotStatus::Success) {
                 if (slot < Steam::kSteamFactorySlotCapacity) {
                     ReleaseFactorySlot(*context, slot);
@@ -1140,6 +1201,11 @@ bool ProtectFactoryExports(
         if (complete && created.size() == record.protectedExports.size()) {
             complete = Hooks::ApplyQueuedHooks() == MH_OK;
             applied = complete;
+            if (applied) {
+                for (auto& hook : created) {
+                    hook.enabled = true;
+                }
+            }
         }
         if (complete) {
             SignalTestEvent(afterFactoryApplyEvent);
@@ -1154,7 +1220,6 @@ bool ProtectFactoryExports(
         }
         if (complete && !IsFatal(context)) {
             std::scoped_lock lifecycleLock(hooksMutex);
-            lifecycle.mayBeEnabled = true;
             lifecycle.hooks.insert(
                 lifecycle.hooks.end(),
                 created.begin(),
@@ -2329,20 +2394,24 @@ DeferredModuleGateCleanupStatus CleanupLocked() noexcept {
     auto disableKnownHooks = []() noexcept {
         bool disabled = true;
         std::scoped_lock hookLock(hooksMutex);
-        for (const auto& hook : lifecycle.hooks) {
-            if (!hook.created) {
+        for (auto& hook : lifecycle.hooks) {
+            if (!hook.created || !hook.enabled) {
                 continue;
             }
             const auto status = Hooks::DisableHook(hook.target);
-            disabled = (status == MH_OK || status == MH_ERROR_DISABLED
-                    || status == MH_ERROR_NOT_CREATED)
-                && disabled;
+            const bool current = status == MH_OK || status == MH_ERROR_DISABLED
+                || status == MH_ERROR_NOT_CREATED;
+            if (current) {
+                hook.enabled = false;
+            }
+            disabled = current && disabled;
         }
         return disabled;
     };
     {
         Hooks::MinHookMutationLease mutation;
         if (!disableKnownHooks()) {
+            static_cast<void>(EnsureRetainedHooksEnabled());
             return DeferredModuleGateCleanupStatus::Incomplete;
         }
     }
@@ -2357,10 +2426,11 @@ DeferredModuleGateCleanupStatus CleanupLocked() noexcept {
     {
         Hooks::MinHookMutationLease mutation;
         if (!disableKnownHooks()) {
+            static_cast<void>(EnsureRetainedHooksEnabled());
             return DeferredModuleGateCleanupStatus::Incomplete;
         }
-        lifecycle.mayBeEnabled = false;
         bool removed = true;
+        bool removedAny = false;
         {
             std::scoped_lock hookLock(hooksMutex);
             for (auto iterator = lifecycle.hooks.rbegin();
@@ -2372,6 +2442,7 @@ DeferredModuleGateCleanupStatus CleanupLocked() noexcept {
                 const auto status = Hooks::RemoveHook(iterator->target);
                 if (status == MH_OK || status == MH_ERROR_NOT_CREATED) {
                     iterator->created = false;
+                    removedAny = true;
                     if (iterator->factorySlot
                         < Steam::kSteamFactorySlotCapacity) {
                         Steam::UnregisterSteamFactorySlot(
@@ -2389,6 +2460,10 @@ DeferredModuleGateCleanupStatus CleanupLocked() noexcept {
             }
         }
         if (!removed) {
+            if (removedAny) {
+                lifecycle.coverageComplete = false;
+            }
+            static_cast<void>(EnsureRetainedHooksEnabled());
             return DeferredModuleGateCleanupStatus::Incomplete;
         }
         if (lifecycle.initialized && !Hooks::ReleaseMinHook()) {
@@ -2402,7 +2477,8 @@ DeferredModuleGateCleanupStatus CleanupLocked() noexcept {
 }
 
 DeferredModuleGateInstallStatus InstallWithSuspendedProof(
-    const DeferredModuleGateConfiguration& configuration) noexcept {
+    const DeferredModuleGateConfiguration& configuration,
+    const Steam::SteamInterfaceLayout interfaceLayout) noexcept {
     std::scoped_lock installLock(installMutex);
     if (lifecycle.context != nullptr
         || activeContext.load(std::memory_order_acquire) != nullptr) {
@@ -2414,6 +2490,7 @@ DeferredModuleGateInstallStatus InstallWithSuspendedProof(
         if (!BuildContext(configuration, context)) {
             return DeferredModuleGateInstallStatus::InvalidConfiguration;
         }
+        context->interfaceLayout = interfaceLayout;
         if (!Hooks::AcquireMinHook()) {
             return DeferredModuleGateInstallStatus::HookInstallFailed;
         }
@@ -2460,9 +2537,17 @@ DeferredModuleGateInstallStatus InstallWithSuspendedProof(
             }
         }
         if (ready) {
-            lifecycle.mayBeEnabled = true;
             activeContext.store(context, std::memory_order_release);
             ready = Hooks::ApplyQueuedHooks() == MH_OK;
+            if (ready) {
+                std::scoped_lock hookLock(hooksMutex);
+                for (auto& hook : lifecycle.hooks) {
+                    if (hook.created) {
+                        hook.enabled = true;
+                    }
+                }
+                lifecycle.coverageComplete = true;
+            }
         }
         mutation.Release();
         if (!ready) {
@@ -2471,9 +2556,10 @@ DeferredModuleGateInstallStatus InstallWithSuspendedProof(
             return DeferredModuleGateInstallStatus::HookInstallFailed;
         }
 
-        // Toolhelp is not independently loader-stable. This scan is valid only
-        // under the Testing suspended-process proof. After resume, all scans run
-        // from the serialized outermost loader callback.
+        // Toolhelp is not independently loader-stable. The caller must invoke
+        // initial installation before the target is resumed; this function does
+        // not itself prove suspension. After resume, all scans run from the
+        // serialized outermost loader callback.
         if (!ScanAndAdmitExpectedModules(context, false)) {
             if (!LifecycleOwnsFactoryHooks()) {
                 static_cast<void>(CleanupLocked());
@@ -2498,8 +2584,9 @@ DeferredModuleGateInstallStatus InstallWithSuspendedProof(
 
 DeferredModuleGateInstallStatus InstallDeferredModuleGate(
     const DeferredModuleGateConfiguration& configuration) noexcept {
-    // The runtime initializer is invoked before the launcher resumes the target.
-    return InstallWithSuspendedProof(configuration);
+    return InstallWithSuspendedProof(
+        configuration,
+        Steam::SteamInterfaceLayout::ProductionPinned);
 }
 
 DeferredModuleGateCleanupStatus UninstallDeferredModuleGate() noexcept {
@@ -2516,7 +2603,9 @@ namespace Testing {
 DeferredModuleGateInstallStatus
 InstallDeferredModuleGateForSyntheticSuspendedProcess(
     const DeferredModuleGateConfiguration& configuration) noexcept {
-    return InstallWithSuspendedProof(configuration);
+    return InstallWithSuspendedProof(
+        configuration,
+        Steam::SteamInterfaceLayout::SyntheticOneSlotForTesting);
 }
 
 void FailNextFactoryPublication() noexcept {
@@ -2531,10 +2620,12 @@ DeferredModuleGateLifecycleSnapshot CurrentGateLifecycle() noexcept {
     std::scoped_lock installLock(installMutex);
     DeferredModuleGateLifecycleSnapshot snapshot{};
     snapshot.contextRetained = lifecycle.context != nullptr;
+    std::scoped_lock hookLock(hooksMutex);
     snapshot.denyOnly = lifecycle.context != nullptr
         && lifecycle.context->fatalState != nullptr
-        && lifecycle.context->fatalState->IsFatal();
-    std::scoped_lock hookLock(hooksMutex);
+        && lifecycle.context->fatalState->IsFatal()
+        && lifecycle.coverageComplete
+        && AllCreatedHooksEnabledLocked();
     for (const auto& hook : lifecycle.hooks) {
         if (!hook.created) {
             continue;
@@ -2592,8 +2683,12 @@ void HoldGateCallbackWhileWaitingForMutation(
 
 bool GateIsDenyOnlyForReporter() noexcept {
     const auto context = activeContext.load(std::memory_order_acquire);
-    return context != nullptr && context->fatalState != nullptr
-        && context->fatalState->IsFatal();
+    if (context == nullptr || context->fatalState == nullptr
+        || !context->fatalState->IsFatal()) {
+        return false;
+    }
+    std::scoped_lock hookLock(hooksMutex);
+    return lifecycle.coverageComplete && AllCreatedHooksEnabledLocked();
 }
 
 std::size_t GateRetainedFactorySlotCountForReporter() noexcept {

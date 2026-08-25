@@ -237,7 +237,7 @@ bool CleanupRetainsHooksAndRetriesEachFailedPhase() {
     if (UninstallGameServiceGuard() != GameServiceGuardCleanupStatus::Incomplete
         || CurrentGameServiceGuardLifecycle().installedHookCount != 1
         || !CurrentGameServiceGuardLifecycle().cleanupIncomplete
-        || !CurrentGameServiceGuardLifecycle().denyOnlyRetained
+        || CurrentGameServiceGuardLifecycle().denyOnlyRetained
         || FakeHooks::removeCalls != 1) {
         return false;
     }
@@ -429,6 +429,102 @@ bool ConcurrentProductionGroupsShareMutationAndOwnership() {
     return installed && protectedOffline && cleaned;
 }
 
+bool RemoveFailureRetainsEnabledDenyOnlyHooksAndRetries() {
+    productionOfflineState = true;
+    productionOfflineCalls = 0;
+    const auto module = GetModuleHandleW(nullptr);
+    if (module == nullptr) {
+        return false;
+    }
+    const auto* const base = reinterpret_cast<const std::byte*>(module);
+    const auto* const dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    const auto* const nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(
+        base + dos->e_lfanew);
+    constexpr std::size_t fingerprintLength = 16;
+    auto* const force = reinterpret_cast<const std::byte*>(
+        &ProductionOfflineSetter);
+    auto* const deny = reinterpret_cast<const std::byte*>(&ProductionDeniedCall);
+    GameServiceGuardConfiguration configuration{
+        {GameServiceImage{
+            L"fixture.exe", base, nt->OptionalHeader.SizeOfImage}},
+        {
+            GameServiceTarget{
+                L"fixture.exe",
+                static_cast<std::uintptr_t>(force - base),
+                Hash(std::span(force, fingerprintLength)),
+                fingerprintLength,
+                InternalTargetAction::ForceOffline},
+            GameServiceTarget{
+                L"fixture.exe",
+                static_cast<std::uintptr_t>(deny - base),
+                Hash(std::span(deny, fingerprintLength)),
+                fingerprintLength,
+                InternalTargetAction::DenyCall},
+        },
+    };
+    if (InstallGameServiceGuard(configuration)
+        != GameServiceGuardInstallStatus::Success) {
+        return false;
+    }
+
+    DSRRandomizer::Hooks::Testing::SetMinHookFaults({0, 0, 2});
+    const auto firstCleanup = UninstallGameServiceGuard();
+    const auto retained = CurrentGameServiceGuardLifecycle();
+    ProductionOfflineSetter(true);
+    const bool forceStillDenies = !productionOfflineState;
+    const bool callStillDenied = ProductionDeniedCall() == 0;
+
+    DSRRandomizer::Hooks::Testing::SetMinHookFaults({});
+    const auto retry = UninstallGameServiceGuard();
+    ProductionOfflineSetter(true);
+    const bool originalsRestored = productionOfflineState
+        && ProductionDeniedCall() != 0;
+
+    const bool reinstalled = InstallGameServiceGuard(configuration)
+        == GameServiceGuardInstallStatus::Success;
+    DSRRandomizer::Hooks::Testing::SetMinHookFaults({1, 0, 2});
+    const auto failedReenableCleanup = UninstallGameServiceGuard();
+    const auto nonEnforcing = CurrentGameServiceGuardLifecycle();
+    DSRRandomizer::Hooks::Testing::SetMinHookFaults({});
+    const auto failedReenableRetry = UninstallGameServiceGuard();
+    const bool queueFailureReinstalled = InstallGameServiceGuard(configuration)
+        == GameServiceGuardInstallStatus::Success;
+    DSRRandomizer::Hooks::Testing::SetMinHookFaults({0, 0, 2, 1});
+    const auto failedQueueCleanup = UninstallGameServiceGuard();
+    const auto queueFailureNonEnforcing =
+        CurrentGameServiceGuardLifecycle();
+    DSRRandomizer::Hooks::Testing::SetMinHookFaults({});
+    const auto failedQueueRetry = UninstallGameServiceGuard();
+    const bool partialRemovalReinstalled = InstallGameServiceGuard(configuration)
+        == GameServiceGuardInstallStatus::Success;
+    DSRRandomizer::Hooks::Testing::SetMinHookFaults({0, 0, 1});
+    const auto partialRemovalCleanup = UninstallGameServiceGuard();
+    const auto partialRemoval = CurrentGameServiceGuardLifecycle();
+    DSRRandomizer::Hooks::Testing::SetMinHookFaults({});
+    const auto partialRemovalRetry = UninstallGameServiceGuard();
+    return firstCleanup == GameServiceGuardCleanupStatus::Incomplete
+        && retained.cleanupIncomplete && retained.denyOnlyRetained
+        && retained.installedHookCount == 2
+        && forceStillDenies && callStillDenied
+        && retry == GameServiceGuardCleanupStatus::Success
+        && originalsRestored
+        && reinstalled
+        && failedReenableCleanup == GameServiceGuardCleanupStatus::Incomplete
+        && nonEnforcing.cleanupIncomplete && !nonEnforcing.denyOnlyRetained
+        && failedReenableRetry == GameServiceGuardCleanupStatus::Success
+        && queueFailureReinstalled
+        && failedQueueCleanup == GameServiceGuardCleanupStatus::Incomplete
+        && queueFailureNonEnforcing.cleanupIncomplete
+        && !queueFailureNonEnforcing.denyOnlyRetained
+        && failedQueueRetry == GameServiceGuardCleanupStatus::Success
+        && partialRemovalReinstalled
+        && partialRemovalCleanup == GameServiceGuardCleanupStatus::Incomplete
+        && partialRemoval.cleanupIncomplete
+        && !partialRemoval.denyOnlyRetained
+        && partialRemovalRetry == GameServiceGuardCleanupStatus::Success
+        && DSRRandomizer::Hooks::Testing::MinHookReferenceCount() == 0;
+}
+
 }  // namespace
 
 int wmain() {
@@ -447,6 +543,8 @@ int wmain() {
                   &BootstrapReportsCleanupFailureExactlyAndAllowsRetry},
         std::pair{"concurrent production groups share MinHook",
                   &ConcurrentProductionGroupsShareMutationAndOwnership},
+        std::pair{"remove failure retains enabled deny-only hooks",
+                  &RemoveFailureRetainsEnabledDenyOnlyHooksAndRetries},
     };
 
     for (const auto& [name, test] : tests) {
