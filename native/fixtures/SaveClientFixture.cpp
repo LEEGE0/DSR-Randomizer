@@ -895,7 +895,11 @@ int wmain(int argc, wchar_t* argv[]) {
         | static_cast<std::uint64_t>(
             DSRRandomizer::ProtectionFlags::SaveKnownFolder)
         | static_cast<std::uint64_t>(
-            DSRRandomizer::ProtectionFlags::SaveFileIo);
+            DSRRandomizer::ProtectionFlags::SaveFileIo)
+        | static_cast<std::uint64_t>(
+            DSRRandomizer::ProtectionFlags::Heartbeat)
+        | static_cast<std::uint64_t>(
+            DSRRandomizer::ProtectionFlags::HookIntegrity);
     if (!CopyWide(
             block.pipeName,
             DSRRandomizer::kProtectionPipeNameCharacters,

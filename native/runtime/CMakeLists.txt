@@ -7,6 +7,10 @@ add_library(DSRRandomizer.Runtime.Core STATIC
   game/GameServiceGuard.h
   modules/DeferredModuleGate.cpp
   modules/DeferredModuleGate.h
+  monitor/HookIntegrityRegistry.cpp
+  monitor/HookIntegrityRegistry.h
+  monitor/ProtectionMonitor.cpp
+  monitor/ProtectionMonitor.h
   profile/PinnedCompatibilityProfile.cpp
   profile/PinnedCompatibilityProfile.h
   network/WinsockHooks.cpp

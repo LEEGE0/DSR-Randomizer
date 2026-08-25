@@ -3,12 +3,14 @@
 #include <Windows.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <optional>
 #include <string>
 
 #include "game/GameServiceGuard.h"
 #include "modules/DeferredModuleGate.h"
+#include "monitor/ProtectionMonitor.h"
 #include "network/WinsockHooks.h"
 #include "profile/PinnedCompatibilityProfile.h"
 #include "save/SaveHooks.h"
@@ -68,7 +70,7 @@ bool SocketConfigurationIsEmpty(const ProtectionInitBlock& block) noexcept {
 }
 
 bool UninstallProtectionGroups() noexcept {
-    bool complete = true;
+    bool complete = Monitor::StopProtectionMonitor();
     complete = Game::UninstallGameServiceGuard()
             == Game::GameServiceGuardCleanupStatus::Success
         && complete;
@@ -130,17 +132,24 @@ InitStatus InitializeCore(
         static_cast<std::uint64_t>(ProtectionFlags::DeferredModuleGate);
     constexpr auto gameServiceOfflineFlag =
         static_cast<std::uint64_t>(ProtectionFlags::GameServiceOffline);
+    constexpr auto heartbeatFlag =
+        static_cast<std::uint64_t>(ProtectionFlags::Heartbeat);
+    constexpr auto hookIntegrityFlag =
+        static_cast<std::uint64_t>(ProtectionFlags::HookIntegrity);
     constexpr auto saveFlags = saveKnownFolderFlag | saveFileIoFlag;
     constexpr auto steamFlags = steamInterfacesFlag | deferredModuleGateFlag;
+    constexpr auto monitorFlags = heartbeatFlag | hookIntegrityFlag;
     constexpr auto supportedFlags =
         bootstrapFlag | saveFlags | winsockFlag | steamFlags
-        | gameServiceOfflineFlag;
+        | gameServiceOfflineFlag | monitorFlags;
     if ((block->requiredFlags & bootstrapFlag) == 0
         || (block->requiredFlags & ~supportedFlags) != 0
         || ((block->requiredFlags & saveFlags) != 0
             && (block->requiredFlags & saveFlags) != saveFlags)
         || ((block->requiredFlags & steamFlags) != 0
-            && (block->requiredFlags & steamFlags) != steamFlags)) {
+            && (block->requiredFlags & steamFlags) != steamFlags)
+        || ((block->requiredFlags & monitorFlags) != 0
+            && (block->requiredFlags & monitorFlags) != monitorFlags)) {
         return InitStatus::RequiredProtectionUnavailable;
     }
 
@@ -254,7 +263,10 @@ InitStatus InitializeCore(
     return InitStatus::Success;
 }
 
-InitStatus ReportHandshake(const ProtectionInitBlock& block) noexcept {
+InitStatus OpenSupervisorSession(
+    const ProtectionInitBlock& block,
+    HANDLE& pipe) noexcept {
+    pipe = INVALID_HANDLE_VALUE;
     const auto pipeNameLength = wcsnlen_s(
         block.pipeName,
         kProtectionPipeNameCharacters);
@@ -266,7 +278,7 @@ InitStatus ReportHandshake(const ProtectionInitBlock& block) noexcept {
         return InitStatus::SupervisorUnavailable;
     }
 
-    const HANDLE pipe = CreateFileW(
+    pipe = CreateFileW(
         block.pipeName,
         GENERIC_WRITE,
         0,
@@ -283,6 +295,8 @@ InitStatus ReportHandshake(const ProtectionInitBlock& block) noexcept {
     message.version = kProtectionProtocolVersion;
     message.size = static_cast<std::uint16_t>(sizeof(message));
     std::copy_n(block.nonce, kProtectionNonceSize, message.nonce);
+    message.kind = static_cast<std::uint32_t>(
+        ProtectionMessageKind::Handshake);
     message.status = static_cast<std::uint32_t>(InitStatus::Success);
     message.activeFlags = activeFlags.load(std::memory_order_acquire);
 
@@ -294,28 +308,53 @@ InitStatus ReportHandshake(const ProtectionInitBlock& block) noexcept {
         &bytesWritten,
         nullptr);
     const BOOL flushed = wrote ? FlushFileBuffers(pipe) : FALSE;
-    CloseHandle(pipe);
     if (!wrote || !flushed || bytesWritten != sizeof(message)) {
+        CloseHandle(pipe);
+        pipe = INVALID_HANDLE_VALUE;
         return InitStatus::SupervisorReportFailed;
     }
 
     return InitStatus::Success;
 }
 
+std::uint64_t ReadCurrentProtectionFlags() noexcept {
+    return activeFlags.load(std::memory_order_acquire);
+}
+
 }  // namespace
 
 InitStatus InitializeProtection(ProtectionInitBlock* block) noexcept {
+    constexpr auto monitorFlags =
+        static_cast<std::uint64_t>(ProtectionFlags::Heartbeat)
+        | static_cast<std::uint64_t>(ProtectionFlags::HookIntegrity);
+    if (block == nullptr
+        || (block->requiredFlags & monitorFlags) != monitorFlags) {
+        return InitStatus::RequiredProtectionUnavailable;
+    }
     const auto status = InitializeCore(block, &ReadRequiredPath, nullptr);
     if (status != InitStatus::Success) {
         return status;
     }
 
-    const auto reportStatus = ReportHandshake(*block);
+    HANDLE pipe = INVALID_HANDLE_VALUE;
+    const auto reportStatus = OpenSupervisorSession(*block, pipe);
     if (reportStatus != InitStatus::Success) {
         activeFlags.store(0, std::memory_order_release);
         if (!UninstallProtectionGroups()) {
             return InitStatus::ProtectionCleanupFailed;
         }
+        return reportStatus;
+    }
+
+    std::array<std::uint8_t, kProtectionNonceSize> nonce{};
+    std::copy_n(block->nonce, kProtectionNonceSize, nonce.begin());
+    if (!Monitor::StartProtectionMonitor(
+            pipe, nonce, &ReadCurrentProtectionFlags)) {
+        CloseHandle(pipe);
+        activeFlags.store(0, std::memory_order_release);
+        return UninstallProtectionGroups()
+            ? InitStatus::SupervisorReportFailed
+            : InitStatus::ProtectionCleanupFailed;
     }
 
     return reportStatus;

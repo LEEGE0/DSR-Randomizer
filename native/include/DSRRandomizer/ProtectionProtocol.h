@@ -11,6 +11,7 @@ inline constexpr std::size_t kProtectionNonceSize = 32;
 inline constexpr std::size_t kProtectionPipeNameCharacters = 128;
 inline constexpr std::size_t kProtectionSavePathCharacters = 512;
 inline constexpr std::size_t kProtectionSocketEndpointCapacity = 2;
+inline constexpr std::size_t kProtectionDeniedCounterCount = 6;
 
 enum class SocketTransport : std::uint16_t {
     Tcp = 1,
@@ -26,6 +27,20 @@ enum class ProtectionFlags : std::uint64_t {
     SteamInterfaces = 1ULL << 4,
     DeferredModuleGate = 1ULL << 5,
     GameServiceOffline = 1ULL << 6,
+    Heartbeat = 1ULL << 7,
+    HookIntegrity = 1ULL << 8,
+};
+
+enum class ProtectionMessageKind : std::uint32_t {
+    Handshake = 1,
+    Heartbeat = 2,
+    Fatal = 3,
+};
+
+enum class ProtectionFatalCode : std::uint32_t {
+    HookIntegrityFailed = 1,
+    HeartbeatStopped = 2,
+    ProtectionThreadFailed = 3,
 };
 
 #pragma pack(push, 1)
@@ -59,9 +74,35 @@ struct ProtectionHandshakeMessage {
     std::uint16_t version;
     std::uint16_t size;
     std::uint8_t nonce[kProtectionNonceSize];
+    std::uint32_t kind;
     std::uint32_t status;
     std::uint64_t activeFlags;
 };
+
+struct ProtectionHeartbeatMessage {
+    std::uint32_t magic;
+    std::uint16_t version;
+    std::uint16_t size;
+    std::uint8_t nonce[kProtectionNonceSize];
+    std::uint32_t kind;
+    std::uint64_t sequence;
+    std::uint64_t monotonicMilliseconds;
+    std::uint64_t activeFlags;
+    std::uint64_t deniedCounters[kProtectionDeniedCounterCount];
+};
+
+struct ProtectionFatalMessage {
+    std::uint32_t magic;
+    std::uint16_t version;
+    std::uint16_t size;
+    std::uint8_t nonce[kProtectionNonceSize];
+    std::uint32_t kind;
+    std::uint32_t fatalCode;
+};
 #pragma pack(pop)
+
+static_assert(sizeof(ProtectionHandshakeMessage) == 56);
+static_assert(sizeof(ProtectionHeartbeatMessage) == 116);
+static_assert(sizeof(ProtectionFatalMessage) == 48);
 
 }  // namespace DSRRandomizer

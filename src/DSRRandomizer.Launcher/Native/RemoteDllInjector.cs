@@ -18,7 +18,9 @@ public enum ProtectionFlags : ulong
     Winsock = 1UL << 3,
     SteamInterfaces = 1UL << 4,
     DeferredModuleGate = 1UL << 5,
-    GameServiceOffline = 1UL << 6
+    GameServiceOffline = 1UL << 6,
+    Heartbeat = 1UL << 7,
+    HookIntegrity = 1UL << 8
 }
 
 public sealed record GuardSavePathConfiguration(
@@ -109,6 +111,8 @@ public sealed class RemoteDllInjector
         IntPtr remotePath = IntPtr.Zero;
         IntPtr remoteBlock = IntPtr.Zero;
         var remoteMemoryCanBeReleased = true;
+        ProtectionPipeServer? pipe = null;
+        var pipeOwnershipTransferred = false;
         try
         {
             var pathBytes = Encoding.Unicode.GetBytes(canonicalGuardPath + '\0');
@@ -129,7 +133,7 @@ public sealed class RemoteDllInjector
                 "InitializeProtection");
             var initializerAddress = AddAddress(remoteGuardBase, initializerRva);
 
-            await using var pipe = new ProtectionPipeServer(
+            pipe = new ProtectionPipeServer(
                 configuration.ExpectedNonce,
                 configuration.HandshakeTimeout);
             var initBlock = CreateInitBlock(configuration, pipe.FullPipeName);
@@ -151,7 +155,15 @@ public sealed class RemoteDllInjector
                     InitializerErrorCode(initializeStatus));
             }
 
-            return await handshakeTask;
+            var handshake = await handshakeTask;
+            if (!handshake.Success)
+            {
+                await pipe.DisposeAsync();
+                return handshake;
+            }
+
+            pipeOwnershipTransferred = true;
+            return handshake with { Session = pipe };
         }
         catch (OperationCanceledException)
         {
@@ -167,6 +179,10 @@ public sealed class RemoteDllInjector
         }
         finally
         {
+            if (pipe is not null && !pipeOwnershipTransferred)
+            {
+                await pipe.DisposeAsync();
+            }
             if (remoteMemoryCanBeReleased)
             {
                 FreeRemoteMemory(remote.ProcessHandle, remoteBlock);

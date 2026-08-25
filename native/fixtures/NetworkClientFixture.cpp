@@ -406,7 +406,9 @@ int wmain(int argc, wchar_t* argv[]) {
     block.size = static_cast<std::uint16_t>(sizeof(block));
     block.requiredFlags = static_cast<std::uint64_t>(
         DSRRandomizer::ProtectionFlags::Bootstrap)
-        | static_cast<std::uint64_t>(DSRRandomizer::ProtectionFlags::Winsock);
+        | static_cast<std::uint64_t>(DSRRandomizer::ProtectionFlags::Winsock)
+        | static_cast<std::uint64_t>(DSRRandomizer::ProtectionFlags::Heartbeat)
+        | static_cast<std::uint64_t>(DSRRandomizer::ProtectionFlags::HookIntegrity);
     block.socketEndpointCount = 2;
     ConfigureIPv4Endpoint(
         block.socketEndpoints[0], DSRRandomizer::SocketTransport::Tcp, tcpPort);

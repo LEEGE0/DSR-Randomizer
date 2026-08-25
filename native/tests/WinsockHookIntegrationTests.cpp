@@ -763,7 +763,9 @@ bool ReadHandshake(
     DWORD read = 0;
     const auto requiredFlags = static_cast<std::uint64_t>(
         DSRRandomizer::ProtectionFlags::Bootstrap)
-        | static_cast<std::uint64_t>(DSRRandomizer::ProtectionFlags::Winsock);
+        | static_cast<std::uint64_t>(DSRRandomizer::ProtectionFlags::Winsock)
+        | static_cast<std::uint64_t>(DSRRandomizer::ProtectionFlags::Heartbeat)
+        | static_cast<std::uint64_t>(DSRRandomizer::ProtectionFlags::HookIntegrity);
     return ReadFile(
             pipe,
             &message,
@@ -775,6 +777,8 @@ bool ReadHandshake(
         && message.version == DSRRandomizer::kProtectionProtocolVersion
         && message.size == sizeof(message)
         && std::equal(nonce.begin(), nonce.end(), message.nonce)
+        && message.kind == static_cast<std::uint32_t>(
+            DSRRandomizer::ProtectionMessageKind::Handshake)
         && message.status == 0
         && message.activeFlags == requiredFlags;
 }

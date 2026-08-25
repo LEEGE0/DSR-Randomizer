@@ -287,8 +287,15 @@ bool ReadHandshake(HANDLE pipe) {
         && message.magic == DSRRandomizer::kProtectionMagic
         && message.version == DSRRandomizer::kProtectionProtocolVersion
         && message.size == sizeof(message)
+        && message.kind == static_cast<std::uint32_t>(
+            DSRRandomizer::ProtectionMessageKind::Handshake)
         && message.status == 0
-        && message.activeFlags == 7;
+        && message.activeFlags
+            == (static_cast<std::uint64_t>(DSRRandomizer::ProtectionFlags::Bootstrap)
+                | static_cast<std::uint64_t>(DSRRandomizer::ProtectionFlags::SaveKnownFolder)
+                | static_cast<std::uint64_t>(DSRRandomizer::ProtectionFlags::SaveFileIo)
+                | static_cast<std::uint64_t>(DSRRandomizer::ProtectionFlags::Heartbeat)
+                | static_cast<std::uint64_t>(DSRRandomizer::ProtectionFlags::HookIntegrity));
 }
 
 SaveHookConfiguration HookConfigurationFor(const fs::path& root) {

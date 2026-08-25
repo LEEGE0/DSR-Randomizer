@@ -420,3 +420,16 @@ set_target_properties(GameServiceGuardTests PROPERTIES
   CXX_EXTENSIONS OFF)
 
 add_test(NAME GameServiceGuardTests COMMAND GameServiceGuardTests)
+
+add_executable(ProtectionMonitorTests
+  tests/ProtectionMonitorTests.cpp)
+target_compile_features(ProtectionMonitorTests PRIVATE cxx_std_20)
+target_link_libraries(ProtectionMonitorTests PRIVATE DSRRandomizer.Runtime.Core)
+target_include_directories(ProtectionMonitorTests
+  PRIVATE
+    ${CMAKE_SOURCE_DIR}/native/runtime)
+dsr_configure_target(ProtectionMonitorTests)
+set_target_properties(ProtectionMonitorTests PROPERTIES
+  CXX_EXTENSIONS OFF)
+
+add_test(NAME ProtectionMonitorTests COMMAND ProtectionMonitorTests)

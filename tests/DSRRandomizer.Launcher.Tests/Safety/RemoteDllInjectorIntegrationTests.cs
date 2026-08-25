@@ -15,6 +15,9 @@ namespace DSRRandomizer.Launcher.Tests.Safety;
 
 public sealed class RemoteDllInjectorIntegrationTests
 {
+    private const ProtectionFlags MonitorFlags =
+        ProtectionFlags.Heartbeat | ProtectionFlags.HookIntegrity;
+
     [Theory]
     [InlineData(10U, "GAME_SERVICE_PROFILE_MISMATCH")]
     [InlineData(11U, "GAME_SERVICE_HOOK_FAILED")]
@@ -140,7 +143,7 @@ public sealed class RemoteDllInjectorIntegrationTests
         var configuration = GuardConfiguration.Create(
             paths.GuardPath,
             ProtocolVersion: 2,
-            RequiredFlags: (ulong)ProtectionFlags.Bootstrap,
+            RequiredFlags: (ulong)(ProtectionFlags.Bootstrap | MonitorFlags),
             DiagnosticMode: true);
 
         var result = await new RemoteDllInjector().InitializeAsync(
@@ -149,7 +152,15 @@ public sealed class RemoteDllInjectorIntegrationTests
             CancellationToken.None);
 
         Assert.True(result.Success, result.ErrorCode);
-        Assert.Equal((ulong)ProtectionFlags.Bootstrap, result.ActiveFlags);
+        Assert.Equal((ulong)(ProtectionFlags.Bootstrap | MonitorFlags), result.ActiveFlags);
+        Assert.NotNull(result.Session);
+        var heartbeat = await ((IProtectionMessageSource)result.Session)
+            .ReadAsync(CancellationToken.None);
+        Assert.Equal(ProtectionMessageKind.Heartbeat, heartbeat.Kind);
+        Assert.Equal(1UL, heartbeat.Sequence);
+        Assert.Equal(result.ActiveFlags, heartbeat.ActiveFlags);
+        Assert.Equal(6, heartbeat.DeniedCounters.Count);
+        await result.Session.DisposeAsync();
         using var fixture = Process.GetProcessById(child.ProcessId);
         Assert.False(fixture.HasExited);
     }
@@ -162,7 +173,7 @@ public sealed class RemoteDllInjectorIntegrationTests
         var configuration = GuardConfiguration.Create(
             paths.GuardPath,
             ProtocolVersion: 2,
-            RequiredFlags: (ulong)ProtectionFlags.Bootstrap,
+            RequiredFlags: (ulong)(ProtectionFlags.Bootstrap | MonitorFlags),
             DiagnosticMode: true) with
         {
             InitializationNonce = RandomNumberGenerator.GetBytes(32)
@@ -225,7 +236,7 @@ public sealed class RemoteDllInjectorIntegrationTests
         var configuration = GuardConfiguration.Create(
             paths.GuardPath,
             ProtocolVersion: 99,
-            RequiredFlags: (ulong)ProtectionFlags.Bootstrap,
+            RequiredFlags: (ulong)(ProtectionFlags.Bootstrap | MonitorFlags),
             DiagnosticMode: true);
 
         var result = await new RemoteDllInjector().InitializeAsync(
@@ -297,7 +308,7 @@ public sealed class RemoteDllInjectorIntegrationTests
             Path.GetDirectoryName(paths.FixturePath)!,
             paths.GuardPath,
             SupportedProfile(),
-            RequiredProtectionFlags: (ulong)ProtectionFlags.Bootstrap,
+            RequiredProtectionFlags: (ulong)(ProtectionFlags.Bootstrap | MonitorFlags),
             DiagnosticMode: true);
 
         try
@@ -323,7 +334,7 @@ public sealed class RemoteDllInjectorIntegrationTests
                 Path.GetDirectoryName(fixturePath)!,
                 fixturePath,
                 SupportedProfile(),
-                RequiredProtectionFlags: (ulong)ProtectionFlags.Bootstrap,
+                RequiredProtectionFlags: (ulong)(ProtectionFlags.Bootstrap | MonitorFlags),
                 DiagnosticMode: true),
             CancellationToken.None);
         child.AssignKillOnCloseJob();

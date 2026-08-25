@@ -38,6 +38,7 @@ struct GuardState {
 struct ResolvedTarget {
     void* address = nullptr;
     InternalTargetAction action{};
+    std::size_t patchLength = 0;
 };
 
 std::mutex guardMutex;
@@ -206,7 +207,7 @@ GameServiceGuardInstallStatus ResolveAndVerify(
             default:
                 return GameServiceGuardInstallStatus::InvalidConfiguration;
             }
-            resolved.push_back({address, target.action});
+            resolved.push_back({address, target.action, target.patchLength});
         }
     }
     catch (...) {
@@ -359,12 +360,18 @@ GameServiceGuardInstallStatus InstallWithBackend(
                 static_cast<void>(CleanupLocked());
                 return GameServiceGuardInstallStatus::HookFailed;
             }
+            guardState.hooks.push_back({target.address, target.action, false});
+            if (backend.create == &MinHookCreate
+                && !Hooks::SetDeclaredPatchBytes(
+                    target.address, target.patchLength)) {
+                static_cast<void>(CleanupLocked());
+                return GameServiceGuardInstallStatus::HookFailed;
+            }
             if (target.action == InternalTargetAction::ForceOffline) {
                 offlineSetter.store(
                     reinterpret_cast<OfflineSetter>(original),
                     std::memory_order_release);
             }
-            guardState.hooks.push_back({target.address, target.action, false});
         }
         for (const auto& target : resolved) {
             if (!backend.queueEnable(target.address)) {

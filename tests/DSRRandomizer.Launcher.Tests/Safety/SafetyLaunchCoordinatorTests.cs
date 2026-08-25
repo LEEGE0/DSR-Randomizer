@@ -198,7 +198,8 @@ public sealed class SafetyLaunchCoordinatorTests
                 : new ProtectionHandshake(
                     true,
                     failurePoint == FailurePoint.IncompleteFlags ? 0b01UL : 0b11UL,
-                    string.Empty));
+                    string.Empty,
+                    new BlockingProtectionSession()));
         }
 
         public uint ResumeMainThread()
@@ -219,6 +220,19 @@ public sealed class SafetyLaunchCoordinatorTests
             }
 
             return Task.FromResult(0);
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private sealed class BlockingProtectionSession : IProtectionSession
+    {
+        public async Task<ProtectionMonitorResult> MonitorAsync(
+            ulong expectedActiveFlags,
+            CancellationToken cancellationToken)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            throw new InvalidOperationException("The protection monitor completed unexpectedly.");
         }
 
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;

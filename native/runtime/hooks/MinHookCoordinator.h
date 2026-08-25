@@ -27,6 +27,9 @@ private:
     void* target,
     void* detour,
     void** original) noexcept;
+[[nodiscard]] bool SetDeclaredPatchBytes(
+    void* target,
+    std::size_t declaredPatchBytes) noexcept;
 [[nodiscard]] MH_STATUS QueueEnableHook(void* target) noexcept;
 [[nodiscard]] MH_STATUS ApplyQueuedHooks() noexcept;
 [[nodiscard]] MH_STATUS DisableHook(void* target) noexcept;
