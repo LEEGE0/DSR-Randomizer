@@ -1701,6 +1701,30 @@ int VerifyProductionPinnedAbi() {
     const bool protectedRawNeverCalled = productionRawProtectedCalls == 0
         && productionRawClientGetterCalls >= 4;
 
+    const auto rawProtectedCallsBeforeGeneric = productionRawProtectedCalls;
+    const auto clientGetterCallsBeforeGeneric = productionRawClientGetterCalls;
+    void* const genericUser = CallProductionSlot<SteamClient017Abi, 12>(client,
+        std::int32_t{},
+        std::int32_t{},
+        "SteamUser019");
+    void* const genericNetworking = CallProductionSlot<SteamClient017Abi, 12>(client,
+        std::int32_t{},
+        std::int32_t{},
+        "SteamNetworking005");
+    const bool genericProtectedClientGatewayDenied = genericUser == user
+        && genericUser != &productionUser
+        && genericNetworking == networking
+        && genericNetworking != &productionNetworking
+        && !CallProductionSlot<SteamUser019Abi, 1>(genericUser)
+        && !CallProductionSlot<SteamNetworking005Abi, 0>(genericNetworking,
+            ProductionSteamId{},
+            nullptr,
+            U32{},
+            I32{},
+            I32{})
+        && productionRawProtectedCalls == rawProtectedCallsBeforeGeneric
+        && productionRawClientGetterCalls == clientGetterCallsBeforeGeneric + 2;
+
     const auto clientGetterCallsBeforeUnknown = productionRawClientGetterCalls;
     const bool unknownClientGatewayDenied = CallProductionSlot<SteamClient017Abi, 6>(client,
             std::int32_t{},
@@ -1708,13 +1732,14 @@ int VerifyProductionPinnedAbi() {
             "SteamGameServer012") == nullptr
         && productionRawClientGetterCalls == clientGetterCallsBeforeUnknown
         && fatalState->IsFatal();
-    const bool deactivatedClientGatewayDenied = CallProductionSlot<SteamClient017Abi, 14>(client,
-            std::int32_t{},
-            std::int32_t{},
-            "SteamGameServerStats001") == nullptr
-        && productionRawClientGetterCalls == clientGetterCallsBeforeUnknown;
-
     fatalState->EnterDenyOnly();
+    const auto clientGetterCallsBeforeDeactivated = productionRawClientGetterCalls;
+    const bool deactivatedClientGatewayDenied = CallProductionSlot<SteamClient017Abi, 12>(client,
+            std::int32_t{},
+            std::int32_t{},
+            "SteamNetworking005") == nullptr
+        && productionRawClientGetterCalls == clientGetterCallsBeforeDeactivated;
+
     DSRRandomizer::Steam::UnregisterSteamFactorySlot(slot);
     const bool teardownDeny = CallProductionSlot<SteamUser019Abi, 2>(user)
             .Value() == 0
@@ -1749,7 +1774,8 @@ int VerifyProductionPinnedAbi() {
     return clientSlots && userSlots && matchmakingSlots && networkingSlots
             && remoteStorageSlots && noRawProtectedObject && exactIdentity
             && exactWindowsSlotCounts
-            && protectedRawNeverCalled && unknownClientGatewayDenied
+            && protectedRawNeverCalled && genericProtectedClientGatewayDenied
+            && unknownClientGatewayDenied
             && deactivatedClientGatewayDenied && teardownDeny
             && returningFatalDenied
         ? 0
