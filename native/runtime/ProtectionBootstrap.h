@@ -24,6 +24,7 @@ enum class InitStatus : std::uint32_t {
     DeferredModuleGateInstallFailed = 9,
     GameServiceProfileMismatch = 10,
     GameServiceHookFailed = 11,
+    ProtectionCleanupFailed = 12,
 };
 
 InitStatus InitializeProtection(ProtectionInitBlock* block) noexcept;

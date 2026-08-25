@@ -1529,11 +1529,15 @@ int RunRollbackFailure(const std::wstring& fakePath) {
 }
 
 int RunProductionInvariant(const std::wstring& fakePath) {
-    return DSRRandomizer::Modules::InstallDeferredModuleGate(
-               Configuration(fakePath, true))
-            == DeferredModuleGateInstallStatus::InvalidConfiguration
+    if (DSRRandomizer::Modules::InstallDeferredModuleGate(
+            Configuration(fakePath, true))
+        != DeferredModuleGateInstallStatus::Success) {
+        return Fail("production suspended-initializer gate was not armed");
+    }
+    return DSRRandomizer::Modules::UninstallDeferredModuleGate()
+            == DeferredModuleGateCleanupStatus::Success
         ? 0
-        : Fail("production API accepted an unproven suspended invariant");
+        : Fail("production suspended-initializer gate did not clean up");
 }
 
 DWORD RunChild(

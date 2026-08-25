@@ -4,11 +4,13 @@
 
 #include <algorithm>
 #include <atomic>
+#include <optional>
 #include <string>
 
 #include "game/GameServiceGuard.h"
 #include "modules/DeferredModuleGate.h"
 #include "network/WinsockHooks.h"
+#include "profile/PinnedCompatibilityProfile.h"
 #include "save/SaveHooks.h"
 
 namespace DSRRandomizer {
@@ -66,19 +68,26 @@ bool SocketConfigurationIsEmpty(const ProtectionInitBlock& block) noexcept {
 }
 
 bool UninstallProtectionGroups() noexcept {
-    if (Game::UninstallGameServiceGuard()
-        != Game::GameServiceGuardCleanupStatus::Success) {
-        return false;
-    }
-    if (Save::UninstallSaveHooks() != Save::SaveHookCleanupStatus::Success) {
-        return false;
-    }
-    if (Modules::UninstallDeferredModuleGate()
-        != Modules::DeferredModuleGateCleanupStatus::Success) {
-        return false;
-    }
-    return Network::UninstallWinsockHooks()
-        == Network::WinsockHookCleanupStatus::Success;
+    bool complete = true;
+    complete = Game::UninstallGameServiceGuard()
+            == Game::GameServiceGuardCleanupStatus::Success
+        && complete;
+    complete = Save::UninstallSaveHooks()
+            == Save::SaveHookCleanupStatus::Success
+        && complete;
+    complete = Modules::UninstallDeferredModuleGate()
+            == Modules::DeferredModuleGateCleanupStatus::Success
+        && complete;
+    complete = Network::UninstallWinsockHooks()
+            == Network::WinsockHookCleanupStatus::Success
+        && complete;
+    return complete;
+}
+
+InitStatus CleanupOr(const InitStatus status) noexcept {
+    return UninstallProtectionGroups()
+        ? status
+        : InitStatus::ProtectionCleanupFailed;
 }
 
 bool ReadRequiredPath(
@@ -145,54 +154,69 @@ InitStatus InitializeCore(
         if (!ReadSocketConfiguration(*block, socketConfiguration)
             || Network::InstallWinsockHooks(socketConfiguration)
                 != Network::WinsockHookInstallStatus::Success) {
-            static_cast<void>(Network::UninstallWinsockHooks());
-            return InitStatus::WinsockHookInstallFailed;
+            return CleanupOr(InitStatus::WinsockHookInstallFailed);
+        }
+    }
+
+    std::optional<Profile::PinnedCompatibilityProfile> pinnedProfile;
+    if (steamProvider == nullptr
+        && (block->requiredFlags & (steamFlags | gameServiceOfflineFlag)) != 0) {
+        pinnedProfile.emplace();
+        if (Profile::BuildPinnedCompatibilityProfile(*pinnedProfile)
+            != Profile::PinnedCompatibilityProfileStatus::Success) {
+            return CleanupOr(
+                (block->requiredFlags & gameServiceOfflineFlag) != 0
+                    ? InitStatus::GameServiceProfileMismatch
+                    : InitStatus::SteamConfigurationUnavailable);
         }
     }
 
     if ((block->requiredFlags & gameServiceOfflineFlag) != 0) {
-        const auto gameStatus = Game::InstallPinnedGameServiceGuard();
+        const auto gameStatus = pinnedProfile.has_value()
+            ? Game::InstallGameServiceGuard(pinnedProfile->gameService)
+            : Game::InstallPinnedGameServiceGuard();
         if (gameStatus == Game::GameServiceGuardInstallStatus::ProfileMismatch
             || gameStatus == Game::GameServiceGuardInstallStatus::InvalidConfiguration) {
-            static_cast<void>(UninstallProtectionGroups());
-            return InitStatus::GameServiceProfileMismatch;
+            return CleanupOr(InitStatus::GameServiceProfileMismatch);
         }
         if (gameStatus != Game::GameServiceGuardInstallStatus::Success) {
-            static_cast<void>(UninstallProtectionGroups());
-            return InitStatus::GameServiceHookFailed;
+            return CleanupOr(InitStatus::GameServiceHookFailed);
         }
     }
 
     if ((block->requiredFlags & steamFlags) == steamFlags) {
-        if (steamProvider == nullptr) {
-            static_cast<void>(UninstallProtectionGroups());
-            return InitStatus::SteamConfigurationUnavailable;
-        }
         try {
             Modules::DeferredModuleGateConfiguration configuration{};
-            if (!steamProvider(configuration)) {
-                static_cast<void>(UninstallProtectionGroups());
-                return InitStatus::SteamConfigurationUnavailable;
+            if (steamProvider != nullptr) {
+                if (!steamProvider(configuration)) {
+                    return CleanupOr(InitStatus::SteamConfigurationUnavailable);
+                }
             }
-            if (Modules::Testing::
+            else if (pinnedProfile.has_value()) {
+                configuration = pinnedProfile->steam;
+            }
+            else {
+                return CleanupOr(InitStatus::SteamConfigurationUnavailable);
+            }
+            const auto gateStatus = steamProvider != nullptr
+                ? Modules::Testing::
                     InstallDeferredModuleGateForSyntheticSuspendedProcess(
                         configuration)
+                : Modules::InstallDeferredModuleGate(configuration);
+            if (gateStatus
                 != Modules::DeferredModuleGateInstallStatus::Success) {
-                static_cast<void>(UninstallProtectionGroups());
-                return InitStatus::DeferredModuleGateInstallFailed;
+                return CleanupOr(InitStatus::DeferredModuleGateInstallFailed);
             }
         }
         catch (...) {
-            static_cast<void>(UninstallProtectionGroups());
-            return InitStatus::DeferredModuleGateInstallFailed;
+            return CleanupOr(InitStatus::DeferredModuleGateInstallFailed);
         }
     }
 
     if ((block->requiredFlags & saveFlags) == saveFlags) {
         try {
             if (pathReader == nullptr) {
-                static_cast<void>(UninstallProtectionGroups());
-                return InitStatus::SaveHookInstallFailed;
+                return CleanupOr(InitStatus::SaveHookInstallFailed);
             }
             Save::SaveHookConfiguration configuration{};
             configuration.diagnosticMode = block->diagnosticMode != 0;
@@ -218,13 +242,11 @@ InitStatus InitializeCore(
                     configuration.dedicatedRmm)
                 || Save::InstallSaveHooks(configuration)
                     != Save::SaveHookInstallStatus::Success) {
-                static_cast<void>(UninstallProtectionGroups());
-                return InitStatus::SaveHookInstallFailed;
+                return CleanupOr(InitStatus::SaveHookInstallFailed);
             }
         }
         catch (...) {
-            static_cast<void>(UninstallProtectionGroups());
-            return InitStatus::SaveHookInstallFailed;
+            return CleanupOr(InitStatus::SaveHookInstallFailed);
         }
     }
 
@@ -291,7 +313,9 @@ InitStatus InitializeProtection(ProtectionInitBlock* block) noexcept {
     const auto reportStatus = ReportHandshake(*block);
     if (reportStatus != InitStatus::Success) {
         activeFlags.store(0, std::memory_order_release);
-        static_cast<void>(UninstallProtectionGroups());
+        if (!UninstallProtectionGroups()) {
+            return InitStatus::ProtectionCleanupFailed;
+        }
     }
 
     return reportStatus;

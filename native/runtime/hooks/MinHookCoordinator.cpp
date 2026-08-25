@@ -4,6 +4,8 @@
 #include <exception>
 #include <mutex>
 
+#include <Windows.h>
+
 namespace DSRRandomizer::Hooks {
 namespace {
 
@@ -14,6 +16,8 @@ std::atomic<std::uint32_t> applyCallCount{};
 std::atomic<std::uint32_t> failApplyCall{};
 std::atomic<std::uint32_t> failDisableCount{};
 std::atomic<std::uint32_t> failRemoveCount{};
+std::atomic<HANDLE> afterLeaseAcquireEvent{};
+std::atomic<HANDLE> allowLeaseReleaseEvent{};
 
 bool Consume(std::atomic<std::uint32_t>& remaining) noexcept {
     auto value = remaining.load(std::memory_order_acquire);
@@ -33,7 +37,16 @@ bool Consume(std::atomic<std::uint32_t>& remaining) noexcept {
 
 class MinHookMutationLease::Impl final {
 public:
-    Impl() noexcept : lock(mutationMutex) {}
+    Impl() noexcept : lock(mutationMutex) {
+        const auto afterAcquire = afterLeaseAcquireEvent.load(
+            std::memory_order_acquire);
+        const auto allowRelease = allowLeaseReleaseEvent.load(
+            std::memory_order_acquire);
+        if (afterAcquire != nullptr && allowRelease != nullptr) {
+            SetEvent(afterAcquire);
+            WaitForSingleObject(allowRelease, INFINITE);
+        }
+    }
 
 private:
     std::unique_lock<std::recursive_mutex> lock;
@@ -138,6 +151,15 @@ void SetMinHookFaults(const MinHookFaults& faults) noexcept {
 std::size_t MinHookReferenceCount() noexcept {
     std::scoped_lock lock(mutationMutex);
     return referenceCount;
+}
+
+void SetMutationLeasePauseEvents(
+    void* const afterAcquire,
+    void* const allowRelease) noexcept {
+    afterLeaseAcquireEvent.store(
+        static_cast<HANDLE>(afterAcquire), std::memory_order_release);
+    allowLeaseReleaseEvent.store(
+        static_cast<HANDLE>(allowRelease), std::memory_order_release);
 }
 
 }  // namespace Testing

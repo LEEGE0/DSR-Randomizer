@@ -1,5 +1,7 @@
 using System.Buffers.Binary;
 using System.Diagnostics;
+using System.Net;
+using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 using DSRRandomizer.Launcher.Safety;
@@ -26,6 +28,18 @@ public sealed record GuardSavePathConfiguration(
     string ExternalSaveRoot,
     string DedicatedRmm);
 
+public enum GuardSocketTransport : ushort
+{
+    Tcp = 1,
+    Udp = 2
+}
+
+public sealed record GuardSocketEndpoint(
+    GuardSocketTransport Transport,
+    AddressFamily Family,
+    ushort Port,
+    IPAddress Address);
+
 public sealed record GuardConfiguration(
     string GuardDllPath,
     ushort ProtocolVersion,
@@ -37,6 +51,9 @@ public sealed record GuardConfiguration(
     TimeSpan HandshakeTimeout,
     GuardSavePathConfiguration? SavePaths)
 {
+    public IReadOnlyList<GuardSocketEndpoint> SocketEndpoints { get; init; } =
+        Array.Empty<GuardSocketEndpoint>();
+
     public static GuardConfiguration Create(
         string guardDllPath,
         ushort ProtocolVersion,
@@ -60,7 +77,7 @@ public sealed record GuardConfiguration(
 public sealed class RemoteDllInjector
 {
     private const uint ProtectionMagic = 0x44535252;
-    private const int InitBlockLength = 5428;
+    private const int InitBlockLength = 5480;
     private const int PipeNameCharacters = 128;
     private const int SavePathCharacters = 512;
     private const int PipeNameOffset = 52;
@@ -69,6 +86,10 @@ public sealed class RemoteDllInjector
     private const int RealSaveRootOffset = 2356;
     private const int ExternalSaveRootOffset = 3380;
     private const int DedicatedRmmOffset = 4404;
+    private const int SocketEndpointCountOffset = 5428;
+    private const int SocketEndpointsOffset = 5432;
+    private const int SocketEndpointLength = 24;
+    private const int SocketEndpointCapacity = 2;
 
     public async Task<ProtectionHandshake> InitializeAsync(
         IProtectedProcess child,
@@ -126,7 +147,8 @@ public sealed class RemoteDllInjector
             {
                 await pipe.DisposeAsync();
                 _ = await handshakeTask;
-                return ProtectionHandshake.Failed("SAFETY_INITIALIZER_FAILED");
+                return ProtectionHandshake.Failed(
+                    InitializerErrorCode(initializeStatus));
             }
 
             return await handshakeTask;
@@ -152,6 +174,14 @@ public sealed class RemoteDllInjector
             }
         }
     }
+
+    internal static string InitializerErrorCode(uint status) => status switch
+    {
+        10 => "GAME_SERVICE_PROFILE_MISMATCH",
+        11 => "GAME_SERVICE_HOOK_FAILED",
+        12 => "PROTECTION_CLEANUP_FAILED",
+        _ => "SAFETY_INITIALIZER_FAILED"
+    };
 
     private static void ValidateConfiguration(GuardConfiguration configuration)
     {
@@ -240,7 +270,68 @@ public sealed class RemoteDllInjector
                 "Save paths cannot be marshalled unless both save protections are requested.",
                 nameof(configuration));
         }
+        WriteSocketEndpoints(block, configuration);
         return block;
+    }
+
+    private static void WriteSocketEndpoints(
+        byte[] block,
+        GuardConfiguration configuration)
+    {
+        ArgumentNullException.ThrowIfNull(configuration.SocketEndpoints);
+        if (configuration.SocketEndpoints.Count > SocketEndpointCapacity)
+        {
+            throw new ArgumentException(
+                "At most two exact socket endpoints can be configured.",
+                nameof(configuration));
+        }
+        var winsockRequested =
+            ((ProtectionFlags)configuration.RequiredFlags & ProtectionFlags.Winsock) != 0;
+        if (!winsockRequested && configuration.SocketEndpoints.Count != 0)
+        {
+            throw new ArgumentException(
+                "Socket endpoints require the Winsock protection flag.",
+                nameof(configuration));
+        }
+        if (configuration.SocketEndpoints
+            .GroupBy(endpoint => endpoint.Transport)
+            .Any(group => group.Count() != 1))
+        {
+            throw new ArgumentException(
+                "Socket endpoint transports must be unique.",
+                nameof(configuration));
+        }
+
+        BinaryPrimitives.WriteUInt32LittleEndian(
+            block.AsSpan(SocketEndpointCountOffset),
+            checked((uint)configuration.SocketEndpoints.Count));
+        for (var index = 0; index < configuration.SocketEndpoints.Count; index++)
+        {
+            var endpoint = configuration.SocketEndpoints[index];
+            ArgumentNullException.ThrowIfNull(endpoint);
+            ArgumentNullException.ThrowIfNull(endpoint.Address);
+            if (!Enum.IsDefined(endpoint.Transport) || endpoint.Port == 0 ||
+                endpoint.Family is not (AddressFamily.InterNetwork or AddressFamily.InterNetworkV6) ||
+                endpoint.Address.AddressFamily != endpoint.Family ||
+                !IPAddress.IsLoopback(endpoint.Address))
+            {
+                throw new ArgumentException(
+                    "Socket endpoints must be exact TCP/UDP loopback addresses with a nonzero port.",
+                    nameof(configuration));
+            }
+
+            var offset = SocketEndpointsOffset + index * SocketEndpointLength;
+            BinaryPrimitives.WriteUInt16LittleEndian(
+                block.AsSpan(offset),
+                (ushort)endpoint.Transport);
+            BinaryPrimitives.WriteUInt16LittleEndian(
+                block.AsSpan(offset + 2),
+                (ushort)endpoint.Family);
+            BinaryPrimitives.WriteUInt16BigEndian(
+                block.AsSpan(offset + 4),
+                endpoint.Port);
+            endpoint.Address.GetAddressBytes().CopyTo(block, offset + 8);
+        }
     }
 
     private static void WriteCanonicalPath(

@@ -74,6 +74,11 @@ public sealed class ProfileInspectorTests
         Assert.Equal("DarkSoulsRemastered.exe", profile.ExecutableModule);
         var module = Assert.Single(profile.Modules);
         Assert.Equal("steam_api64.dll", module.Name);
+        Assert.False(module.AllowDeferred);
+        Assert.Equal(
+            ["SteamMatchMaking009", "SteamNetworking005", "STEAMREMOTESTORAGE_INTERFACE_VERSION014", "SteamUser019"],
+            module.DeclaredInterfaces);
+        Assert.Equal(["SteamInternal_CreateInterface"], module.ProtectedFactoryExports);
         Assert.Equal(2, profile.GameServiceTargets.Count);
         Assert.Contains(profile.GameServiceTargets, target => target.Action == InternalTargetAction.ForceOffline);
         Assert.Contains(profile.GameServiceTargets, target => target.Action == InternalTargetAction.DenyCall);
@@ -93,6 +98,91 @@ public sealed class ProfileInspectorTests
             """;
         Assert.Throws<CompatibilityProfileFormatException>(
             () => CompatibilityProfileCatalog.LoadJson(duplicateJson));
+    }
+
+    [Fact]
+    public void LoadJson_RejectsDuplicatePropertiesAtEveryObjectLevel()
+    {
+        var identity = SyntheticPe.Identity(SyntheticPe.Create(TargetBytes));
+        var valid = ProfileJson(identity, schemaVersion: 1);
+        var duplicates = new[]
+        {
+            valid.Replace("\"schemaVersion\":1", "\"schemaVersion\":1,\"schemaVersion\":1"),
+            valid.Replace("\"id\":\"synthetic\"", "\"id\":\"synthetic\",\"id\":\"synthetic\""),
+            valid.Replace($"\"length\":{identity.Length}",
+                $"\"length\":{identity.Length},\"length\":{identity.Length}"),
+            valid.Replace("\"name\":\"steam_api64.dll\"",
+                "\"name\":\"steam_api64.dll\",\"name\":\"steam_api64.dll\""),
+            valid.Replace("\"rva\":4608", "\"rva\":4608,\"rva\":4608")
+        };
+
+        Assert.All(duplicates, json =>
+            Assert.Throws<CompatibilityProfileFormatException>(
+                () => CompatibilityProfileCatalog.LoadJson(json)));
+    }
+
+    [Fact]
+    public void LoadJson_RejectsUnknownPropertiesAndNonV2Profile()
+    {
+        var identity = SyntheticPe.Identity(SyntheticPe.Create(TargetBytes));
+        var valid = ProfileJson(identity, schemaVersion: 1);
+
+        Assert.Throws<CompatibilityProfileFormatException>(() =>
+            CompatibilityProfileCatalog.LoadJson(
+                valid.Replace("\"fixedSaveLength\":4326608",
+                    "\"unexpected\":true,\"fixedSaveLength\":4326608")));
+        Assert.Throws<CompatibilityProfileFormatException>(() =>
+            CompatibilityProfileCatalog.LoadJson(
+                valid.Replace("\"protocolVersion\":2", "\"protocolVersion\":3")));
+    }
+
+    [Fact]
+    public void LoadJson_RequiresCompleteUniqueSteamGateDeclarations()
+    {
+        var identity = SyntheticPe.Identity(SyntheticPe.Create(TargetBytes));
+        var valid = ProfileJson(identity, schemaVersion: 1);
+
+        var invalid = new[]
+        {
+            valid.Replace(",\"allowDeferred\":false", ""),
+            valid.Replace(",\"declaredInterfaces\":[\"SteamMatchMaking009\",\"SteamNetworking005\",\"STEAMREMOTESTORAGE_INTERFACE_VERSION014\",\"SteamUser019\"]", ""),
+            valid.Replace(",\"protectedFactoryExports\":[\"SteamInternal_CreateInterface\"]", ""),
+            valid.Replace("\"SteamNetworking005\"", "\"SteamMatchMaking009\""),
+            valid.Replace("\"SteamInternal_CreateInterface\"]", "\"SteamInternal_CreateInterface\",\"SteamInternal_CreateInterface\"]")
+        };
+
+        Assert.All(invalid, json =>
+            Assert.Throws<CompatibilityProfileFormatException>(
+                () => CompatibilityProfileCatalog.LoadJson(json)));
+    }
+
+    [Fact]
+    public void ResolveDefaultPath_UsesOnlyApplicationOwnedPackagedLocation()
+    {
+        using var application = new TemporaryDirectory();
+        using var attackerCurrentDirectory = new TemporaryDirectory();
+        Directory.CreateDirectory(Path.Combine(attackerCurrentDirectory.Path, "config"));
+        File.WriteAllText(
+            Path.Combine(attackerCurrentDirectory.Path, "config", "compatibility-profiles.json"),
+            "attacker-controlled");
+        var previous = Environment.CurrentDirectory;
+        Environment.CurrentDirectory = attackerCurrentDirectory.Path;
+        try
+        {
+            Assert.Throws<CompatibilityProfileFormatException>(() =>
+                CompatibilityProfileCatalog.ResolveDefaultPath(application.Path));
+
+            var packagedDirectory = Path.Combine(application.Path, "config");
+            Directory.CreateDirectory(packagedDirectory);
+            var packaged = Path.Combine(packagedDirectory, "compatibility-profiles.json");
+            File.WriteAllText(packaged, "packaged");
+            Assert.Equal(packaged,
+                CompatibilityProfileCatalog.ResolveDefaultPath(application.Path));
+        }
+        finally
+        {
+            Environment.CurrentDirectory = previous;
+        }
     }
 
     [Fact]
@@ -138,6 +228,60 @@ public sealed class ProfileInspectorTests
             ProfileInspector.VerifyFiles(executablePath, profile).Error);
     }
 
+    [Fact]
+    public void VerifyFiles_RequiresStaticallyProvenModuleDeclarations()
+    {
+        using var fixture = new TemporaryDirectory();
+        var executable = SyntheticPe.Create(TargetBytes);
+        TargetBytes.CopyTo(executable, 0x420);
+        SyntheticPe.AddImport(executable, "steam_api64.dll");
+        SyntheticPe.AddAscii(executable, 0x600, "SteamMatchMaking009");
+        var steam = SyntheticPe.Create(TargetBytes);
+        SyntheticPe.AddExport(steam, "SyntheticFactory");
+        var executablePath = Path.Combine(fixture.Path, "DarkSoulsRemastered.exe");
+        var steamPath = Path.Combine(fixture.Path, "steam_api64.dll");
+        File.WriteAllBytes(executablePath, executable);
+        File.WriteAllBytes(steamPath, steam);
+
+        CompatibilityProfile Profile(bool deferred, string version, string export) => new(
+            "synthetic",
+            "DarkSoulsRemastered.exe",
+            SyntheticPe.Identity(executable),
+            4326608,
+            2,
+            [new ModuleProfile(
+                "steam_api64.dll",
+                SyntheticPe.Identity(steam),
+                deferred,
+                [version],
+                [export])],
+            [
+                new InternalTargetProfile(
+                    "DarkSoulsRemastered.exe", 0x1200, Sha256(TargetBytes),
+                    TargetBytes.Length, InternalTargetAction.ForceOffline),
+                new InternalTargetProfile(
+                    "DarkSoulsRemastered.exe", 0x1220, Sha256(TargetBytes),
+                    TargetBytes.Length, InternalTargetAction.DenyCall)
+            ]);
+
+        Assert.Equal(ProfileError.None,
+            ProfileInspector.VerifyFiles(
+                executablePath,
+                Profile(false, "SteamMatchMaking009", "SyntheticFactory")).Error);
+        Assert.Equal(ProfileError.ModuleDeclarationMismatch,
+            ProfileInspector.VerifyFiles(
+                executablePath,
+                Profile(true, "SteamMatchMaking009", "SyntheticFactory")).Error);
+        Assert.Equal(ProfileError.ModuleDeclarationMismatch,
+            ProfileInspector.VerifyFiles(
+                executablePath,
+                Profile(false, "SteamNetworking005", "SyntheticFactory")).Error);
+        Assert.Equal(ProfileError.ModuleDeclarationMismatch,
+            ProfileInspector.VerifyFiles(
+                executablePath,
+                Profile(false, "SteamMatchMaking009", "MissingFactory")).Error);
+    }
+
     private static string ProfileJson(ExecutableIdentity identity, int schemaVersion) =>
         $$"""
         {"schemaVersion":{{schemaVersion}},"profiles":[{{ProfileObject(identity)}}]}
@@ -145,7 +289,7 @@ public sealed class ProfileInspectorTests
 
     private static string ProfileObject(ExecutableIdentity identity) =>
         $$"""
-        {"id":"synthetic","executableModule":"DarkSoulsRemastered.exe","executable":{"length":{{identity.Length}},"sha256":"{{identity.Sha256}}","machine":{{identity.Machine}},"peTimestamp":{{identity.PeTimestamp}},"sizeOfImage":{{identity.SizeOfImage}}},"fixedSaveLength":4326608,"protocolVersion":2,"modules":[{"name":"steam_api64.dll","length":{{identity.Length}},"sha256":"{{identity.Sha256}}","machine":{{identity.Machine}},"peTimestamp":{{identity.PeTimestamp}},"sizeOfImage":{{identity.SizeOfImage}}}],"gameServiceTargets":[{"module":"DarkSoulsRemastered.exe","rva":4608,"fingerprintSha256":"{{Sha256(TargetBytes)}}","patchLength":16,"action":"ForceOffline"},{"module":"DarkSoulsRemastered.exe","rva":4640,"fingerprintSha256":"{{Sha256(TargetBytes)}}","patchLength":16,"action":"DenyCall"}]}
+        {"id":"synthetic","executableModule":"DarkSoulsRemastered.exe","executable":{"length":{{identity.Length}},"sha256":"{{identity.Sha256}}","machine":{{identity.Machine}},"peTimestamp":{{identity.PeTimestamp}},"sizeOfImage":{{identity.SizeOfImage}}},"fixedSaveLength":4326608,"protocolVersion":2,"modules":[{"name":"steam_api64.dll","length":{{identity.Length}},"sha256":"{{identity.Sha256}}","machine":{{identity.Machine}},"peTimestamp":{{identity.PeTimestamp}},"sizeOfImage":{{identity.SizeOfImage}},"allowDeferred":false,"declaredInterfaces":["SteamMatchMaking009","SteamNetworking005","STEAMREMOTESTORAGE_INTERFACE_VERSION014","SteamUser019"],"protectedFactoryExports":["SteamInternal_CreateInterface"]}],"gameServiceTargets":[{"module":"DarkSoulsRemastered.exe","rva":4608,"fingerprintSha256":"{{Sha256(TargetBytes)}}","patchLength":16,"action":"ForceOffline"},{"module":"DarkSoulsRemastered.exe","rva":4640,"fingerprintSha256":"{{Sha256(TargetBytes)}}","patchLength":16,"action":"DenyCall"}]}
         """;
 
     private static string Sha256(byte[] value) =>
@@ -186,6 +330,30 @@ public sealed class ProfileInspectorTests
             0x8664,
             0x6344ca56,
             0x3000);
+
+        internal static void AddImport(byte[] image, string moduleName)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(image.AsSpan(0x110), 0x1300);
+            BinaryPrimitives.WriteUInt32LittleEndian(image.AsSpan(0x114), 40);
+            BinaryPrimitives.WriteUInt32LittleEndian(image.AsSpan(0x50c), 0x1340);
+            AddAscii(image, 0x540, moduleName);
+        }
+
+        internal static void AddExport(byte[] image, string exportName)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(image.AsSpan(0x108), 0x1380);
+            BinaryPrimitives.WriteUInt32LittleEndian(image.AsSpan(0x10c), 64);
+            BinaryPrimitives.WriteUInt32LittleEndian(image.AsSpan(0x598), 1);
+            BinaryPrimitives.WriteUInt32LittleEndian(image.AsSpan(0x5a0), 0x13c0);
+            BinaryPrimitives.WriteUInt32LittleEndian(image.AsSpan(0x5c0), 0x13d0);
+            AddAscii(image, 0x5d0, exportName);
+        }
+
+        internal static void AddAscii(byte[] image, int offset, string value)
+        {
+            var bytes = System.Text.Encoding.ASCII.GetBytes(value + '\0');
+            bytes.CopyTo(image, offset);
+        }
     }
 
     private sealed class TemporaryDirectory : IDisposable

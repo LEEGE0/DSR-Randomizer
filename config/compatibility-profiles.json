@@ -20,15 +20,42 @@
           "sha256": "a0a5ac6dcd3d9255bb9c71bae3a71b6bf90c56f4fce46ff0d65533d7ef89b8d8",
           "machine": 34404,
           "peTimestamp": 1493160285,
-          "sizeOfImage": 262144
+          "sizeOfImage": 262144,
+          "allowDeferred": false,
+          "declaredInterfaces": [
+            "SteamClient017",
+            "SteamUser019",
+            "SteamFriends015",
+            "SteamUtils009",
+            "SteamMatchMaking009",
+            "SteamMatchMakingServers002",
+            "STEAMUSERSTATS_INTERFACE_VERSION011",
+            "STEAMAPPS_INTERFACE_VERSION008",
+            "SteamNetworking005",
+            "STEAMREMOTESTORAGE_INTERFACE_VERSION014",
+            "STEAMSCREENSHOTS_INTERFACE_VERSION003",
+            "STEAMHTTP_INTERFACE_VERSION002",
+            "STEAMUNIFIEDMESSAGES_INTERFACE_VERSION001",
+            "SteamController005",
+            "STEAMUGC_INTERFACE_VERSION010",
+            "STEAMAPPLIST_INTERFACE_VERSION001",
+            "STEAMMUSIC_INTERFACE_VERSION001",
+            "STEAMMUSICREMOTE_INTERFACE_VERSION001",
+            "STEAMHTMLSURFACE_INTERFACE_VERSION_003",
+            "STEAMINVENTORY_INTERFACE_V002",
+            "STEAMVIDEO_INTERFACE_V002"
+          ],
+          "protectedFactoryExports": [
+            "SteamInternal_CreateInterface"
+          ]
         }
       ],
       "gameServiceTargets": [
         {
           "module": "DarkSoulsRemastered.exe",
-          "rva": 2928864,
-          "fingerprintSha256": "1cf979917f14922bf98683a0d63a3ba9251491a0b0f6bfb59c9793b5c837e135",
-          "patchLength": 16,
+          "rva": 2928832,
+          "fingerprintSha256": "0c4fb3a66a4144eb138225b48c5cd3e7f353cd47af72095eb44c637b7964164f",
+          "patchLength": 14,
           "action": "ForceOffline"
         },
         {

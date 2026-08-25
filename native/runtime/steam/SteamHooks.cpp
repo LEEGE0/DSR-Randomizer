@@ -146,6 +146,9 @@ void* GuardedFactory(
     if (context->fatalState->IsFatal()) {
         return nullptr;
     }
+    if (decision == InterfaceDecision::AllowRaw) {
+        return raw;
+    }
     void* const wrapped = WrapInterface(
         raw,
         requested,

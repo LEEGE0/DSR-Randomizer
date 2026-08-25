@@ -7,6 +7,8 @@ add_library(DSRRandomizer.Runtime.Core STATIC
   game/GameServiceGuard.h
   modules/DeferredModuleGate.cpp
   modules/DeferredModuleGate.h
+  profile/PinnedCompatibilityProfile.cpp
+  profile/PinnedCompatibilityProfile.h
   network/WinsockHooks.cpp
   network/WinsockHooks.h
   save/SaveHooks.cpp

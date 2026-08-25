@@ -21,6 +21,7 @@ struct DeferredModuleExpectation {
 struct DeferredModuleGateConfiguration {
     std::vector<DeferredModuleExpectation> modules;
     Steam::FatalReporter fatalReporter = nullptr;
+    std::shared_ptr<void> identityLease;
 };
 
 enum class DeferredModuleGateInstallStatus {

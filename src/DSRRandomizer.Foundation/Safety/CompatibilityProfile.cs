@@ -2,7 +2,16 @@ namespace DSRRandomizer.Foundation.Safety;
 
 public sealed record ModuleProfile(
     string Name,
-    ExecutableIdentity Identity);
+    ExecutableIdentity Identity,
+    bool AllowDeferred,
+    IReadOnlyList<string> DeclaredInterfaces,
+    IReadOnlyList<string> ProtectedFactoryExports)
+{
+    public ModuleProfile(string name, ExecutableIdentity identity)
+        : this(name, identity, false, Array.Empty<string>(), Array.Empty<string>())
+    {
+    }
+}
 
 public sealed record CompatibilityProfile(
     string Id,

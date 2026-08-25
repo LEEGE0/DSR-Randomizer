@@ -22,6 +22,16 @@ public sealed class CompatibilityProfileCatalogTests
         Assert.Equal("dsr-steam-a45aaa36", profile.Id);
         Assert.Equal(4326608, profile.FixedSaveLength);
         Assert.Equal(2, profile.ProtocolVersion);
+        var steam = Assert.Single(profile.Modules);
+        Assert.Equal("steam_api64.dll", steam.Name);
+        Assert.False(steam.AllowDeferred);
+        Assert.Equal(21, steam.DeclaredInterfaces.Count);
+        Assert.Contains("SteamClient017", steam.DeclaredInterfaces);
+        Assert.Contains("SteamNetworking005", steam.DeclaredInterfaces);
+        Assert.Contains(
+            "STEAMREMOTESTORAGE_INTERFACE_VERSION014",
+            steam.DeclaredInterfaces);
+        Assert.Equal(["SteamInternal_CreateInterface"], steam.ProtectedFactoryExports);
     }
 
     [Theory]

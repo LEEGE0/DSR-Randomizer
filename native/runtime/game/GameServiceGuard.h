@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -30,6 +31,7 @@ struct GameServiceTarget {
 struct GameServiceGuardConfiguration {
     std::vector<GameServiceImage> images;
     std::vector<GameServiceTarget> targets;
+    std::shared_ptr<void> identityLease;
 };
 
 enum class GameServiceGuardInstallStatus {
@@ -47,6 +49,7 @@ enum class GameServiceGuardCleanupStatus {
 struct GameServiceGuardLifecycleSnapshot {
     bool installed = false;
     bool cleanupIncomplete = false;
+    bool denyOnlyRetained = false;
     std::size_t installedHookCount = 0;
 };
 

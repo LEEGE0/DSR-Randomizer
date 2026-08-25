@@ -1,6 +1,22 @@
 include(${CMAKE_SOURCE_DIR}/cmake/MinHook.cmake)
 
-file(READ "${CMAKE_SOURCE_DIR}/config/compatibility-profiles.json" profile_json)
+set(PROFILE_JSON_PATH "${CMAKE_SOURCE_DIR}/config/compatibility-profiles.json")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+  "${PROFILE_JSON_PATH}")
+execute_process(
+  COMMAND dotnet run
+    --project "${CMAKE_SOURCE_DIR}/tools/DSRRandomizer.ProfileInspector/DSRRandomizer.ProfileInspector.csproj"
+    --configuration Release -- validate "${PROFILE_JSON_PATH}"
+  RESULT_VARIABLE profile_validation_result
+  OUTPUT_QUIET
+  ERROR_VARIABLE profile_validation_error)
+if(NOT profile_validation_result EQUAL 0)
+  message(FATAL_ERROR
+    "Compatibility profile schema-v1 validation failed: ${profile_validation_error}")
+endif()
+
+file(READ "${PROFILE_JSON_PATH}" profile_json)
+file(SHA256 "${PROFILE_JSON_PATH}" PROFILE_DOCUMENT_SHA256)
 string(JSON profile_count LENGTH "${profile_json}" profiles)
 if(NOT profile_count EQUAL 1)
   message(FATAL_ERROR "The native guard requires exactly one release-pinned profile")
@@ -11,12 +27,73 @@ if(NOT profile_schema EQUAL 1)
 endif()
 string(JSON PROFILE_EXECUTABLE_MODULE GET
   "${profile_json}" profiles 0 executableModule)
+string(JSON PROFILE_EXECUTABLE_LENGTH GET
+  "${profile_json}" profiles 0 executable length)
+string(JSON profile_executable_sha GET
+  "${profile_json}" profiles 0 executable sha256)
 string(JSON PROFILE_MACHINE GET
   "${profile_json}" profiles 0 executable machine)
 string(JSON PROFILE_TIMESTAMP GET
   "${profile_json}" profiles 0 executable peTimestamp)
 string(JSON PROFILE_IMAGE_SIZE GET
   "${profile_json}" profiles 0 executable sizeOfImage)
+
+function(profile_sha_to_cpp source output)
+  string(LENGTH "${source}" source_length)
+  if(NOT source_length EQUAL 64 OR source MATCHES "[^0-9A-Fa-f]")
+    message(FATAL_ERROR "A compatibility profile hash is not SHA-256")
+  endif()
+  set(converted "")
+  foreach(profile_byte_index RANGE 0 31)
+    math(EXPR profile_hex_index "${profile_byte_index} * 2")
+    string(SUBSTRING "${source}" ${profile_hex_index} 2 profile_byte)
+    string(APPEND converted "0x${profile_byte}")
+    if(NOT profile_byte_index EQUAL 31)
+      string(APPEND converted ", ")
+    endif()
+  endforeach()
+  set(${output} "${converted}" PARENT_SCOPE)
+endfunction()
+
+profile_sha_to_cpp("${profile_executable_sha}" PROFILE_EXECUTABLE_SHA256)
+
+string(JSON profile_module_count LENGTH "${profile_json}" profiles 0 modules)
+if(NOT profile_module_count EQUAL 1)
+  message(FATAL_ERROR "The native guard requires exactly one pinned Steam module")
+endif()
+string(JSON PROFILE_STEAM_MODULE GET "${profile_json}" profiles 0 modules 0 name)
+string(JSON PROFILE_STEAM_LENGTH GET "${profile_json}" profiles 0 modules 0 length)
+string(JSON profile_steam_sha GET "${profile_json}" profiles 0 modules 0 sha256)
+string(JSON PROFILE_STEAM_MACHINE GET "${profile_json}" profiles 0 modules 0 machine)
+string(JSON PROFILE_STEAM_TIMESTAMP GET "${profile_json}" profiles 0 modules 0 peTimestamp)
+string(JSON PROFILE_STEAM_IMAGE_SIZE GET "${profile_json}" profiles 0 modules 0 sizeOfImage)
+string(JSON profile_steam_deferred GET "${profile_json}" profiles 0 modules 0 allowDeferred)
+if(profile_steam_deferred)
+  set(PROFILE_STEAM_ALLOW_DEFERRED true)
+else()
+  set(PROFILE_STEAM_ALLOW_DEFERRED false)
+endif()
+profile_sha_to_cpp("${profile_steam_sha}" PROFILE_STEAM_SHA256)
+
+string(JSON PROFILE_STEAM_INTERFACE_COUNT LENGTH
+  "${profile_json}" profiles 0 modules 0 declaredInterfaces)
+set(PROFILE_STEAM_INTERFACES "")
+math(EXPR profile_steam_interface_last "${PROFILE_STEAM_INTERFACE_COUNT} - 1")
+foreach(profile_interface_index RANGE 0 ${profile_steam_interface_last})
+  string(JSON profile_interface GET "${profile_json}"
+    profiles 0 modules 0 declaredInterfaces ${profile_interface_index})
+  string(APPEND PROFILE_STEAM_INTERFACES "    \"${profile_interface}\",\n")
+endforeach()
+
+string(JSON PROFILE_STEAM_EXPORT_COUNT LENGTH
+  "${profile_json}" profiles 0 modules 0 protectedFactoryExports)
+set(PROFILE_STEAM_EXPORTS "")
+math(EXPR profile_steam_export_last "${PROFILE_STEAM_EXPORT_COUNT} - 1")
+foreach(profile_export_index RANGE 0 ${profile_steam_export_last})
+  string(JSON profile_export GET "${profile_json}"
+    profiles 0 modules 0 protectedFactoryExports ${profile_export_index})
+  string(APPEND PROFILE_STEAM_EXPORTS "    \"${profile_export}\",\n")
+endforeach()
 string(JSON PROFILE_TARGET_COUNT LENGTH
   "${profile_json}" profiles 0 gameServiceTargets)
 set(PROFILE_TARGETS "")
@@ -63,6 +140,12 @@ configure_file(
   "${CMAKE_CURRENT_SOURCE_DIR}/runtime/game/CompatibilityProfile.generated.h.in"
   "${CMAKE_BINARY_DIR}/generated/game/CompatibilityProfile.generated.h"
   @ONLY)
+add_test(
+  NAME CompatibilityProfileGenerationTests
+  COMMAND "${CMAKE_COMMAND}"
+    -DPROFILE_JSON=${PROFILE_JSON_PATH}
+    -DGENERATED_HEADER=${CMAKE_BINARY_DIR}/generated/game/CompatibilityProfile.generated.h
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/CompatibilityProfileGenerationTests.cmake)
 
 function(dsr_configure_target target_name)
   target_compile_definitions(${target_name}

@@ -149,6 +149,7 @@ struct Trampolines {
 };
 
 struct GateContext {
+    std::shared_ptr<void> identityLease;
     std::vector<std::unique_ptr<ModuleRecord>> modules;
     std::shared_ptr<Steam::FatalState> fatalState;
     Trampolines trampolines;
@@ -1501,6 +1502,14 @@ bool VerifyUnprotectedImportBoundary(
     // DllMain before the outer LoadLibrary returns. Task 4 may replace this
     // conservative rule with a profile-pinned recursive closure.
     for (const auto& import : imports) {
+        // API-set contract names are virtual loader contracts, not physical
+        // module basenames. Their already-loaded host DLL is selected by the
+        // Windows loader schema, so physical-module enumeration cannot and must
+        // not require a one-to-one match for the contract name.
+        if (import.starts_with(L"api-ms-win-")
+            || import.starts_with(L"ext-ms-win-")) {
+            continue;
+        }
         std::vector<PinnedModule> matches;
         if (!EnumerateMatchingModules(import, matches)
             || matches.size() != 1) {
@@ -2216,6 +2225,7 @@ bool BuildContext(
         return false;
     }
     auto candidate = std::make_shared<GateContext>();
+    candidate->identityLease = configuration.identityLease;
     candidate->fatalState = std::make_shared<Steam::FatalState>(
         configuration.fatalReporter);
     const Steam::SteamPolicy policy;
@@ -2277,7 +2287,7 @@ bool BuildContext(
                     [](const char character) {
                         return std::isspace(
                             static_cast<unsigned char>(character)) != 0;
-                    })) {
+                })) {
                 return false;
             }
             record->protectedExports.push_back({name});
@@ -2487,10 +2497,9 @@ DeferredModuleGateInstallStatus InstallWithSuspendedProof(
 }  // namespace
 
 DeferredModuleGateInstallStatus InstallDeferredModuleGate(
-    const DeferredModuleGateConfiguration&) noexcept {
-    // Task 5 owns production proof that initialization runs while the target is
-    // suspended. Until that proof exists, production cannot arm this gate.
-    return DeferredModuleGateInstallStatus::InvalidConfiguration;
+    const DeferredModuleGateConfiguration& configuration) noexcept {
+    // The runtime initializer is invoked before the launcher resumes the target.
+    return InstallWithSuspendedProof(configuration);
 }
 
 DeferredModuleGateCleanupStatus UninstallDeferredModuleGate() noexcept {

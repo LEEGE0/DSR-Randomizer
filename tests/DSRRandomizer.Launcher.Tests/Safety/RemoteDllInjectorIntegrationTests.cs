@@ -1,6 +1,8 @@
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.IO.Pipes;
+using System.Net;
+using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Security.AccessControl;
 using System.Security.Principal;
@@ -13,6 +15,18 @@ namespace DSRRandomizer.Launcher.Tests.Safety;
 
 public sealed class RemoteDllInjectorIntegrationTests
 {
+    [Theory]
+    [InlineData(10U, "GAME_SERVICE_PROFILE_MISMATCH")]
+    [InlineData(11U, "GAME_SERVICE_HOOK_FAILED")]
+    [InlineData(12U, "PROTECTION_CLEANUP_FAILED")]
+    [InlineData(7U, "SAFETY_INITIALIZER_FAILED")]
+    public void InitializerErrorCode_PreservesExactNativeFailure(
+        uint nativeStatus,
+        string expected)
+    {
+        Assert.Equal(expected, RemoteDllInjector.InitializerErrorCode(nativeStatus));
+    }
+
     [Fact]
     public void CreateInitBlock_MarshalsVersionedCanonicalSavePathsAtExactOffsets()
     {
@@ -36,9 +50,9 @@ public sealed class RemoteDllInjectorIntegrationTests
             configuration,
             @"\\.\pipe\fixture");
 
-        Assert.Equal(5428, block.Length);
+        Assert.Equal(5480, block.Length);
         Assert.Equal((ushort)2, BinaryPrimitives.ReadUInt16LittleEndian(block.AsSpan(4)));
-        Assert.Equal((ushort)5428, BinaryPrimitives.ReadUInt16LittleEndian(block.AsSpan(6)));
+        Assert.Equal((ushort)5480, BinaryPrimitives.ReadUInt16LittleEndian(block.AsSpan(6)));
         Assert.Equal(7UL, BinaryPrimitives.ReadUInt64LittleEndian(block.AsSpan(8)));
         Assert.Equal(@"\\.\pipe\fixture", ReadFixedWide(block, 52));
         Assert.Equal(configuration.SavePaths.VirtualDocuments, ReadFixedWide(block, 308));
@@ -46,6 +60,48 @@ public sealed class RemoteDllInjectorIntegrationTests
         Assert.Equal(configuration.SavePaths.RealSaveRoot, ReadFixedWide(block, 2356));
         Assert.Equal(configuration.SavePaths.ExternalSaveRoot, ReadFixedWide(block, 3380));
         Assert.Equal(configuration.SavePaths.DedicatedRmm, ReadFixedWide(block, 4404));
+        Assert.Equal(0U, BinaryPrimitives.ReadUInt32LittleEndian(block.AsSpan(5428)));
+        Assert.All(block[5432..], value => Assert.Equal(0, value));
+    }
+
+    [Fact]
+    public void CreateInitBlock_MarshalsExactWinsockEndpointsInProtocolV2Tail()
+    {
+        var configuration = GuardConfiguration.Create(
+            @"C:\fixture\DSRRandomizer.Runtime.dll",
+            ProtocolVersion: 2,
+            RequiredFlags: (ulong)(ProtectionFlags.Bootstrap | ProtectionFlags.Winsock),
+            DiagnosticMode: false) with
+        {
+            SocketEndpoints =
+            [
+                new GuardSocketEndpoint(
+                    GuardSocketTransport.Tcp,
+                    AddressFamily.InterNetwork,
+                    42000,
+                    IPAddress.Loopback),
+                new GuardSocketEndpoint(
+                    GuardSocketTransport.Udp,
+                    AddressFamily.InterNetworkV6,
+                    42001,
+                    IPAddress.IPv6Loopback)
+            ]
+        };
+
+        var block = RemoteDllInjector.CreateInitBlock(configuration, @"\\.\pipe\fixture");
+
+        Assert.Equal(2U, BinaryPrimitives.ReadUInt32LittleEndian(block.AsSpan(5428)));
+        Assert.Equal((ushort)1, BinaryPrimitives.ReadUInt16LittleEndian(block.AsSpan(5432)));
+        Assert.Equal((ushort)AddressFamily.InterNetwork,
+            BinaryPrimitives.ReadUInt16LittleEndian(block.AsSpan(5434)));
+        Assert.Equal((ushort)42000, BinaryPrimitives.ReadUInt16BigEndian(block.AsSpan(5436)));
+        Assert.Equal(IPAddress.Loopback.GetAddressBytes(), block.AsSpan(5440, 4).ToArray());
+        Assert.All(block.AsSpan(5444, 12).ToArray(), value => Assert.Equal(0, value));
+        Assert.Equal((ushort)2, BinaryPrimitives.ReadUInt16LittleEndian(block.AsSpan(5456)));
+        Assert.Equal((ushort)AddressFamily.InterNetworkV6,
+            BinaryPrimitives.ReadUInt16LittleEndian(block.AsSpan(5458)));
+        Assert.Equal((ushort)42001, BinaryPrimitives.ReadUInt16BigEndian(block.AsSpan(5460)));
+        Assert.Equal(IPAddress.IPv6Loopback.GetAddressBytes(), block.AsSpan(5464, 16).ToArray());
     }
 
     [Fact]

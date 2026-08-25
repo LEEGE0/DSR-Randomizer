@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text;
 
 namespace DSRRandomizer.Foundation.Safety;
 
@@ -8,7 +9,7 @@ public sealed class CompatibilityProfileCatalog
     private const int SupportedSchemaVersion = 1;
     private const string ProfileFileName = "compatibility-profiles.json";
     private static readonly Lazy<CompatibilityProfileCatalog> DefaultCatalog =
-        new(() => Load(ResolveDefaultPath()));
+        new(() => Load(ResolveDefaultPath(AppContext.BaseDirectory)));
     private static readonly JsonSerializerOptions JsonOptions = CreateJsonOptions();
 
     private readonly IReadOnlyDictionary<ExecutableKey, CompatibilityProfile> _profiles;
@@ -60,6 +61,7 @@ public sealed class CompatibilityProfileCatalog
         ArgumentException.ThrowIfNullOrWhiteSpace(json);
         try
         {
+            ValidateNoDuplicateProperties(json);
             var document = JsonSerializer.Deserialize<ProfileDocument>(json, JsonOptions)
                 ?? throw new CompatibilityProfileFormatException(
                     "The compatibility profile document is empty.");
@@ -126,9 +128,8 @@ public sealed class CompatibilityProfileCatalog
     private static CompatibilityProfile ConvertProfile(ProfileDto source)
     {
         if (string.IsNullOrWhiteSpace(source.Id) ||
-            string.IsNullOrWhiteSpace(source.ExecutableModule) ||
-            Path.GetFileName(source.ExecutableModule) != source.ExecutableModule ||
-            source.FixedSaveLength <= 0 || source.ProtocolVersion == 0 ||
+            !IsSafeModuleName(source.ExecutableModule) ||
+            source.FixedSaveLength <= 0 || source.ProtocolVersion != 2 ||
             source.Executable is null)
         {
             throw new CompatibilityProfileFormatException(
@@ -146,6 +147,12 @@ public sealed class CompatibilityProfileCatalog
         {
             throw new CompatibilityProfileFormatException(
                 "Module names must be unique within a compatibility profile.");
+        }
+        if (modules.GroupBy(module => CreateKey(module.Identity))
+            .Any(group => group.Count() != 1))
+        {
+            throw new CompatibilityProfileFormatException(
+                "Module identities must be unique within a compatibility profile.");
         }
 
         var targets = (source.GameServiceTargets ?? [])
@@ -183,14 +190,33 @@ public sealed class CompatibilityProfileCatalog
 
     private static ModuleProfile ConvertModule(ModuleDto source)
     {
-        if (string.IsNullOrWhiteSpace(source.Name) ||
-            Path.GetFileName(source.Name) != source.Name)
+        if (!IsSafeModuleName(source.Name) ||
+            source.AllowDeferred is null ||
+            !ValidUniqueNames(source.DeclaredInterfaces) ||
+            !ValidUniqueNames(source.ProtectedFactoryExports))
         {
             throw new CompatibilityProfileFormatException(
-                "Compatibility module names must be base file names.");
+                "A compatibility module contains invalid gate declarations.");
         }
-        return new ModuleProfile(source.Name, ConvertIdentity(source));
+        return new ModuleProfile(
+            source.Name,
+            ConvertIdentity(source),
+            source.AllowDeferred.Value,
+            source.DeclaredInterfaces!.ToArray(),
+            source.ProtectedFactoryExports!.ToArray());
     }
+
+    private static bool ValidUniqueNames(List<string>? names) =>
+        names is { Count: > 0 } &&
+        names.All(name => !string.IsNullOrWhiteSpace(name) &&
+            name.All(character => char.IsAsciiLetterOrDigit(character) || character == '_')) &&
+        names.Distinct(StringComparer.Ordinal).Count() == names.Count;
+
+    private static bool IsSafeModuleName(string? name) =>
+        !string.IsNullOrWhiteSpace(name) &&
+        Path.GetFileName(name) == name &&
+        name.All(character => char.IsAsciiLetterOrDigit(character)
+            || character is '.' or '_' or '-');
 
     private static InternalTargetProfile ConvertTarget(TargetDto source)
     {
@@ -246,24 +272,50 @@ public sealed class CompatibilityProfileCatalog
     private static bool IsSha256(string? value) =>
         value is { Length: 64 } && value.All(Uri.IsHexDigit);
 
-    private static string ResolveDefaultPath()
+    internal static string ResolveDefaultPath(string applicationBaseDirectory)
     {
-        var roots = new[] { Environment.CurrentDirectory, AppContext.BaseDirectory };
-        foreach (var root in roots)
+        ArgumentException.ThrowIfNullOrWhiteSpace(applicationBaseDirectory);
+        var root = Path.GetFullPath(applicationBaseDirectory);
+        var candidate = Path.Combine(root, "config", ProfileFileName);
+        if (File.Exists(candidate))
         {
-            var directory = new DirectoryInfo(root);
-            while (directory is not null)
-            {
-                var candidate = Path.Combine(directory.FullName, "config", ProfileFileName);
-                if (File.Exists(candidate))
-                {
-                    return candidate;
-                }
-                directory = directory.Parent;
-            }
+            return candidate;
         }
         throw new CompatibilityProfileFormatException(
             "The release-pinned compatibility profile document was not found.");
+    }
+
+    private static void ValidateNoDuplicateProperties(string json)
+    {
+        var reader = new Utf8JsonReader(
+            Encoding.UTF8.GetBytes(json),
+            new JsonReaderOptions
+            {
+                AllowTrailingCommas = false,
+                CommentHandling = JsonCommentHandling.Disallow
+            });
+        var objects = new Stack<HashSet<string>>();
+        while (reader.Read())
+        {
+            if (reader.TokenType == JsonTokenType.StartObject)
+            {
+                objects.Push(new HashSet<string>(StringComparer.Ordinal));
+            }
+            else if (reader.TokenType == JsonTokenType.EndObject)
+            {
+                _ = objects.Pop();
+            }
+            else if (reader.TokenType == JsonTokenType.PropertyName)
+            {
+                var name = reader.GetString() ?? throw new JsonException(
+                    "A JSON property name is invalid.");
+                if (objects.Count == 0 || !objects.Peek().Add(name))
+                {
+                    throw new JsonException(
+                        $"The JSON object contains duplicate property '{name}'.");
+                }
+            }
+        }
     }
 
     private static JsonSerializerOptions CreateJsonOptions()
@@ -307,7 +359,10 @@ public sealed class CompatibilityProfileCatalog
         string Sha256,
         ushort Machine,
         uint PeTimestamp,
-        uint SizeOfImage)
+        uint SizeOfImage,
+        bool? AllowDeferred,
+        List<string>? DeclaredInterfaces,
+        List<string>? ProtectedFactoryExports)
         : IdentityDto(Length, Sha256, Machine, PeTimestamp, SizeOfImage);
 
     private sealed record TargetDto(

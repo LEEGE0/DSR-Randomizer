@@ -21,6 +21,7 @@ using DSRRandomizer::Modules::DeferredModuleGateConfiguration;
 using DSRRandomizer::Modules::DeferredModuleGateInstallStatus;
 using DSRRandomizer::Modules::DeferredModuleExpectation;
 using DSRRandomizer::Steam::MethodDecision;
+using DSRRandomizer::Steam::InterfaceDecision;
 using DSRRandomizer::Steam::SteamMethod;
 using DSRRandomizer::Steam::SteamPolicy;
 
@@ -379,6 +380,15 @@ int VerifyPolicy() {
             SteamMethod::FileWrite) != MethodDecision::Deny
         || policy.Evaluate("SteamUser023", SteamMethod::GetSteamID)
             != MethodDecision::Allow
+        || policy.Evaluate("SteamNetworking005", SteamMethod::SendP2PPacket)
+            != MethodDecision::Deny
+        || policy.Evaluate(
+            "STEAMREMOTESTORAGE_INTERFACE_VERSION014",
+            SteamMethod::FileWrite) != MethodDecision::Deny
+        || policy.Evaluate("SteamUser019", SteamMethod::GetSteamID)
+            != MethodDecision::Allow
+        || policy.EvaluateInterface("SteamClient017")
+            != InterfaceDecision::AllowRaw
         || policy.Evaluate("SteamMatchMaking999", SteamMethod::CreateLobby)
             != MethodDecision::UnknownInterfaceFatal) {
         return Fail("Steam interface policy matrix was not fail closed");

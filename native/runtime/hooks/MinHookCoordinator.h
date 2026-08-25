@@ -42,6 +42,9 @@ struct MinHookFaults {
 
 void SetMinHookFaults(const MinHookFaults& faults) noexcept;
 [[nodiscard]] std::size_t MinHookReferenceCount() noexcept;
+void SetMutationLeasePauseEvents(
+    void* afterAcquireEvent,
+    void* allowReleaseEvent) noexcept;
 
 }  // namespace Testing
 

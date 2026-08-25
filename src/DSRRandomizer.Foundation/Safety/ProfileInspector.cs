@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.IO.MemoryMappedFiles;
 using System.Security.Cryptography;
+using System.Text;
 
 namespace DSRRandomizer.Foundation.Safety;
 
@@ -16,7 +17,8 @@ public enum ProfileError
     TargetModuleMismatch,
     TargetOutOfRange,
     TargetFingerprintMismatch,
-    ModuleMissing
+    ModuleMissing,
+    ModuleDeclarationMismatch
 }
 
 public readonly record struct ProfileVerificationResult(
@@ -149,6 +151,18 @@ public static class ProfileInspector
                 {
                     return result;
                 }
+                if (module.DeclaredInterfaces.Count != 0 ||
+                    module.ProtectedFactoryExports.Count != 0)
+                {
+                    if (module.DeclaredInterfaces.Any(version =>
+                            !ContainsNullTerminatedAscii(executable, version)) ||
+                        module.ProtectedFactoryExports.Any(name =>
+                            !HasExport(image, name)) ||
+                        HasImport(executable, module.Name) == module.AllowDeferred)
+                    {
+                        return new(ProfileError.ModuleDeclarationMismatch);
+                    }
+                }
             }
 
             return ProfileVerificationResult.Success;
@@ -217,7 +231,7 @@ public static class ProfileInspector
         var timestamp = BinaryPrimitives.ReadUInt32LittleEndian(coff[4..]);
         var optionalSize = BinaryPrimitives.ReadUInt16LittleEndian(coff[16..]);
         var optionalOffset = peOffset + 24;
-        if (sectionCount == 0 || optionalSize < 0x70 ||
+        if (sectionCount == 0 || optionalSize < 0x80 ||
             optionalOffset > image.Length - optionalSize ||
             BinaryPrimitives.ReadUInt16LittleEndian(image.AsSpan(optionalOffset)) != Pe32PlusMagic)
         {
@@ -225,13 +239,24 @@ public static class ProfileInspector
         }
 
         var sizeOfImage = BinaryPrimitives.ReadUInt32LittleEndian(image.AsSpan(optionalOffset + 0x38));
+        var exportDirectoryRva = BinaryPrimitives.ReadUInt32LittleEndian(
+            image.AsSpan(optionalOffset + 0x70));
+        var importDirectoryRva = BinaryPrimitives.ReadUInt32LittleEndian(
+            image.AsSpan(optionalOffset + 0x78));
         var sectionOffset = optionalOffset + optionalSize;
         if (sectionOffset > image.Length - checked(sectionCount * 40))
         {
             return false;
         }
 
-        headers = new PeHeaders(machine, timestamp, sizeOfImage, sectionOffset, sectionCount);
+        headers = new PeHeaders(
+            machine,
+            timestamp,
+            sizeOfImage,
+            sectionOffset,
+            sectionCount,
+            exportDirectoryRva,
+            importDirectoryRva);
         return true;
     }
 
@@ -280,10 +305,127 @@ public static class ProfileInspector
         return false;
     }
 
+    private static bool ContainsNullTerminatedAscii(byte[] image, string value)
+    {
+        var needle = Encoding.ASCII.GetBytes(value + '\0');
+        return image.AsSpan().IndexOf(needle) >= 0;
+    }
+
+    private static bool HasImport(byte[] image, string moduleName)
+    {
+        if (!TryReadHeaders(image, out var headers) ||
+            headers.ImportDirectoryRva == 0 ||
+            !TryMapRva(image, headers, headers.ImportDirectoryRva, 20, out var offset))
+        {
+            return false;
+        }
+        for (var index = offset; index <= image.Length - 20; index += 20)
+        {
+            var descriptor = image.AsSpan(index, 20);
+            if (descriptor.SequenceEqual(new byte[20]))
+            {
+                return false;
+            }
+            var nameRva = BinaryPrimitives.ReadUInt32LittleEndian(descriptor[12..]);
+            if (TryReadAscii(image, headers, nameRva, out var name) &&
+                string.Equals(name, moduleName, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static bool HasExport(byte[] image, string exportName)
+    {
+        if (!TryReadHeaders(image, out var headers) ||
+            headers.ExportDirectoryRva == 0 ||
+            !TryMapRva(image, headers, headers.ExportDirectoryRva, 40, out var offset))
+        {
+            return false;
+        }
+        var directory = image.AsSpan(offset, 40);
+        var count = BinaryPrimitives.ReadUInt32LittleEndian(directory[24..]);
+        var namesRva = BinaryPrimitives.ReadUInt32LittleEndian(directory[32..]);
+        if (count > 65536 || !TryMapRva(
+                image, headers, namesRva, checked((int)count * 4), out var namesOffset))
+        {
+            return false;
+        }
+        for (var index = 0; index < count; index++)
+        {
+            var nameRva = BinaryPrimitives.ReadUInt32LittleEndian(
+                image.AsSpan(namesOffset + checked((int)index * 4), 4));
+            if (TryReadAscii(image, headers, nameRva, out var name) &&
+                string.Equals(name, exportName, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static bool TryReadAscii(
+        byte[] image,
+        PeHeaders headers,
+        uint rva,
+        out string value)
+    {
+        value = string.Empty;
+        if (!TryMapRva(image, headers, rva, 1, out var offset))
+        {
+            return false;
+        }
+        var end = Array.IndexOf(image, (byte)0, offset);
+        if (end < offset || end - offset > 4096)
+        {
+            return false;
+        }
+        value = Encoding.ASCII.GetString(image, offset, end - offset);
+        return true;
+    }
+
+    private static bool TryMapRva(
+        byte[] image,
+        PeHeaders headers,
+        uint rva,
+        int length,
+        out int fileOffset)
+    {
+        fileOffset = 0;
+        if (length < 0)
+        {
+            return false;
+        }
+        for (var index = 0; index < headers.SectionCount; index++)
+        {
+            var section = image.AsSpan(headers.SectionOffset + index * 40, 40);
+            var virtualSize = BinaryPrimitives.ReadUInt32LittleEndian(section[8..]);
+            var virtualAddress = BinaryPrimitives.ReadUInt32LittleEndian(section[12..]);
+            var rawSize = BinaryPrimitives.ReadUInt32LittleEndian(section[16..]);
+            var rawOffset = BinaryPrimitives.ReadUInt32LittleEndian(section[20..]);
+            if (rva < virtualAddress)
+            {
+                continue;
+            }
+            var relative = (ulong)rva - virtualAddress;
+            if (relative + checked((uint)length) > Math.Min((ulong)virtualSize, rawSize) ||
+                rawOffset + relative + checked((uint)length) > (ulong)image.Length)
+            {
+                continue;
+            }
+            fileOffset = checked((int)(rawOffset + relative));
+            return true;
+        }
+        return false;
+    }
+
     private readonly record struct PeHeaders(
         ushort Machine,
         uint Timestamp,
         uint SizeOfImage,
         int SectionOffset,
-        ushort SectionCount);
+        ushort SectionCount,
+        uint ExportDirectoryRva,
+        uint ImportDirectoryRva);
 }
