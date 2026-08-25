@@ -62,6 +62,9 @@ CurrentGateLifecycle() noexcept;
 void SetGateCleanupPhaseEvents(
     void* afterInitialDisableEvent,
     void* beforeFactoryDrainEvent) noexcept;
+void SetFactoryPublicationPauseEvents(
+    void* afterApplyEvent,
+    void* allowRollbackEvent) noexcept;
 void HoldGateCallbackWhileWaitingForMutation(
     void* enteredEvent,
     void* allowMutationEvent,
@@ -70,6 +73,9 @@ void HoldGateCallbackWhileWaitingForMutation(
 [[nodiscard]] bool GateIsDenyOnlyForReporter() noexcept;
 [[nodiscard]] std::size_t
 GateRetainedFactorySlotCountForReporter() noexcept;
+[[nodiscard]] std::int32_t CallOriginalLdrLoadDllForSyntheticCallout(
+    const std::wstring& path,
+    void** module) noexcept;
 
 }  // namespace Testing
 

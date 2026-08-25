@@ -1,6 +1,7 @@
 #include "modules/DeferredModuleGate.h"
 
 #include <Windows.h>
+#include <winternl.h>
 #include <TlHelp32.h>
 #include <Psapi.h>
 #include <bcrypt.h>
@@ -32,6 +33,32 @@ using LoadLibraryExAFunction = HMODULE(WINAPI*)(LPCSTR, HANDLE, DWORD);
 using LoadLibraryExWFunction = HMODULE(WINAPI*)(LPCWSTR, HANDLE, DWORD);
 using GetProcAddressFunction = FARPROC(WINAPI*)(HMODULE, LPCSTR);
 using LoaderCalloutProbeFunction = BOOLEAN(NTAPI*)();
+using LdrLoadDllFunction = NTSTATUS(NTAPI*)(
+    PWSTR,
+    PULONG,
+    PUNICODE_STRING,
+    PHANDLE);
+using LdrGetProcedureAddressFunction = NTSTATUS(NTAPI*)(
+    PVOID,
+    PANSI_STRING,
+    ULONG,
+    PVOID*);
+using LdrGetProcedureAddressExFunction = NTSTATUS(NTAPI*)(
+    PVOID,
+    PANSI_STRING,
+    ULONG,
+    PVOID*,
+    ULONG);
+using LdrGetProcedureAddressForCallerFunction = NTSTATUS(NTAPI*)(
+    PVOID,
+    PANSI_STRING,
+    ULONG,
+    PVOID*,
+    ULONG,
+    PVOID);
+
+constexpr NTSTATUS kNativeAccessDenied = static_cast<NTSTATUS>(0xc0000022U);
+constexpr NTSTATUS kNativeSuccess = 0;
 
 struct UniqueHandle final {
     HANDLE value = INVALID_HANDLE_VALUE;
@@ -114,6 +141,11 @@ struct Trampolines {
     LoadLibraryExAFunction loadLibraryExA = nullptr;
     LoadLibraryExWFunction loadLibraryExW = nullptr;
     GetProcAddressFunction getProcAddress = nullptr;
+    LdrLoadDllFunction ldrLoadDll = nullptr;
+    LdrGetProcedureAddressFunction ldrGetProcedureAddress = nullptr;
+    LdrGetProcedureAddressExFunction ldrGetProcedureAddressEx = nullptr;
+    LdrGetProcedureAddressForCallerFunction
+        ldrGetProcedureAddressForCaller = nullptr;
 };
 
 struct GateContext {
@@ -155,6 +187,8 @@ std::atomic<std::uint32_t> failFactoryPublication{};
 std::atomic<std::uint32_t> failFactoryPostCreate{};
 std::atomic<HANDLE> afterInitialDisableEvent{};
 std::atomic<HANDLE> beforeFactoryDrainEvent{};
+std::atomic<HANDLE> afterFactoryApplyEvent{};
+std::atomic<HANDLE> allowFactoryRollbackEvent{};
 Lifecycle lifecycle;
 std::mutex installMutex;
 std::mutex hooksMutex;
@@ -162,6 +196,8 @@ std::recursive_mutex loaderCallbackMutex;
 std::shared_mutex callbackGate;
 thread_local std::uint32_t callbackDepth = 0;
 thread_local std::uint32_t internalBypassDepth = 0;
+thread_local std::uint32_t nativeLoadDelegationAllowance = 0;
+thread_local std::uint32_t nativeSymbolDelegationAllowance = 0;
 
 void SignalTestEvent(const std::atomic<HANDLE>& event) noexcept {
     const auto handle = event.load(std::memory_order_acquire);
@@ -177,6 +213,29 @@ public:
     InternalBypass(const InternalBypass&) = delete;
     InternalBypass& operator=(const InternalBypass&) = delete;
 };
+
+class OneShotNativeDelegation final {
+public:
+    explicit OneShotNativeDelegation(std::uint32_t& allowance) noexcept
+        : allowance_(allowance), previous_(allowance) {
+        allowance_ = 1;
+    }
+    ~OneShotNativeDelegation() { allowance_ = previous_; }
+    OneShotNativeDelegation(const OneShotNativeDelegation&) = delete;
+    OneShotNativeDelegation& operator=(const OneShotNativeDelegation&) = delete;
+
+private:
+    std::uint32_t& allowance_;
+    std::uint32_t previous_;
+};
+
+bool ConsumeNativeDelegation(std::uint32_t& allowance) noexcept {
+    if (allowance == 0) {
+        return false;
+    }
+    --allowance;
+    return true;
+}
 
 class CallbackLease final {
 public:
@@ -197,6 +256,121 @@ private:
     std::optional<std::unique_lock<std::recursive_mutex>> loaderLock_;
     std::optional<std::shared_lock<std::shared_mutex>> callbackLock_;
 };
+
+bool SafeWritePointer(void** const destination, void* const value) noexcept {
+    if (destination == nullptr) {
+        return false;
+    }
+    __try {
+        *destination = value;
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool SafeCopyNativeUnicode(
+    const UNICODE_STRING* const source,
+    wchar_t* const destination,
+    const std::size_t capacity,
+    std::size_t& length) noexcept {
+    if (source == nullptr || destination == nullptr || capacity == 0) {
+        return false;
+    }
+    __try {
+        if (source->Buffer == nullptr || source->Length == 0
+            || (source->Length % sizeof(wchar_t)) != 0
+            || source->Length > source->MaximumLength) {
+            return false;
+        }
+        const auto characters = static_cast<std::size_t>(
+            source->Length / sizeof(wchar_t));
+        if (characters >= capacity) {
+            return false;
+        }
+        std::memcpy(
+            destination,
+            source->Buffer,
+            characters * sizeof(wchar_t));
+        destination[characters] = L'\0';
+        length = characters;
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool SafeCopyNativeAnsi(
+    const ANSI_STRING* const source,
+    char* const destination,
+    const std::size_t capacity,
+    std::size_t& length) noexcept {
+    if (source == nullptr || destination == nullptr || capacity == 0) {
+        return false;
+    }
+    __try {
+        if (source->Buffer == nullptr || source->Length == 0
+            || source->Length > source->MaximumLength
+            || source->Length >= capacity) {
+            return false;
+        }
+        std::memcpy(destination, source->Buffer, source->Length);
+        destination[source->Length] = '\0';
+        length = source->Length;
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool CopyNativePath(
+    const UNICODE_STRING* const source,
+    std::wstring& path) noexcept {
+    try {
+        std::array<wchar_t, 32768> buffer{};
+        std::size_t length = 0;
+        if (!SafeCopyNativeUnicode(
+                source,
+                buffer.data(),
+                buffer.size(),
+                length)
+            || std::find(buffer.begin(), buffer.begin() + length, L'\0')
+                != buffer.begin() + length) {
+            return false;
+        }
+        path.assign(buffer.data(), length);
+        return true;
+    }
+    catch (...) {
+        return false;
+    }
+}
+
+bool CopyNativeProcedureName(
+    const ANSI_STRING* const source,
+    std::string& name) noexcept {
+    try {
+        std::array<char, 4096> buffer{};
+        std::size_t length = 0;
+        if (!SafeCopyNativeAnsi(
+                source,
+                buffer.data(),
+                buffer.size(),
+                length)
+            || std::find(buffer.begin(), buffer.begin() + length, '\0')
+                != buffer.begin() + length) {
+            return false;
+        }
+        name.assign(buffer.data(), length);
+        return true;
+    }
+    catch (...) {
+        return false;
+    }
+}
 
 bool EqualsPath(
     const std::wstring_view left,
@@ -721,6 +895,21 @@ bool IsFatal(const std::shared_ptr<GateContext>& context) noexcept {
         || context->fatalState->IsFatal();
 }
 
+FARPROC CallOriginalGetProcAddress(
+    const std::shared_ptr<GateContext>& context,
+    const HMODULE module,
+    const LPCSTR procedureName) noexcept {
+    if (context == nullptr || context->trampolines.getProcAddress == nullptr
+        || IsFatal(context)) {
+        return nullptr;
+    }
+    OneShotNativeDelegation delegation(nativeSymbolDelegationAllowance);
+    const auto result = context->trampolines.getProcAddress(
+        module,
+        procedureName);
+    return IsFatal(context) ? nullptr : result;
+}
+
 bool IsWithinLoaderCallout(
     const std::shared_ptr<GateContext>& context) noexcept {
     if (context == nullptr || context->loaderCalloutProbe == nullptr) {
@@ -797,35 +986,44 @@ bool ConsumeFactoryPostCreateFault() noexcept {
 bool RollBackFactoryHooks(
     GateContext& context,
     std::vector<HookEntry>& created) noexcept {
-    Hooks::MinHookMutationLease mutation;
-    std::array<bool, Steam::kSteamFactorySlotCapacity> disabled{};
-    for (std::size_t index = 0; index < created.size(); ++index) {
-        const auto status = Hooks::DisableHook(created[index].target);
-        disabled[index] = status == MH_OK || status == MH_ERROR_DISABLED
-            || status == MH_ERROR_NOT_CREATED;
+    {
+        Hooks::MinHookMutationLease mutation;
+        for (const auto& hook : created) {
+            if (hook.created) {
+                static_cast<void>(Hooks::DisableHook(hook.target));
+            }
+        }
     }
-
+    SignalTestEvent(beforeFactoryDrainEvent);
+    Steam::SteamFactoryCallbackBlock factoryCallbackBlock;
     std::array<HookEntry, Steam::kSteamFactorySlotCapacity> retained{};
     std::size_t retainedCount = 0;
-    for (std::size_t index = created.size(); index > 0; --index) {
-        auto& hook = created[index - 1];
-        const auto status = Hooks::RemoveHook(hook.target);
-        if (status == MH_OK || status == MH_ERROR_NOT_CREATED) {
-            Steam::UnregisterSteamFactorySlot(hook.factorySlot);
-            ReleaseFactorySlot(context, hook.factorySlot);
-            hook.created = false;
-        }
-        else {
-            retained[retainedCount++] = hook;
+    bool mayBeEnabled = false;
+    {
+        Hooks::MinHookMutationLease mutation;
+        for (std::size_t index = created.size(); index > 0; --index) {
+            auto& hook = created[index - 1];
+            const auto disable = Hooks::DisableHook(hook.target);
+            const bool disabled = disable == MH_OK
+                || disable == MH_ERROR_DISABLED
+                || disable == MH_ERROR_NOT_CREATED;
+            const auto remove = disabled
+                ? Hooks::RemoveHook(hook.target)
+                : MH_ERROR_ENABLED;
+            if (remove == MH_OK || remove == MH_ERROR_NOT_CREATED) {
+                Steam::UnregisterSteamFactorySlot(hook.factorySlot);
+                ReleaseFactorySlot(context, hook.factorySlot);
+                hook.created = false;
+            }
+            else {
+                retained[retainedCount++] = hook;
+                mayBeEnabled = mayBeEnabled || !disabled;
+            }
         }
     }
     if (retainedCount != 0) {
         std::scoped_lock lifecycleLock(hooksMutex);
-        lifecycle.mayBeEnabled = lifecycle.mayBeEnabled
-            || std::any_of(
-                disabled.begin(),
-                disabled.end(),
-                [](const bool value) { return !value; });
+        lifecycle.mayBeEnabled = lifecycle.mayBeEnabled || mayBeEnabled;
         lifecycle.hooks.insert(
             lifecycle.hooks.end(),
             retained.begin(),
@@ -860,7 +1058,8 @@ bool ProtectFactoryExports(
             }
 
             void* const target = reinterpret_cast<void*>(
-                context->trampolines.getProcAddress(
+                CallOriginalGetProcAddress(
+                    context,
                     module,
                     exportEntry.name.c_str()));
             void* const detour = Steam::SteamFactoryDetourAddress(slot);
@@ -893,6 +1092,14 @@ bool ProtectFactoryExports(
 
         if (complete && created.size() == record.protectedExports.size()) {
             complete = Hooks::ApplyQueuedHooks() == MH_OK;
+        }
+        if (complete) {
+            SignalTestEvent(afterFactoryApplyEvent);
+            const auto allow = allowFactoryRollbackEvent.load(
+                std::memory_order_acquire);
+            if (allow != nullptr) {
+                WaitForSingleObject(allow, INFINITE);
+            }
         }
         if (complete && ConsumeFactoryPublicationFault()) {
             complete = false;
@@ -1270,6 +1477,7 @@ bool PreflightLoad(
         }
         const bool verified = requestedTarget
             ? VerifyRequestedProtectedFile(context, requestedPath, file.value)
+                && VerifyUnprotectedImportBoundary(context, file.value)
             : VerifyUnprotectedImportBoundary(context, file.value);
         if (verified) {
             pinnedFile = std::move(file);
@@ -1351,6 +1559,7 @@ HMODULE HookLoader(
         SetLastError(ERROR_ACCESS_DENIED);
         return nullptr;
     }
+    OneShotNativeDelegation delegation(nativeLoadDelegationAllowance);
     const HMODULE module = call();
     if (internalBypassDepth != 0) {
         if (IsFatal(context)) {
@@ -1434,13 +1643,28 @@ FARPROC WINAPI HookGetProcAddress(
         SetLastError(ERROR_ACCESS_DENIED);
         return nullptr;
     }
+    if (internalBypassDepth != 0) {
+        const auto result = CallOriginalGetProcAddress(
+            context,
+            module,
+            procedureName);
+        if (IsFatal(context)) {
+            SetLastError(ERROR_ACCESS_DENIED);
+            return nullptr;
+        }
+        return result;
+    }
     CallbackLease callback;
     if (IsFatal(context)) {
         SetLastError(ERROR_ACCESS_DENIED);
         return nullptr;
     }
-    if (internalBypassDepth != 0) {
-        return context->trampolines.getProcAddress(module, procedureName);
+    if (IsWithinLoaderCallout(context)) {
+        static_cast<void>(Fatal(
+            context,
+            "STEAM_LOADER_CALLOUT_SYMBOL_DENIED"));
+        SetLastError(ERROR_ACCESS_DENIED);
+        return nullptr;
     }
     if (callback.IsNested()) {
         if (ModuleIsRequestedTarget(context, module)) {
@@ -1448,7 +1672,8 @@ FARPROC WINAPI HookGetProcAddress(
             SetLastError(ERROR_ACCESS_DENIED);
             return nullptr;
         }
-        const auto result = context->trampolines.getProcAddress(
+        const auto result = CallOriginalGetProcAddress(
+            context,
             module,
             procedureName);
         return IsFatal(context) ? nullptr : result;
@@ -1456,7 +1681,8 @@ FARPROC WINAPI HookGetProcAddress(
 
     const auto admission = AdmitModule(context, module);
     if (!admission.target) {
-        const auto result = context->trampolines.getProcAddress(
+        const auto result = CallOriginalGetProcAddress(
+            context,
             module,
             procedureName);
         return IsFatal(context) ? nullptr : result;
@@ -1481,31 +1707,449 @@ FARPROC WINAPI HookGetProcAddress(
             : reinterpret_cast<FARPROC>(
                 Steam::SteamFactoryDetourAddress(found->slot));
     }
-    const auto result = context->trampolines.getProcAddress(
+    const auto result = CallOriginalGetProcAddress(
+        context,
         module,
         procedureName);
     return IsFatal(context) ? nullptr : result;
 }
 
+NTSTATUS NTAPI HookLdrLoadDll(
+    PWSTR const searchPath,
+    PULONG const dllCharacteristics,
+    PUNICODE_STRING const moduleFileName,
+    PHANDLE const moduleHandle) noexcept {
+    const auto context = activeContext.load(std::memory_order_acquire);
+    if (!SafeWritePointer(
+            reinterpret_cast<void**>(moduleHandle),
+            nullptr)) {
+        static_cast<void>(Fatal(context, "STEAM_NATIVE_LOAD_MALFORMED"));
+        return kNativeAccessDenied;
+    }
+    if (context == nullptr || context->trampolines.ldrLoadDll == nullptr
+        || IsFatal(context)) {
+        return kNativeAccessDenied;
+    }
+
+    HMODULE loaded = nullptr;
+    if (nativeLoadDelegationAllowance != 0
+        && !IsWithinLoaderCallout(context)
+        && ConsumeNativeDelegation(nativeLoadDelegationAllowance)) {
+        const auto status = context->trampolines.ldrLoadDll(
+            searchPath,
+            dllCharacteristics,
+            moduleFileName,
+            reinterpret_cast<PHANDLE>(&loaded));
+        if (IsFatal(context)) {
+            Quarantine(context, loaded);
+            return kNativeAccessDenied;
+        }
+        if (status >= kNativeSuccess
+            && !SafeWritePointer(
+                reinterpret_cast<void**>(moduleHandle),
+                loaded)) {
+            Quarantine(context, loaded);
+            static_cast<void>(Fatal(
+                context,
+                "STEAM_NATIVE_LOAD_MALFORMED"));
+            return kNativeAccessDenied;
+        }
+        return status;
+    }
+
+    CallbackLease callback;
+    if (IsFatal(context)) {
+        return kNativeAccessDenied;
+    }
+    if (IsWithinLoaderCallout(context)) {
+        static_cast<void>(Fatal(
+            context,
+            "STEAM_LOADER_CALLOUT_LOAD_DENIED"));
+        return kNativeAccessDenied;
+    }
+    if (callback.IsNested() && internalBypassDepth == 0) {
+        static_cast<void>(Fatal(context, "STEAM_NESTED_LOAD_DENIED"));
+        return kNativeAccessDenied;
+    }
+
+    std::wstring requestedPath;
+    if (!CopyNativePath(moduleFileName, requestedPath)) {
+        static_cast<void>(Fatal(context, "STEAM_NATIVE_LOAD_MALFORMED"));
+        return kNativeAccessDenied;
+    }
+    if (searchPath != nullptr || dllCharacteristics != nullptr
+        || !IsCanonicalAbsolutePath(requestedPath)) {
+        static_cast<void>(Fatal(
+            context,
+            "STEAM_NATIVE_LOAD_PATH_AMBIGUOUS"));
+        return kNativeAccessDenied;
+    }
+
+    const bool requestedTarget = RequestedTarget(context, requestedPath);
+    UniqueHandle preflightFile;
+    if (internalBypassDepth == 0
+        && !PreflightLoad(
+            context,
+            std::wstring_view(requestedPath),
+            requestedTarget,
+            preflightFile)) {
+        return kNativeAccessDenied;
+    }
+
+    UNICODE_STRING stableName{};
+    stableName.Buffer = requestedPath.data();
+    stableName.Length = static_cast<USHORT>(
+        requestedPath.size() * sizeof(wchar_t));
+    stableName.MaximumLength = stableName.Length;
+    const auto status = context->trampolines.ldrLoadDll(
+        nullptr,
+        nullptr,
+        &stableName,
+        reinterpret_cast<PHANDLE>(&loaded));
+    if (IsFatal(context)) {
+        Quarantine(context, loaded);
+        return kNativeAccessDenied;
+    }
+    if (status < kNativeSuccess || loaded == nullptr) {
+        return status;
+    }
+    if (!AdmitAfterLoad(context, loaded, requestedTarget) || IsFatal(context)) {
+        Quarantine(context, loaded);
+        return kNativeAccessDenied;
+    }
+    if (!SafeWritePointer(
+            reinterpret_cast<void**>(moduleHandle),
+            loaded)) {
+        Quarantine(context, loaded);
+        static_cast<void>(Fatal(context, "STEAM_NATIVE_LOAD_MALFORMED"));
+        return kNativeAccessDenied;
+    }
+    return status;
+}
+
+template <typename Original>
+NTSTATUS GuardNativeProcedureAddress(
+    const std::shared_ptr<GateContext>& context,
+    PVOID const module,
+    PANSI_STRING const procedureName,
+    const ULONG ordinal,
+    PVOID* const procedureAddress,
+    Original&& original) noexcept {
+    if (!SafeWritePointer(procedureAddress, nullptr)) {
+        static_cast<void>(Fatal(context, "STEAM_NATIVE_SYMBOL_MALFORMED"));
+        return kNativeAccessDenied;
+    }
+    if (context == nullptr || IsFatal(context)) {
+        return kNativeAccessDenied;
+    }
+
+    void* result = nullptr;
+    const auto invokeOriginal = [&original](
+        PANSI_STRING const name,
+        const ULONG number,
+        void** const destination) noexcept {
+        OneShotNativeDelegation delegation(nativeSymbolDelegationAllowance);
+        return original(name, number, destination);
+    };
+    if (internalBypassDepth != 0) {
+        const auto status = invokeOriginal(
+            procedureName,
+            ordinal,
+            &result);
+        if (IsFatal(context)) {
+            return kNativeAccessDenied;
+        }
+        if (status >= kNativeSuccess
+            && !SafeWritePointer(procedureAddress, result)) {
+            static_cast<void>(Fatal(
+                context,
+                "STEAM_NATIVE_SYMBOL_MALFORMED"));
+            return kNativeAccessDenied;
+        }
+        return status;
+    }
+    if (nativeSymbolDelegationAllowance != 0
+        && !IsWithinLoaderCallout(context)
+        && ConsumeNativeDelegation(nativeSymbolDelegationAllowance)) {
+        const auto status = invokeOriginal(
+            procedureName,
+            ordinal,
+            &result);
+        if (IsFatal(context)) {
+            return kNativeAccessDenied;
+        }
+        if (status >= kNativeSuccess
+            && !SafeWritePointer(procedureAddress, result)) {
+            static_cast<void>(Fatal(
+                context,
+                "STEAM_NATIVE_SYMBOL_MALFORMED"));
+            return kNativeAccessDenied;
+        }
+        return status;
+    }
+
+    CallbackLease callback;
+    if (IsFatal(context)) {
+        return kNativeAccessDenied;
+    }
+    if (IsWithinLoaderCallout(context)) {
+        static_cast<void>(Fatal(
+            context,
+            "STEAM_LOADER_CALLOUT_SYMBOL_DENIED"));
+        return kNativeAccessDenied;
+    }
+
+    const bool byOrdinal = procedureName == nullptr && ordinal != 0;
+    std::string requestedName;
+    if ((!byOrdinal && ordinal != 0)
+        || (procedureName == nullptr && ordinal == 0)
+        || (procedureName != nullptr
+            && !CopyNativeProcedureName(procedureName, requestedName))) {
+        static_cast<void>(Fatal(
+            context,
+            "STEAM_NATIVE_SYMBOL_MALFORMED"));
+        return kNativeAccessDenied;
+    }
+    ANSI_STRING stableProcedureName{};
+    PANSI_STRING forwardedName = nullptr;
+    if (!byOrdinal) {
+        stableProcedureName.Buffer = requestedName.data();
+        stableProcedureName.Length = static_cast<USHORT>(
+            requestedName.size());
+        stableProcedureName.MaximumLength = stableProcedureName.Length;
+        forwardedName = &stableProcedureName;
+    }
+
+    if (callback.IsNested()) {
+        if (ModuleIsRequestedTarget(
+                context,
+                static_cast<HMODULE>(module))) {
+            static_cast<void>(Fatal(
+                context,
+                "STEAM_NESTED_PROTECTED_SYMBOL"));
+            return kNativeAccessDenied;
+        }
+        const auto status = invokeOriginal(
+            forwardedName,
+            ordinal,
+            &result);
+        if (IsFatal(context)) {
+            return kNativeAccessDenied;
+        }
+        if (status >= kNativeSuccess
+            && !SafeWritePointer(procedureAddress, result)) {
+            static_cast<void>(Fatal(
+                context,
+                "STEAM_NATIVE_SYMBOL_MALFORMED"));
+            return kNativeAccessDenied;
+        }
+        return status;
+    }
+
+    const auto admission = AdmitModule(
+        context,
+        static_cast<HMODULE>(module));
+    if (!admission.target) {
+        const auto status = invokeOriginal(
+            forwardedName,
+            ordinal,
+            &result);
+        if (IsFatal(context)) {
+            return kNativeAccessDenied;
+        }
+        if (status >= kNativeSuccess
+            && !SafeWritePointer(procedureAddress, result)) {
+            static_cast<void>(Fatal(
+                context,
+                "STEAM_NATIVE_SYMBOL_MALFORMED"));
+            return kNativeAccessDenied;
+        }
+        return status;
+    }
+    if (!admission.admitted || admission.record == nullptr
+        || IsFatal(context)) {
+        return kNativeAccessDenied;
+    }
+    if (byOrdinal) {
+        static_cast<void>(Fatal(context, "STEAM_SYMBOL_UNSUPPORTED"));
+        return kNativeAccessDenied;
+    }
+
+    const auto found = std::find_if(
+        admission.record->protectedExports.begin(),
+        admission.record->protectedExports.end(),
+        [&requestedName](const ProtectedExport& exportEntry) {
+            return exportEntry.name == requestedName;
+        });
+    if (found != admission.record->protectedExports.end()) {
+        result = Steam::SteamFactoryDetourAddress(found->slot);
+        if (result == nullptr || IsFatal(context)
+            || !SafeWritePointer(procedureAddress, result)) {
+            static_cast<void>(Fatal(
+                context,
+                "STEAM_NATIVE_SYMBOL_MALFORMED"));
+            return kNativeAccessDenied;
+        }
+        return kNativeSuccess;
+    }
+
+    const auto status = invokeOriginal(
+        forwardedName,
+        ordinal,
+        &result);
+    if (IsFatal(context)) {
+        return kNativeAccessDenied;
+    }
+    if (status >= kNativeSuccess
+        && !SafeWritePointer(procedureAddress, result)) {
+        static_cast<void>(Fatal(
+            context,
+            "STEAM_NATIVE_SYMBOL_MALFORMED"));
+        return kNativeAccessDenied;
+    }
+    return status;
+}
+
+NTSTATUS NTAPI HookLdrGetProcedureAddress(
+    PVOID const module,
+    PANSI_STRING const procedureName,
+    const ULONG ordinal,
+    PVOID* const procedureAddress) noexcept {
+    const auto context = activeContext.load(std::memory_order_acquire);
+    return GuardNativeProcedureAddress(
+        context,
+        module,
+        procedureName,
+        ordinal,
+        procedureAddress,
+        [&context, module](
+            PANSI_STRING const forwardedName,
+            const ULONG forwardedOrdinal,
+            PVOID* const result) noexcept {
+            return context == nullptr
+                    || context->trampolines.ldrGetProcedureAddress == nullptr
+                ? kNativeAccessDenied
+                : context->trampolines.ldrGetProcedureAddress(
+                    module,
+                    forwardedName,
+                    forwardedOrdinal,
+                    result);
+        });
+}
+
+NTSTATUS NTAPI HookLdrGetProcedureAddressEx(
+    PVOID const module,
+    PANSI_STRING const procedureName,
+    const ULONG ordinal,
+    PVOID* const procedureAddress,
+    const ULONG flags) noexcept {
+    const auto context = activeContext.load(std::memory_order_acquire);
+    return GuardNativeProcedureAddress(
+        context,
+        module,
+        procedureName,
+        ordinal,
+        procedureAddress,
+        [&context, module, flags](
+            PANSI_STRING const forwardedName,
+            const ULONG forwardedOrdinal,
+            PVOID* const result) noexcept {
+            return context == nullptr
+                    || context->trampolines.ldrGetProcedureAddressEx == nullptr
+                ? kNativeAccessDenied
+                : context->trampolines.ldrGetProcedureAddressEx(
+                    module,
+                    forwardedName,
+                    forwardedOrdinal,
+                    result,
+                    flags);
+        });
+}
+
+NTSTATUS NTAPI HookLdrGetProcedureAddressForCaller(
+    PVOID const module,
+    PANSI_STRING const procedureName,
+    const ULONG ordinal,
+    PVOID* const procedureAddress,
+    const ULONG flags,
+    PVOID const callerAddress) noexcept {
+    const auto context = activeContext.load(std::memory_order_acquire);
+    return GuardNativeProcedureAddress(
+        context,
+        module,
+        procedureName,
+        ordinal,
+        procedureAddress,
+        [&context,
+         module,
+         flags,
+         callerAddress](
+            PANSI_STRING const forwardedName,
+            const ULONG forwardedOrdinal,
+            PVOID* const result) noexcept {
+            return context == nullptr
+                    || context->trampolines.
+                        ldrGetProcedureAddressForCaller == nullptr
+                ? kNativeAccessDenied
+                : context->trampolines.ldrGetProcedureAddressForCaller(
+                    module,
+                    forwardedName,
+                    forwardedOrdinal,
+                    result,
+                    flags,
+                    callerAddress);
+        });
+}
+
 struct LoaderHookDefinition {
+    HMODULE module;
     const char* procedure;
     void* detour;
     void** original;
 };
 
-std::array<LoaderHookDefinition, 5> LoaderHooks(GateContext& context) noexcept {
-    return {{
-        {"LoadLibraryA", reinterpret_cast<void*>(&HookLoadLibraryA),
+std::vector<LoaderHookDefinition> LoaderHooks(
+    GateContext& context,
+    const HMODULE kernel,
+    const HMODULE ntdll) {
+    std::vector<LoaderHookDefinition> definitions{{
+        {kernel, "LoadLibraryA", reinterpret_cast<void*>(&HookLoadLibraryA),
          reinterpret_cast<void**>(&context.trampolines.loadLibraryA)},
-        {"LoadLibraryW", reinterpret_cast<void*>(&HookLoadLibraryW),
+        {kernel, "LoadLibraryW", reinterpret_cast<void*>(&HookLoadLibraryW),
          reinterpret_cast<void**>(&context.trampolines.loadLibraryW)},
-        {"LoadLibraryExA", reinterpret_cast<void*>(&HookLoadLibraryExA),
+        {kernel, "LoadLibraryExA", reinterpret_cast<void*>(&HookLoadLibraryExA),
          reinterpret_cast<void**>(&context.trampolines.loadLibraryExA)},
-        {"LoadLibraryExW", reinterpret_cast<void*>(&HookLoadLibraryExW),
+        {kernel, "LoadLibraryExW", reinterpret_cast<void*>(&HookLoadLibraryExW),
          reinterpret_cast<void**>(&context.trampolines.loadLibraryExW)},
-        {"GetProcAddress", reinterpret_cast<void*>(&HookGetProcAddress),
+        {kernel, "GetProcAddress", reinterpret_cast<void*>(&HookGetProcAddress),
          reinterpret_cast<void**>(&context.trampolines.getProcAddress)},
+        {ntdll, "LdrLoadDll", reinterpret_cast<void*>(&HookLdrLoadDll),
+         reinterpret_cast<void**>(&context.trampolines.ldrLoadDll)},
+        {ntdll, "LdrGetProcedureAddress",
+         reinterpret_cast<void*>(&HookLdrGetProcedureAddress),
+         reinterpret_cast<void**>(
+             &context.trampolines.ldrGetProcedureAddress)},
     }};
+    definitions.reserve(9);
+    if (GetProcAddress(ntdll, "LdrGetProcedureAddressEx") != nullptr) {
+        definitions.push_back({
+            ntdll,
+            "LdrGetProcedureAddressEx",
+            reinterpret_cast<void*>(&HookLdrGetProcedureAddressEx),
+            reinterpret_cast<void**>(
+                &context.trampolines.ldrGetProcedureAddressEx),
+        });
+    }
+    if (GetProcAddress(ntdll, "LdrGetProcedureAddressForCaller") != nullptr) {
+        definitions.push_back({
+            ntdll,
+            "LdrGetProcedureAddressForCaller",
+            reinterpret_cast<void*>(&HookLdrGetProcedureAddressForCaller),
+            reinterpret_cast<void**>(
+                &context.trampolines.ldrGetProcedureAddressForCaller),
+        });
+    }
+    return definitions;
 }
 
 bool BuildContext(
@@ -1723,12 +2367,14 @@ DeferredModuleGateInstallStatus InstallWithSuspendedProof(
             ready = context->loaderCalloutProbe != nullptr;
         }
         if (ready) {
-            const auto definitions = LoaderHooks(*context);
+            const auto definitions = LoaderHooks(*context, kernel, ntdll);
             lifecycle.hooks.reserve(
                 definitions.size() + Steam::kSteamFactorySlotCapacity);
             for (const auto& definition : definitions) {
                 void* const target = reinterpret_cast<void*>(
-                    GetProcAddress(kernel, definition.procedure));
+                    GetProcAddress(
+                        definition.module,
+                        definition.procedure));
                 if (target == nullptr
                     || Hooks::CreateHook(
                         target,
@@ -1844,6 +2490,17 @@ void SetGateCleanupPhaseEvents(
         std::memory_order_release);
 }
 
+void SetFactoryPublicationPauseEvents(
+    void* const afterApply,
+    void* const allowRollback) noexcept {
+    afterFactoryApplyEvent.store(
+        static_cast<HANDLE>(afterApply),
+        std::memory_order_release);
+    allowFactoryRollbackEvent.store(
+        static_cast<HANDLE>(allowRollback),
+        std::memory_order_release);
+}
+
 void HoldGateCallbackWhileWaitingForMutation(
     void* const entered,
     void* const allowMutation,
@@ -1881,6 +2538,31 @@ std::size_t GateRetainedFactorySlotCountForReporter() noexcept {
         context->slots.begin(),
         context->slots.end(),
         true));
+}
+
+std::int32_t CallOriginalLdrLoadDllForSyntheticCallout(
+    const std::wstring& path,
+    void** const module) noexcept {
+    if (module == nullptr || path.empty()
+        || path.size() > USHRT_MAX / sizeof(wchar_t)) {
+        return static_cast<std::int32_t>(0xc000000dU);
+    }
+    *module = nullptr;
+    const auto context = activeContext.load(std::memory_order_acquire);
+    const auto load = context == nullptr
+        ? nullptr
+        : context->trampolines.ldrLoadDll;
+    if (load == nullptr) {
+        return static_cast<std::int32_t>(0xc0000139U);
+    }
+    UNICODE_STRING name{};
+    name.Buffer = const_cast<PWSTR>(path.data());
+    name.Length = static_cast<USHORT>(path.size() * sizeof(wchar_t));
+    name.MaximumLength = name.Length;
+    HANDLE loaded = nullptr;
+    const auto status = load(nullptr, nullptr, &name, &loaded);
+    *module = loaded;
+    return status;
 }
 
 }  // namespace Testing

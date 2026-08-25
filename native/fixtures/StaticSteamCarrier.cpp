@@ -20,3 +20,8 @@ extern "C" __declspec(dllexport) bool __cdecl
 StaticSteamCarrierReady() noexcept {
     return true;
 }
+
+extern "C" __declspec(dllexport) void* __cdecl
+StaticSteamCarrierFactory(const char*) noexcept {
+    return nullptr;
+}

@@ -19,3 +19,8 @@ extern "C" __declspec(dllexport) bool __cdecl
 StaticSteamOuterReady() noexcept {
     return true;
 }
+
+extern "C" __declspec(dllexport) void* __cdecl
+StaticSteamOuterFactory(const char*) noexcept {
+    return nullptr;
+}

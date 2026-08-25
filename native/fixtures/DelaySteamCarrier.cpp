@@ -18,3 +18,8 @@ extern "C" __declspec(dllexport) bool __cdecl
 DelaySteamCarrierReady() noexcept {
     return true;
 }
+
+extern "C" __declspec(dllexport) void* __cdecl
+DelaySteamCarrierFactory(const char*) noexcept {
+    return nullptr;
+}

@@ -125,6 +125,15 @@ set_target_properties(DSRRandomizer.DelaySteamCarrier PROPERTIES
   CXX_EXTENSIONS OFF
   OUTPUT_NAME "DSRRandomizer.DelaySteamCarrier")
 
+add_library(DSRRandomizer.NativeLoaderCallout SHARED
+  fixtures/NativeLoaderCallout.cpp)
+target_compile_features(DSRRandomizer.NativeLoaderCallout PRIVATE cxx_std_20)
+target_link_libraries(DSRRandomizer.NativeLoaderCallout PRIVATE ntdll)
+dsr_configure_target(DSRRandomizer.NativeLoaderCallout)
+set_target_properties(DSRRandomizer.NativeLoaderCallout PROPERTIES
+  CXX_EXTENSIONS OFF
+  OUTPUT_NAME "DSRRandomizer.NativeLoaderCallout")
+
 add_executable(ProtectionBootstrapTests
   tests/ProtectionBootstrapTests.cpp)
 target_compile_features(ProtectionBootstrapTests PRIVATE cxx_std_20)
@@ -237,6 +246,7 @@ set_target_properties(SteamGuardHardeningTests PROPERTIES
   CXX_EXTENSIONS OFF)
 add_dependencies(SteamGuardHardeningTests
   DSRRandomizer.DelaySteamCarrier
+  DSRRandomizer.NativeLoaderCallout
   DSRRandomizer.StaticSteamOuter)
 
 add_test(
@@ -245,4 +255,5 @@ add_test(
     $<TARGET_FILE:DSRRandomizer.FakeSteamApi>
     $<TARGET_FILE:DSRRandomizer.NestedSteamLoader>
     $<TARGET_FILE:DSRRandomizer.NestedSteamBridge>
-    $<TARGET_FILE:DSRRandomizer.StaticSteamCarrier>)
+    $<TARGET_FILE:DSRRandomizer.StaticSteamCarrier>
+    $<TARGET_FILE:DSRRandomizer.NativeLoaderCallout>)

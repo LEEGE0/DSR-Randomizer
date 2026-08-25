@@ -28,11 +28,30 @@ using DSRRandomizer::Modules::DeferredModuleExpectation;
 using Factory = DSRRandomizer::Steam::Synthetic::FactoryFunction;
 using QueryCounter = std::uint32_t(__cdecl*)() noexcept;
 using SetIdentityBlockEvents = void(__cdecl*)(HANDLE, HANDLE) noexcept;
+using SetFactoryBlockEvents = void(__cdecl*)(HANDLE, HANDLE) noexcept;
 using LdrLoadDllFunction = NTSTATUS(NTAPI*)(
     PWSTR,
     PULONG,
     PUNICODE_STRING,
     PHANDLE);
+using LdrGetProcedureAddressFunction = NTSTATUS(NTAPI*)(
+    PVOID,
+    PANSI_STRING,
+    ULONG,
+    PVOID*);
+using LdrGetProcedureAddressExFunction = NTSTATUS(NTAPI*)(
+    PVOID,
+    PANSI_STRING,
+    ULONG,
+    PVOID*,
+    ULONG);
+using LdrGetProcedureAddressForCallerFunction = NTSTATUS(NTAPI*)(
+    PVOID,
+    PANSI_STRING,
+    ULONG,
+    PVOID*,
+    ULONG,
+    PVOID);
 
 std::atomic<std::uint32_t> fatalCount{};
 std::atomic<const char*> lastFatal{};
@@ -206,6 +225,14 @@ DeferredModuleGateConfiguration Configuration(
     return configuration;
 }
 
+DeferredModuleGateConfiguration ProtectedOuterConfiguration(
+    const std::wstring& path,
+    const std::string& factoryExport) {
+    auto configuration = Configuration(path, true);
+    configuration.modules.front().protectedFactoryExports = {factoryExport};
+    return configuration;
+}
+
 DeferredModuleGateInstallStatus InstallTestGate(
     const DeferredModuleGateConfiguration& configuration) {
     return DSRRandomizer::Modules::Testing::
@@ -295,26 +322,50 @@ int RunIdentityTeardown(const std::wstring& fakePath) {
         module,
         "FakeSteamIdentityCallCount");
     if (module == nullptr || rawFactory == nullptr || setBlock == nullptr
-        || identityCount == nullptr
-        || InstallTestGate(Configuration(fakePath, false))
-            != DeferredModuleGateInstallStatus::Success) {
+        || identityCount == nullptr) {
         return Fail("identity teardown setup failed");
     }
-    void* const identity = rawFactory("SteamUser023");
+    void* identity = nullptr;
     const HANDLE entered = MakeManualEvent();
     const HANDLE release = MakeManualEvent();
     const HANDLE beforeFactoryDrain = MakeManualEvent();
     const HANDLE cleanupDone = MakeManualEvent();
-    if (identity == nullptr || entered == nullptr || release == nullptr
+    const HANDLE invocationStart = MakeManualEvent();
+    const HANDLE cleanupStart = MakeManualEvent();
+    if (entered == nullptr || release == nullptr
         || beforeFactoryDrain == nullptr || cleanupDone == nullptr) {
         return Fail("identity teardown events were unavailable");
+    }
+    bool invocationResult = true;
+    DeferredModuleGateCleanupStatus cleanupStatus =
+        DeferredModuleGateCleanupStatus::Incomplete;
+    std::thread invocation([&]() {
+        WaitForSingleObject(invocationStart, INFINITE);
+        invocationResult = identity != nullptr && InvokeSynthetic(identity);
+    });
+    std::thread cleanup([&]() {
+        WaitForSingleObject(cleanupStart, INFINITE);
+        cleanupStatus = DSRRandomizer::Modules::UninstallDeferredModuleGate();
+        SetEvent(cleanupDone);
+    });
+    if (invocationStart == nullptr || cleanupStart == nullptr
+        || InstallTestGate(Configuration(fakePath, false))
+            != DeferredModuleGateInstallStatus::Success) {
+        SetEvent(invocationStart);
+        SetEvent(cleanupStart);
+        invocation.join();
+        cleanup.join();
+        return Fail("identity teardown gate setup failed");
+    }
+    identity = rawFactory("SteamUser023");
+    if (identity == nullptr) {
+        ExitProcess(80);
     }
     setBlock(entered, release);
     DSRRandomizer::Modules::Testing::SetGateCleanupPhaseEvents(
         nullptr,
         beforeFactoryDrain);
-    bool invocationResult = true;
-    std::thread invocation([&]() { invocationResult = InvokeSynthetic(identity); });
+    SetEvent(invocationStart);
     if (!WaitSignaled(entered)) {
         std::cerr << "identity raw entry count before timeout: "
                   << identityCount() << " fatal count: " << fatalCount.load()
@@ -323,12 +374,7 @@ int RunIdentityTeardown(const std::wstring& fakePath) {
                   << '\n';
         ExitProcess(81);
     }
-    DeferredModuleGateCleanupStatus cleanupStatus =
-        DeferredModuleGateCleanupStatus::Incomplete;
-    std::thread cleanup([&]() {
-        cleanupStatus = DSRRandomizer::Modules::UninstallDeferredModuleGate();
-        SetEvent(cleanupDone);
-    });
+    SetEvent(cleanupStart);
     if (!WaitSignaled(beforeFactoryDrain)) {
         ExitProcess(82);
     }
@@ -338,7 +384,14 @@ int RunIdentityTeardown(const std::wstring& fakePath) {
     cleanup.join();
     setBlock(nullptr, nullptr);
     DSRRandomizer::Modules::Testing::SetGateCleanupPhaseEvents(nullptr, nullptr);
-    CloseEvents({entered, release, beforeFactoryDrain, cleanupDone});
+    CloseEvents({
+        entered,
+        release,
+        beforeFactoryDrain,
+        cleanupDone,
+        invocationStart,
+        cleanupStart,
+    });
     FreeLibrary(module);
     if (!cleanupBlocked || invocationResult
         || cleanupStatus != DeferredModuleGateCleanupStatus::Success) {
@@ -348,25 +401,22 @@ int RunIdentityTeardown(const std::wstring& fakePath) {
 }
 
 int RunMutationBarrier(const std::wstring& fakePath) {
-    if (InstallTestGate(Configuration(fakePath, true))
-        != DeferredModuleGateInstallStatus::Success) {
-        return Fail("mutation barrier gate setup failed");
-    }
     const HANDLE callbackEntered = MakeManualEvent();
     const HANDLE allowMutation = MakeManualEvent();
     const HANDLE mutationAcquired = MakeManualEvent();
     const HANDLE callbackRelease = MakeManualEvent();
     const HANDLE afterInitialDisable = MakeManualEvent();
     const HANDLE cleanupDone = MakeManualEvent();
+    const HANDLE callbackStart = MakeManualEvent();
+    const HANDLE cleanupStart = MakeManualEvent();
     if (callbackEntered == nullptr || allowMutation == nullptr
         || mutationAcquired == nullptr || callbackRelease == nullptr
-        || afterInitialDisable == nullptr || cleanupDone == nullptr) {
+        || afterInitialDisable == nullptr || cleanupDone == nullptr
+        || callbackStart == nullptr || cleanupStart == nullptr) {
         return Fail("mutation barrier events were unavailable");
     }
-    DSRRandomizer::Modules::Testing::SetGateCleanupPhaseEvents(
-        afterInitialDisable,
-        nullptr);
     std::thread callback([&]() {
+        WaitForSingleObject(callbackStart, INFINITE);
         DSRRandomizer::Modules::Testing::
             HoldGateCallbackWhileWaitingForMutation(
                 callbackEntered,
@@ -374,15 +424,31 @@ int RunMutationBarrier(const std::wstring& fakePath) {
                 mutationAcquired,
                 callbackRelease);
     });
-    if (!WaitSignaled(callbackEntered)) {
-        ExitProcess(83);
-    }
     DeferredModuleGateCleanupStatus cleanupStatus =
         DeferredModuleGateCleanupStatus::Incomplete;
     std::thread cleanup([&]() {
+        WaitForSingleObject(cleanupStart, INFINITE);
         cleanupStatus = DSRRandomizer::Modules::UninstallDeferredModuleGate();
         SetEvent(cleanupDone);
     });
+    if (InstallTestGate(Configuration(fakePath, true))
+        != DeferredModuleGateInstallStatus::Success) {
+        SetEvent(callbackStart);
+        SetEvent(allowMutation);
+        SetEvent(callbackRelease);
+        SetEvent(cleanupStart);
+        callback.join();
+        cleanup.join();
+        return Fail("mutation barrier gate setup failed");
+    }
+    DSRRandomizer::Modules::Testing::SetGateCleanupPhaseEvents(
+        afterInitialDisable,
+        nullptr);
+    SetEvent(callbackStart);
+    if (!WaitSignaled(callbackEntered)) {
+        ExitProcess(83);
+    }
+    SetEvent(cleanupStart);
     if (!WaitSignaled(afterInitialDisable)) {
         ExitProcess(84);
     }
@@ -403,6 +469,8 @@ int RunMutationBarrier(const std::wstring& fakePath) {
         callbackRelease,
         afterInitialDisable,
         cleanupDone,
+        callbackStart,
+        cleanupStart,
     });
     return completed
         ? 0
@@ -433,6 +501,88 @@ int RunPostCreateFailure(const std::wstring& fakePath) {
     return safelyRetained && cleanup == DeferredModuleGateCleanupStatus::Success
         ? 0
         : Fail("post-create failure orphaned hook state or reported before deny");
+}
+
+int RunActiveFactoryRollback(const std::wstring& fakePath) {
+    const HMODULE module = LoadLibraryW(fakePath.c_str());
+    const auto rawFactory = Resolve<Factory>(module, "FakeSteamFactory");
+    const auto setFactoryBlock = Resolve<SetFactoryBlockEvents>(
+        module,
+        "FakeSteamSetFactoryBlockEvents");
+    const HANDLE afterApply = MakeManualEvent();
+    const HANDLE allowRollback = MakeManualEvent();
+    const HANDLE factoryEntered = MakeManualEvent();
+    const HANDLE factoryRelease = MakeManualEvent();
+    const HANDLE beforeFactoryDrain = MakeManualEvent();
+    const HANDLE installDone = MakeManualEvent();
+    const HANDLE installStart = MakeManualEvent();
+    const HANDLE callbackStart = MakeManualEvent();
+    if (module == nullptr || rawFactory == nullptr || setFactoryBlock == nullptr
+        || afterApply == nullptr || allowRollback == nullptr
+        || factoryEntered == nullptr || factoryRelease == nullptr
+        || beforeFactoryDrain == nullptr || installDone == nullptr
+        || installStart == nullptr || callbackStart == nullptr) {
+        return Fail("active factory rollback setup failed");
+    }
+    setFactoryBlock(factoryEntered, factoryRelease);
+    DSRRandomizer::Modules::Testing::SetFactoryPublicationPauseEvents(
+        afterApply,
+        allowRollback);
+    DSRRandomizer::Modules::Testing::SetGateCleanupPhaseEvents(
+        nullptr,
+        beforeFactoryDrain);
+    DSRRandomizer::Modules::Testing::FailNextFactoryPublication();
+    DeferredModuleGateInstallStatus installStatus =
+        DeferredModuleGateInstallStatus::Success;
+    void* callbackResult = reinterpret_cast<void*>(1);
+    std::thread callback([&]() {
+        WaitForSingleObject(callbackStart, INFINITE);
+        callbackResult = rawFactory("SteamUser023");
+    });
+    std::thread install([&]() {
+        WaitForSingleObject(installStart, INFINITE);
+        installStatus = InstallTestGate(Configuration(fakePath, false));
+        SetEvent(installDone);
+    });
+    SetEvent(installStart);
+    if (!WaitSignaled(afterApply)) {
+        ExitProcess(102);
+    }
+    SetEvent(callbackStart);
+    if (!WaitSignaled(factoryEntered)) {
+        ExitProcess(103);
+    }
+    FreeLibrary(module);
+    SetEvent(allowRollback);
+    if (!WaitSignaled(beforeFactoryDrain)) {
+        ExitProcess(104);
+    }
+    const bool rollbackBlocked =
+        WaitForSingleObject(installDone, 0) == WAIT_TIMEOUT;
+    SetEvent(factoryRelease);
+    callback.join();
+    install.join();
+    DSRRandomizer::Modules::Testing::SetFactoryPublicationPauseEvents(
+        nullptr,
+        nullptr);
+    DSRRandomizer::Modules::Testing::SetGateCleanupPhaseEvents(nullptr, nullptr);
+    const bool unloaded = GetModuleHandleW(FileName(fakePath).c_str()) == nullptr;
+    const auto cleanup = DSRRandomizer::Modules::UninstallDeferredModuleGate();
+    CloseEvents({
+        afterApply,
+        allowRollback,
+        factoryEntered,
+        factoryRelease,
+        beforeFactoryDrain,
+        installDone,
+        installStart,
+        callbackStart,
+    });
+    return rollbackBlocked && callbackResult == nullptr && unloaded
+            && installStatus == DeferredModuleGateInstallStatus::AdmissionFailed
+            && cleanup == DeferredModuleGateCleanupStatus::Success
+        ? 0
+        : Fail("factory rollback released module state before callback drain");
 }
 
 int RunUnhookedLoaderCallout(
@@ -572,6 +722,382 @@ int RunDelayProtectedDependency(
             && cleanup == DeferredModuleGateCleanupStatus::Success
         ? 0
         : Fail("delay protected dependency executed before gate admission");
+}
+
+int RunProtectedOuterDependency(
+    const std::wstring& fakePath,
+    const std::wstring& outerPath,
+    const std::string& factoryExport,
+    const std::initializer_list<std::wstring> absentModules) {
+    if (InstallTestGate(ProtectedOuterConfiguration(outerPath, factoryExport))
+        != DeferredModuleGateInstallStatus::Success) {
+        return Fail("protected outer dependency setup failed");
+    }
+    const HMODULE outer = LoadLibraryW(outerPath.c_str());
+    const auto code = lastFatal.load(std::memory_order_acquire);
+    bool absent = outer == nullptr
+        && fatalCount.load(std::memory_order_acquire) != 0
+        && code != nullptr
+        && std::strcmp(code, "STEAM_DEPENDENCY_CLOSURE_UNAVAILABLE") == 0
+        && GetModuleHandleW(FileName(fakePath).c_str()) == nullptr;
+    for (const auto& module : absentModules) {
+        absent = absent
+            && GetModuleHandleW(FileName(module).c_str()) == nullptr;
+    }
+    const auto cleanup = DSRRandomizer::Modules::UninstallDeferredModuleGate();
+    return absent && cleanup == DeferredModuleGateCleanupStatus::Success
+        ? 0
+        : Fail("protected outer dependency executed before preflight denial");
+}
+
+int RunProtectedOuterDirect(
+    const std::wstring& fakePath,
+    const std::wstring& carrierPath) {
+    return RunProtectedOuterDependency(
+        fakePath,
+        carrierPath,
+        "StaticSteamCarrierFactory",
+        {carrierPath});
+}
+
+int RunProtectedOuterIntermediate(
+    const std::wstring& fakePath,
+    const std::wstring& carrierPath) {
+    const auto slash = carrierPath.find_last_of(L"\\/");
+    const auto outerPath = carrierPath.substr(0, slash + 1)
+        + L"DSRRandomizer.StaticSteamOuter.dll";
+    return RunProtectedOuterDependency(
+        fakePath,
+        outerPath,
+        "StaticSteamOuterFactory",
+        {outerPath, carrierPath});
+}
+
+int RunProtectedOuterDelay(
+    const std::wstring& fakePath,
+    const std::wstring& carrierPath) {
+    const auto slash = carrierPath.find_last_of(L"\\/");
+    const auto delayPath = carrierPath.substr(0, slash + 1)
+        + L"DSRRandomizer.DelaySteamCarrier.dll";
+    return RunProtectedOuterDependency(
+        fakePath,
+        delayPath,
+        "DelaySteamCarrierFactory",
+        {delayPath});
+}
+
+struct NativeApis final {
+    LdrLoadDllFunction load = nullptr;
+    LdrGetProcedureAddressFunction resolve = nullptr;
+    LdrGetProcedureAddressExFunction resolveEx = nullptr;
+    LdrGetProcedureAddressForCallerFunction resolveForCaller = nullptr;
+};
+
+NativeApis ResolveNativeApis() {
+    const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    return {
+        Resolve<LdrLoadDllFunction>(ntdll, "LdrLoadDll"),
+        Resolve<LdrGetProcedureAddressFunction>(
+            ntdll,
+            "LdrGetProcedureAddress"),
+        Resolve<LdrGetProcedureAddressExFunction>(
+            ntdll,
+            "LdrGetProcedureAddressEx"),
+        Resolve<LdrGetProcedureAddressForCallerFunction>(
+            ntdll,
+            "LdrGetProcedureAddressForCaller"),
+    };
+}
+
+UNICODE_STRING NativeName(const std::wstring& path) {
+    UNICODE_STRING name{};
+    name.Buffer = const_cast<PWSTR>(path.data());
+    name.Length = static_cast<USHORT>(path.size() * sizeof(wchar_t));
+    name.MaximumLength = name.Length;
+    return name;
+}
+
+ANSI_STRING NativeProcedure(char* const value) {
+    ANSI_STRING name{};
+    name.Buffer = value;
+    name.Length = static_cast<USHORT>(std::strlen(value));
+    name.MaximumLength = name.Length;
+    return name;
+}
+
+int RunDirectNativeLoad(const std::wstring& fakePath) {
+    const auto native = ResolveNativeApis();
+    if (native.load == nullptr || native.resolve == nullptr
+        || InstallTestGate(Configuration(fakePath, true))
+            != DeferredModuleGateInstallStatus::Success) {
+        return Fail("direct native load setup failed");
+    }
+    auto moduleName = NativeName(fakePath);
+    HANDLE module = nullptr;
+    const auto loadStatus = native.load(
+        nullptr,
+        nullptr,
+        &moduleName,
+        &module);
+    char factoryName[] = "FakeSteamFactory";
+    auto procedureName = NativeProcedure(factoryName);
+    void* factoryAddress = nullptr;
+    const auto symbolStatus = module == nullptr
+        ? static_cast<NTSTATUS>(-1)
+        : native.resolve(module, &procedureName, 0, &factoryAddress);
+    void* const denied = factoryAddress == nullptr
+        ? nullptr
+        : reinterpret_cast<Factory>(factoryAddress)("SteamMatchMaking009");
+    const bool guarded = loadStatus >= 0 && module != nullptr
+        && symbolStatus >= 0
+        && factoryAddress == DSRRandomizer::Steam::SteamFactoryDetourAddress(0)
+        && denied != nullptr && !InvokeSynthetic(denied);
+    const auto cleanup = DSRRandomizer::Modules::UninstallDeferredModuleGate();
+    if (module != nullptr) {
+        FreeLibrary(static_cast<HMODULE>(module));
+    }
+    return guarded && cleanup == DeferredModuleGateCleanupStatus::Success
+        ? 0
+        : Fail("direct native load or symbol returned an unguarded result");
+}
+
+int RunDirectNativeSymbol(const std::wstring& fakePath) {
+    const auto native = ResolveNativeApis();
+    const HMODULE module = LoadLibraryW(fakePath.c_str());
+    const auto rawFactory = Resolve<Factory>(module, "FakeSteamFactory");
+    if (native.resolve == nullptr || module == nullptr || rawFactory == nullptr
+        || InstallTestGate(Configuration(fakePath, false))
+            != DeferredModuleGateInstallStatus::Success) {
+        return Fail("direct native symbol setup failed");
+    }
+    char factoryName[] = "FakeSteamFactory";
+    auto procedureName = NativeProcedure(factoryName);
+    void* result = nullptr;
+    const auto status = native.resolve(
+        module,
+        &procedureName,
+        0,
+        &result);
+    const bool guarded = status >= 0 && result != nullptr
+        && result != reinterpret_cast<void*>(rawFactory)
+        && result == DSRRandomizer::Steam::SteamFactoryDetourAddress(0);
+    const auto cleanup = DSRRandomizer::Modules::UninstallDeferredModuleGate();
+    FreeLibrary(module);
+    return guarded && cleanup == DeferredModuleGateCleanupStatus::Success
+        ? 0
+        : Fail("direct native symbol returned the raw protected export");
+}
+
+int RunDirectNativeSymbolAlternates(const std::wstring& fakePath) {
+    const auto native = ResolveNativeApis();
+    const HMODULE module = LoadLibraryW(fakePath.c_str());
+    const auto rawFactory = Resolve<Factory>(module, "FakeSteamFactory");
+    const auto install = module == nullptr || rawFactory == nullptr
+        ? DeferredModuleGateInstallStatus::InvalidConfiguration
+        : InstallTestGate(Configuration(fakePath, false));
+    if (native.resolveEx == nullptr || native.resolveForCaller == nullptr
+        || module == nullptr || rawFactory == nullptr
+        || install != DeferredModuleGateInstallStatus::Success) {
+        std::cerr << "alternate setup ex=" << (native.resolveEx != nullptr)
+                  << " caller=" << (native.resolveForCaller != nullptr)
+                  << " module=" << (module != nullptr)
+                  << " raw=" << (rawFactory != nullptr)
+                  << " install=" << static_cast<int>(install)
+                  << " fatal="
+                  << (lastFatal.load() == nullptr
+                        ? "(null)"
+                        : lastFatal.load())
+                  << '\n';
+        return Fail("alternate native symbol setup failed");
+    }
+    char factoryName[] = "FakeSteamFactory";
+    auto procedureName = NativeProcedure(factoryName);
+    void* extendedResult = nullptr;
+    const auto extendedStatus = native.resolveEx(
+        module,
+        &procedureName,
+        0,
+        &extendedResult,
+        0);
+    void* callerResult = nullptr;
+    const auto callerStatus = native.resolveForCaller(
+        module,
+        &procedureName,
+        0,
+        &callerResult,
+        0,
+        reinterpret_cast<void*>(&RunDirectNativeSymbolAlternates));
+    void* const detour = DSRRandomizer::Steam::SteamFactoryDetourAddress(0);
+    const bool guarded = extendedStatus >= 0 && callerStatus >= 0
+        && extendedResult == detour && callerResult == detour
+        && extendedResult != reinterpret_cast<void*>(rawFactory);
+    const auto cleanup = DSRRandomizer::Modules::UninstallDeferredModuleGate();
+    FreeLibrary(module);
+    return guarded && cleanup == DeferredModuleGateCleanupStatus::Success
+        ? 0
+        : Fail("alternate native resolver returned the raw protected export");
+}
+
+int RunMalformedNativeLoad(const std::wstring& fakePath) {
+    const auto native = ResolveNativeApis();
+    if (native.load == nullptr
+        || InstallTestGate(Configuration(fakePath, true))
+            != DeferredModuleGateInstallStatus::Success) {
+        return Fail("malformed native load setup failed");
+    }
+    auto malformed = NativeName(fakePath);
+    ++malformed.Length;
+    HANDLE module = reinterpret_cast<HANDLE>(1);
+    const auto status = native.load(nullptr, nullptr, &malformed, &module);
+    const auto code = lastFatal.load(std::memory_order_acquire);
+    const bool denied = status < 0 && module == nullptr
+        && code != nullptr
+        && std::strcmp(code, "STEAM_NATIVE_LOAD_MALFORMED") == 0
+        && GetModuleHandleW(FileName(fakePath).c_str()) == nullptr;
+    const auto cleanup = DSRRandomizer::Modules::UninstallDeferredModuleGate();
+    return denied && cleanup == DeferredModuleGateCleanupStatus::Success
+        ? 0
+        : Fail("malformed native load string did not fail closed");
+}
+
+int RunAmbiguousNativeLoad(const std::wstring& fakePath) {
+    const auto native = ResolveNativeApis();
+    if (native.load == nullptr
+        || InstallTestGate(Configuration(fakePath, true))
+            != DeferredModuleGateInstallStatus::Success) {
+        return Fail("ambiguous native load setup failed");
+    }
+    auto ambiguousPath = FileName(fakePath);
+    auto ambiguous = NativeName(ambiguousPath);
+    HANDLE module = reinterpret_cast<HANDLE>(1);
+    const auto status = native.load(nullptr, nullptr, &ambiguous, &module);
+    const auto code = lastFatal.load(std::memory_order_acquire);
+    const bool denied = status < 0 && module == nullptr
+        && code != nullptr
+        && std::strcmp(code, "STEAM_NATIVE_LOAD_PATH_AMBIGUOUS") == 0;
+    const auto cleanup = DSRRandomizer::Modules::UninstallDeferredModuleGate();
+    return denied && cleanup == DeferredModuleGateCleanupStatus::Success
+        ? 0
+        : Fail("ambiguous native load path did not fail closed");
+}
+
+int RunMalformedNativeSymbol(const std::wstring& fakePath) {
+    const auto native = ResolveNativeApis();
+    const HMODULE module = LoadLibraryW(fakePath.c_str());
+    if (native.resolve == nullptr || module == nullptr
+        || InstallTestGate(Configuration(fakePath, false))
+            != DeferredModuleGateInstallStatus::Success) {
+        return Fail("malformed native symbol setup failed");
+    }
+    char factoryName[] = "FakeSteamFactory";
+    auto malformed = NativeProcedure(factoryName);
+    malformed.MaximumLength = static_cast<USHORT>(malformed.Length - 1);
+    void* result = reinterpret_cast<void*>(1);
+    const auto status = native.resolve(module, &malformed, 0, &result);
+    const auto code = lastFatal.load(std::memory_order_acquire);
+    const bool denied = status < 0 && result == nullptr
+        && code != nullptr
+        && std::strcmp(code, "STEAM_NATIVE_SYMBOL_MALFORMED") == 0;
+    const auto cleanup = DSRRandomizer::Modules::UninstallDeferredModuleGate();
+    FreeLibrary(module);
+    return denied && cleanup == DeferredModuleGateCleanupStatus::Success
+        ? 0
+        : Fail("malformed native symbol string did not fail closed");
+}
+
+int RunNativeOrdinal(const std::wstring& fakePath) {
+    const auto native = ResolveNativeApis();
+    const HMODULE module = LoadLibraryW(fakePath.c_str());
+    if (native.resolve == nullptr || module == nullptr
+        || InstallTestGate(Configuration(fakePath, false))
+            != DeferredModuleGateInstallStatus::Success) {
+        return Fail("native ordinal setup failed");
+    }
+    void* result = reinterpret_cast<void*>(1);
+    const auto status = native.resolve(module, nullptr, 1, &result);
+    const auto code = lastFatal.load(std::memory_order_acquire);
+    const bool denied = status < 0 && result == nullptr
+        && code != nullptr
+        && std::strcmp(code, "STEAM_SYMBOL_UNSUPPORTED") == 0;
+    const auto cleanup = DSRRandomizer::Modules::UninstallDeferredModuleGate();
+    FreeLibrary(module);
+    return denied && cleanup == DeferredModuleGateCleanupStatus::Success
+        ? 0
+        : Fail("native protected ordinal did not fail before raw resolution");
+}
+
+int RunNativeLoaderCallout(
+    const std::wstring& fakePath,
+    const std::wstring& calloutPath,
+    const wchar_t* const mode,
+    const char* const expectedFatal,
+    const bool eager) {
+    HMODULE fake = nullptr;
+    if (eager) {
+        fake = LoadLibraryW(fakePath.c_str());
+    }
+    if ((eager && fake == nullptr)
+        || InstallTestGate(Configuration(fakePath, !eager))
+            != DeferredModuleGateInstallStatus::Success
+        || !SetEnvironmentVariableW(
+            L"DSR_RANDOMIZER_SYNTHETIC_NATIVE_TARGET",
+            fakePath.c_str())
+        || !SetEnvironmentVariableW(
+            L"DSR_RANDOMIZER_SYNTHETIC_NATIVE_MODE",
+            mode)) {
+        return Fail("native loader-callout setup failed");
+    }
+    void* outer = nullptr;
+    static_cast<void>(DSRRandomizer::Modules::Testing::
+        CallOriginalLdrLoadDllForSyntheticCallout(calloutPath, &outer));
+    SetEnvironmentVariableW(L"DSR_RANDOMIZER_SYNTHETIC_NATIVE_TARGET", nullptr);
+    SetEnvironmentVariableW(L"DSR_RANDOMIZER_SYNTHETIC_NATIVE_MODE", nullptr);
+    const auto code = lastFatal.load(std::memory_order_acquire);
+    const bool denied = fatalCount.load(std::memory_order_acquire) != 0
+        && code != nullptr && std::strcmp(code, expectedFatal) == 0
+        && (eager || GetModuleHandleW(FileName(fakePath).c_str()) == nullptr);
+    const auto cleanup = DSRRandomizer::Modules::UninstallDeferredModuleGate();
+    if (outer != nullptr) {
+        FreeLibrary(static_cast<HMODULE>(outer));
+    }
+    if (fake != nullptr) {
+        FreeLibrary(fake);
+    }
+    return denied && cleanup == DeferredModuleGateCleanupStatus::Success
+        ? 0
+        : Fail("native loader callout published a protected result");
+}
+
+int RunNativeCleanup(const std::wstring& fakePath) {
+    const auto native = ResolveNativeApis();
+    if (native.load == nullptr || native.resolve == nullptr
+        || InstallTestGate(Configuration(fakePath, true))
+            != DeferredModuleGateInstallStatus::Success
+        || DSRRandomizer::Modules::UninstallDeferredModuleGate()
+            != DeferredModuleGateCleanupStatus::Success) {
+        return Fail("native cleanup setup failed");
+    }
+    auto moduleName = NativeName(fakePath);
+    HANDLE module = nullptr;
+    const auto loadStatus = native.load(nullptr, nullptr, &moduleName, &module);
+    char factoryName[] = "FakeSteamFactory";
+    auto procedureName = NativeProcedure(factoryName);
+    void* nativeFactory = nullptr;
+    const auto symbolStatus = module == nullptr
+        ? static_cast<NTSTATUS>(-1)
+        : native.resolve(module, &procedureName, 0, &nativeFactory);
+    const auto win32Factory = module == nullptr
+        ? nullptr
+        : GetProcAddress(
+            static_cast<HMODULE>(module),
+            "FakeSteamFactory");
+    const bool restored = loadStatus >= 0 && symbolStatus >= 0
+        && module != nullptr && nativeFactory != nullptr
+        && nativeFactory == reinterpret_cast<void*>(win32Factory);
+    if (module != nullptr) {
+        FreeLibrary(static_cast<HMODULE>(module));
+    }
+    return restored ? 0 : Fail("native hooks survived successful gate cleanup");
 }
 
 int RunEagerReplacement(const std::wstring& fakePath) {
@@ -787,10 +1313,12 @@ DWORD RunChild(
     const std::wstring& fakePath,
     const std::wstring& nestedPath,
     const std::wstring& bridgePath,
-    const std::wstring& carrierPath) {
+    const std::wstring& carrierPath,
+    const std::wstring& calloutPath) {
     auto command = Quote(CurrentExecutablePath()) + L" --child " + mode
         + L" " + Quote(fakePath) + L" " + Quote(nestedPath)
-        + L" " + Quote(bridgePath) + L" " + Quote(carrierPath);
+        + L" " + Quote(bridgePath) + L" " + Quote(carrierPath)
+        + L" " + Quote(calloutPath);
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
     PROCESS_INFORMATION process{};
@@ -825,12 +1353,14 @@ int RunParent(
     const std::wstring& fakePath,
     const std::wstring& nestedPath,
     const std::wstring& bridgePath,
-    const std::wstring& carrierPath) {
+    const std::wstring& carrierPath,
+    const std::wstring& calloutPath) {
     constexpr std::array modes{
         L"returning-fatal",
         L"identity-teardown",
         L"mutation-barrier",
         L"post-create-failure",
+        L"active-factory-rollback",
         L"eager-replacement",
         L"deferred-replacement",
         L"duplicate-basename",
@@ -841,6 +1371,20 @@ int RunParent(
         L"static-protected-dependency",
         L"static-protected-import-closure",
         L"delay-protected-dependency",
+        L"protected-outer-direct",
+        L"protected-outer-intermediate",
+        L"protected-outer-delay",
+        L"direct-native-load",
+        L"direct-native-symbol",
+        L"direct-native-symbol-alternates",
+        L"malformed-native-load",
+        L"ambiguous-native-load",
+        L"malformed-native-symbol",
+        L"native-ordinal",
+        L"native-load-callout",
+        L"win32-symbol-callout",
+        L"native-symbol-callout",
+        L"native-cleanup",
         L"concurrent-groups",
         L"rollback-failure",
         L"production-invariant",
@@ -851,7 +1395,8 @@ int RunParent(
             fakePath,
             nestedPath,
             bridgePath,
-            carrierPath);
+            carrierPath,
+            calloutPath);
         if (exit != 0) {
             std::wcerr << L"hardening child failed: " << mode
                        << L" exit=" << exit << L'\n';
@@ -864,19 +1409,21 @@ int RunParent(
 }  // namespace
 
 int wmain(const int argc, wchar_t** const argv) {
-    if (argc == 5) {
+    if (argc == 6) {
         return RunParent(
             CanonicalDosPath(argv[1]),
             CanonicalDosPath(argv[2]),
             CanonicalDosPath(argv[3]),
-            CanonicalDosPath(argv[4]));
+            CanonicalDosPath(argv[4]),
+            CanonicalDosPath(argv[5]));
     }
-    if (argc == 7 && std::wstring_view(argv[1]) == L"--child") {
+    if (argc == 8 && std::wstring_view(argv[1]) == L"--child") {
         const std::wstring_view mode(argv[2]);
         const std::wstring fakePath = CanonicalDosPath(argv[3]);
         const std::wstring nestedPath = CanonicalDosPath(argv[4]);
         const std::wstring bridgePath = CanonicalDosPath(argv[5]);
         const std::wstring carrierPath = CanonicalDosPath(argv[6]);
+        const std::wstring calloutPath = CanonicalDosPath(argv[7]);
         if (mode == L"returning-fatal") {
             return RunReturningFatal(fakePath);
         }
@@ -888,6 +1435,9 @@ int wmain(const int argc, wchar_t** const argv) {
         }
         if (mode == L"post-create-failure") {
             return RunPostCreateFailure(fakePath);
+        }
+        if (mode == L"active-factory-rollback") {
+            return RunActiveFactoryRollback(fakePath);
         }
         if (mode == L"eager-replacement") {
             return RunEagerReplacement(fakePath);
@@ -921,6 +1471,63 @@ int wmain(const int argc, wchar_t** const argv) {
         }
         if (mode == L"delay-protected-dependency") {
             return RunDelayProtectedDependency(fakePath, carrierPath);
+        }
+        if (mode == L"protected-outer-direct") {
+            return RunProtectedOuterDirect(fakePath, carrierPath);
+        }
+        if (mode == L"protected-outer-intermediate") {
+            return RunProtectedOuterIntermediate(fakePath, carrierPath);
+        }
+        if (mode == L"protected-outer-delay") {
+            return RunProtectedOuterDelay(fakePath, carrierPath);
+        }
+        if (mode == L"direct-native-load") {
+            return RunDirectNativeLoad(fakePath);
+        }
+        if (mode == L"direct-native-symbol") {
+            return RunDirectNativeSymbol(fakePath);
+        }
+        if (mode == L"direct-native-symbol-alternates") {
+            return RunDirectNativeSymbolAlternates(fakePath);
+        }
+        if (mode == L"malformed-native-load") {
+            return RunMalformedNativeLoad(fakePath);
+        }
+        if (mode == L"ambiguous-native-load") {
+            return RunAmbiguousNativeLoad(fakePath);
+        }
+        if (mode == L"malformed-native-symbol") {
+            return RunMalformedNativeSymbol(fakePath);
+        }
+        if (mode == L"native-ordinal") {
+            return RunNativeOrdinal(fakePath);
+        }
+        if (mode == L"native-load-callout") {
+            return RunNativeLoaderCallout(
+                fakePath,
+                calloutPath,
+                L"load",
+                "STEAM_LOADER_CALLOUT_LOAD_DENIED",
+                false);
+        }
+        if (mode == L"win32-symbol-callout") {
+            return RunNativeLoaderCallout(
+                fakePath,
+                calloutPath,
+                L"getproc",
+                "STEAM_LOADER_CALLOUT_SYMBOL_DENIED",
+                true);
+        }
+        if (mode == L"native-symbol-callout") {
+            return RunNativeLoaderCallout(
+                fakePath,
+                calloutPath,
+                L"ldrgetproc",
+                "STEAM_LOADER_CALLOUT_SYMBOL_DENIED",
+                true);
+        }
+        if (mode == L"native-cleanup") {
+            return RunNativeCleanup(fakePath);
         }
         if (mode == L"concurrent-groups") {
             return RunConcurrentGroups(fakePath);

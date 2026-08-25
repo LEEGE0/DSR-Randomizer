@@ -12,6 +12,8 @@ std::atomic<std::uint32_t> identityCalls{0};
 std::atomic<DWORD> unexpectedFactoryExitCode{0};
 std::atomic<HANDLE> identityEnteredEvent{};
 std::atomic<HANDLE> identityReleaseEvent{};
+std::atomic<HANDLE> factoryEnteredEvent{};
+std::atomic<HANDLE> factoryReleaseEvent{};
 
 bool InvokeProtected(void*) noexcept {
     protectedCalls.fetch_add(1, std::memory_order_relaxed);
@@ -59,6 +61,14 @@ extern "C" __declspec(dllexport) void* __cdecl FakeSteamFactory(
     if (!IsKnownVersion(version) && unexpectedExit != 0) {
         ExitProcess(unexpectedExit);
     }
+    const auto entered = factoryEnteredEvent.load(std::memory_order_acquire);
+    const auto release = factoryReleaseEvent.load(std::memory_order_acquire);
+    if (entered != nullptr) {
+        SetEvent(entered);
+    }
+    if (release != nullptr) {
+        WaitForSingleObject(release, INFINITE);
+    }
     return version != nullptr && std::strcmp(version, "SteamUser023") == 0
         ? static_cast<void*>(&identityInterface)
         : static_cast<void*>(&protectedInterface);
@@ -91,4 +101,12 @@ FakeSteamSetIdentityBlockEvents(
     const HANDLE release) noexcept {
     identityReleaseEvent.store(release, std::memory_order_release);
     identityEnteredEvent.store(entered, std::memory_order_release);
+}
+
+extern "C" __declspec(dllexport) void __cdecl
+FakeSteamSetFactoryBlockEvents(
+    const HANDLE entered,
+    const HANDLE release) noexcept {
+    factoryReleaseEvent.store(release, std::memory_order_release);
+    factoryEnteredEvent.store(entered, std::memory_order_release);
 }
