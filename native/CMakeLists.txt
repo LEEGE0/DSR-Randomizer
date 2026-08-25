@@ -72,6 +72,14 @@ set_target_properties(DSRRandomizer.FakeSteamApi PROPERTIES
   CXX_EXTENSIONS OFF
   OUTPUT_NAME "DSRRandomizer.FakeSteamApi")
 
+add_library(DSRRandomizer.NestedSteamLoader SHARED
+  fixtures/NestedSteamLoader.cpp)
+target_compile_features(DSRRandomizer.NestedSteamLoader PRIVATE cxx_std_20)
+dsr_configure_target(DSRRandomizer.NestedSteamLoader)
+set_target_properties(DSRRandomizer.NestedSteamLoader PROPERTIES
+  CXX_EXTENSIONS OFF
+  OUTPUT_NAME "DSRRandomizer.NestedSteamLoader")
+
 add_executable(ProtectionBootstrapTests
   tests/ProtectionBootstrapTests.cpp)
 target_compile_features(ProtectionBootstrapTests PRIVATE cxx_std_20)
@@ -168,3 +176,23 @@ add_test(
   NAME SteamGuardTests
   COMMAND SteamGuardTests
     $<TARGET_FILE:DSRRandomizer.FakeSteamApi>)
+
+add_executable(SteamGuardHardeningTests
+  tests/SteamGuardHardeningTests.cpp)
+target_compile_features(SteamGuardHardeningTests PRIVATE cxx_std_20)
+target_link_libraries(SteamGuardHardeningTests
+  PRIVATE
+    DSRRandomizer.Runtime.Core
+    BCrypt)
+target_include_directories(SteamGuardHardeningTests
+  PRIVATE
+    ${CMAKE_SOURCE_DIR}/native/runtime)
+dsr_configure_target(SteamGuardHardeningTests)
+set_target_properties(SteamGuardHardeningTests PROPERTIES
+  CXX_EXTENSIONS OFF)
+
+add_test(
+  NAME SteamGuardHardeningTests
+  COMMAND SteamGuardHardeningTests
+    $<TARGET_FILE:DSRRandomizer.FakeSteamApi>
+    $<TARGET_FILE:DSRRandomizer.NestedSteamLoader>)

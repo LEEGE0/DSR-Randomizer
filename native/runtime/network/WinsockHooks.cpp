@@ -2,7 +2,6 @@
 #include <mswsock.h>
 #include <ws2tcpip.h>
 #include <Windows.h>
-#include <MinHook.h>
 
 #include <algorithm>
 #include <array>
@@ -14,6 +13,7 @@
 #include <shared_mutex>
 #include <utility>
 
+#include "hooks/MinHookCoordinator.h"
 #include "network/NetworkPolicy.h"
 #include "network/WinsockHooks.h"
 
@@ -561,11 +561,27 @@ std::array<HookDefinition, 4> HookDefinitions(HookContext& context) noexcept {
 
 class MinHookPlatform final : public HookPlatform {
 public:
+    void BeginMutation() noexcept override {
+        if (mutationDepth_++ == 0) {
+            try {
+                mutationLease_ = std::make_unique<Hooks::MinHookMutationLease>();
+            }
+            catch (...) {
+                std::terminate();
+            }
+        }
+    }
+
+    void EndMutation() noexcept override {
+        if (mutationDepth_ != 0 && --mutationDepth_ == 0) {
+            mutationLease_.reset();
+        }
+    }
+
     bool Initialize() noexcept override {
         targetCount_ = 0;
-        const auto status = MH_Initialize();
-        ownsInitialization_ = status == MH_OK;
-        return ownsInitialization_ || status == MH_ERROR_ALREADY_INITIALIZED;
+        initialized_ = Hooks::AcquireMinHook();
+        return initialized_;
     }
 
     void* ResolveTarget(
@@ -585,7 +601,7 @@ public:
         void* const detour,
         void** const original) noexcept override {
         if (targetCount_ >= targets_.size()
-            || MH_CreateHook(target, detour, original) != MH_OK) {
+            || Hooks::CreateHook(target, detour, original) != MH_OK) {
             return false;
         }
         targets_[targetCount_++] = target;
@@ -593,15 +609,17 @@ public:
     }
 
     bool QueueEnable(void* const target) noexcept override {
-        return MH_QueueEnableHook(target) == MH_OK;
+        return Hooks::QueueEnableHook(target) == MH_OK;
     }
 
-    bool ApplyQueued() noexcept override { return MH_ApplyQueued() == MH_OK; }
+    bool ApplyQueued() noexcept override {
+        return Hooks::ApplyQueuedHooks() == MH_OK;
+    }
 
     bool DisableAll() noexcept override {
         bool disabled = true;
         for (std::size_t index = 0; index < targetCount_; ++index) {
-            const auto status = MH_DisableHook(targets_[index]);
+            const auto status = Hooks::DisableHook(targets_[index]);
             disabled = (status == MH_OK
                     || status == MH_ERROR_DISABLED
                     || status == MH_ERROR_NOT_CREATED)
@@ -611,7 +629,7 @@ public:
     }
 
     bool RemoveHook(void* const target) noexcept override {
-        const auto status = MH_RemoveHook(target);
+        const auto status = Hooks::RemoveHook(target);
         if (status != MH_OK && status != MH_ERROR_NOT_CREATED) {
             return false;
         }
@@ -630,27 +648,47 @@ public:
     }
 
     bool Uninitialize() noexcept override {
-        if (!ownsInitialization_) {
+        if (!initialized_) {
             return targetCount_ == 0;
         }
-        const auto status = MH_Uninitialize();
-        if (status != MH_OK && status != MH_ERROR_NOT_INITIALIZED) {
+        if (!Hooks::ReleaseMinHook()) {
             return false;
         }
-        ownsInitialization_ = false;
+        initialized_ = false;
         targetCount_ = 0;
         return true;
     }
 
 private:
-    bool ownsInitialization_ = false;
+    bool initialized_ = false;
     std::array<void*, 4> targets_{};
     std::size_t targetCount_ = 0;
+    std::size_t mutationDepth_ = 0;
+    std::unique_ptr<Hooks::MinHookMutationLease> mutationLease_;
 };
 
 MinHookPlatform systemPlatform;
 
+class HookPlatformMutation final {
+public:
+    explicit HookPlatformMutation(HookPlatform* const platform) noexcept
+        : platform_(platform) {
+        if (platform_ != nullptr) {
+            platform_->BeginMutation();
+        }
+    }
+    ~HookPlatformMutation() {
+        if (platform_ != nullptr) {
+            platform_->EndMutation();
+        }
+    }
+
+private:
+    HookPlatform* platform_;
+};
+
 WinsockHookCleanupStatus CleanupLocked() noexcept {
+    HookPlatformMutation mutation(lifecycle.platform);
     hooksInstalled.store(false, std::memory_order_release);
     if (lifecycle.context != nullptr) {
         lifecycle.context->denyOnly.store(true, std::memory_order_release);
@@ -714,6 +752,8 @@ WinsockHookInstallStatus InstallWinsockHooks(
         || activeContext.load(std::memory_order_acquire) != nullptr) {
         return WinsockHookInstallStatus::InstallFailed;
     }
+
+    HookPlatformMutation mutation(&platform);
 
     try {
         if (!ValidateConfiguration(configuration)) {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <atomic>
 #include <memory>
 #include <string>
 #include <vector>
@@ -28,6 +29,19 @@ using FactoryFunction = void*(__cdecl*)(const char* version) noexcept;
 
 inline constexpr std::size_t kSteamFactorySlotCapacity = 8;
 
+class FatalState final {
+public:
+    explicit FatalState(FatalReporter reporter) noexcept;
+
+    void EnterDenyOnly() noexcept;
+    void Trigger(const char* code) noexcept;
+    [[nodiscard]] bool IsFatal() const noexcept;
+
+private:
+    FatalReporter reporter_;
+    std::atomic<bool> fatal_{false};
+};
+
 enum class SteamFactorySlotStatus {
     Success,
     InvalidConfiguration,
@@ -49,7 +63,7 @@ private:
 [[nodiscard]] SteamFactorySlotStatus RegisterSteamFactorySlot(
     std::size_t slot,
     const std::vector<std::string>& declaredInterfaces,
-    FatalReporter fatalReporter) noexcept;
+    const std::shared_ptr<FatalState>& fatalState) noexcept;
 [[nodiscard]] bool SetSteamFactoryOriginal(
     std::size_t slot,
     Synthetic::FactoryFunction original) noexcept;

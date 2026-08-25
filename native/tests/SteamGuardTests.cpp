@@ -230,7 +230,9 @@ int RunEager(const std::wstring& fakePath) {
 
     auto configuration = Configuration(fakePath, HashFile(fakePath), false);
     const auto installStatus =
-        DSRRandomizer::Modules::InstallDeferredModuleGate(configuration);
+        DSRRandomizer::Modules::Testing::
+            InstallDeferredModuleGateForSyntheticSuspendedProcess(
+                configuration);
     if (installStatus != DeferredModuleGateInstallStatus::Success) {
         std::cerr << "eager install status: "
                   << static_cast<int>(installStatus) << '\n';
@@ -321,7 +323,8 @@ int RunWrongPath(
         expectedPath,
         HashFile(expectedPath),
         true);
-    if (DSRRandomizer::Modules::InstallDeferredModuleGate(configuration)
+    if (DSRRandomizer::Modules::Testing::
+            InstallDeferredModuleGateForSyntheticSuspendedProcess(configuration)
         != DeferredModuleGateInstallStatus::Success) {
         return Fail("wrong-path gate did not arm");
     }
@@ -333,7 +336,8 @@ int RunWrongHash(const std::wstring& fakePath) {
     auto hash = HashFile(fakePath);
     hash[0] ^= 0xff;
     auto configuration = Configuration(fakePath, hash, true);
-    if (DSRRandomizer::Modules::InstallDeferredModuleGate(configuration)
+    if (DSRRandomizer::Modules::Testing::
+            InstallDeferredModuleGateForSyntheticSuspendedProcess(configuration)
         != DeferredModuleGateInstallStatus::Success) {
         return Fail("wrong-hash gate did not arm");
     }
@@ -343,7 +347,8 @@ int RunWrongHash(const std::wstring& fakePath) {
 
 int RunUnknownVersion(const std::wstring& fakePath) {
     auto configuration = Configuration(fakePath, HashFile(fakePath), true);
-    if (DSRRandomizer::Modules::InstallDeferredModuleGate(configuration)
+    if (DSRRandomizer::Modules::Testing::
+            InstallDeferredModuleGateForSyntheticSuspendedProcess(configuration)
         != DeferredModuleGateInstallStatus::Success) {
         return Fail("unknown-version gate did not arm");
     }

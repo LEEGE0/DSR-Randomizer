@@ -17,7 +17,7 @@ namespace {
 
 struct SlotContext {
     std::vector<std::string> declaredInterfaces;
-    FatalReporter fatalReporter = nullptr;
+    std::shared_ptr<FatalState> fatalState;
     std::atomic<Synthetic::FactoryFunction> original{nullptr};
 };
 
@@ -25,11 +25,28 @@ struct Wrapper final {
     const Synthetic::InterfaceVTable* vtable = nullptr;
     void* raw = nullptr;
     std::string version;
+    std::shared_ptr<FatalState> fatalState;
 };
 
 bool DenySyntheticMethod(void*) noexcept { return false; }
 
+bool ForwardIdentityMethod(void* const self) noexcept {
+    auto* const wrapper = static_cast<Wrapper*>(self);
+    if (wrapper == nullptr || wrapper->fatalState == nullptr
+        || wrapper->fatalState->IsFatal() || wrapper->raw == nullptr) {
+        return false;
+    }
+    auto* const raw = static_cast<Synthetic::Interface*>(wrapper->raw);
+    if (raw->vtable == nullptr || raw->vtable->Invoke == nullptr) {
+        wrapper->fatalState->Trigger("STEAM_IDENTITY_UNAVAILABLE");
+        return false;
+    }
+    const bool result = raw->vtable->Invoke(raw);
+    return !wrapper->fatalState->IsFatal() && result;
+}
+
 const Synthetic::InterfaceVTable deniedVTable{&DenySyntheticMethod};
+const Synthetic::InterfaceVTable identityVTable{&ForwardIdentityMethod};
 std::array<std::shared_ptr<SlotContext>, kSteamFactorySlotCapacity> slots{};
 std::mutex slotsMutex;
 std::vector<std::unique_ptr<Wrapper>> processLifetimeWrappers;
@@ -48,15 +65,17 @@ bool IsDeclared(
 void* FatalAndNull(
     const std::shared_ptr<SlotContext>& context,
     const char* const code) noexcept {
-    if (context != nullptr && context->fatalReporter != nullptr) {
-        context->fatalReporter(code);
+    if (context != nullptr && context->fatalState != nullptr) {
+        context->fatalState->Trigger(code);
     }
     return nullptr;
 }
 
-void* WrapProtected(
+void* WrapInterface(
     void* const raw,
-    const std::string_view version) noexcept {
+    const std::string_view version,
+    const InterfaceDecision decision,
+    const std::shared_ptr<FatalState>& fatalState) noexcept {
     if (raw == nullptr) {
         return nullptr;
     }
@@ -65,16 +84,20 @@ void* WrapProtected(
         const auto found = std::find_if(
             processLifetimeWrappers.begin(),
             processLifetimeWrappers.end(),
-            [raw, version](const std::unique_ptr<Wrapper>& wrapper) {
-                return wrapper->raw == raw && wrapper->version == version;
+            [raw, version, &fatalState](const std::unique_ptr<Wrapper>& wrapper) {
+                return wrapper->raw == raw && wrapper->version == version
+                    && wrapper->fatalState == fatalState;
             });
         if (found != processLifetimeWrappers.end()) {
             return found->get();
         }
         auto wrapper = std::make_unique<Wrapper>();
-        wrapper->vtable = &deniedVTable;
+        wrapper->vtable = decision == InterfaceDecision::AllowOwnershipIdentity
+            ? &identityVTable
+            : &deniedVTable;
         wrapper->raw = raw;
         wrapper->version.assign(version);
+        wrapper->fatalState = fatalState;
         auto* const result = wrapper.get();
         processLifetimeWrappers.push_back(std::move(wrapper));
         return result;
@@ -98,6 +121,9 @@ void* GuardedFactory(
     if (context == nullptr || version == nullptr) {
         return FatalAndNull(context, "STEAM_INTERFACE_UNSUPPORTED");
     }
+    if (context->fatalState == nullptr || context->fatalState->IsFatal()) {
+        return nullptr;
+    }
 
     const std::string_view requested(version);
     const SteamPolicy policy;
@@ -115,10 +141,17 @@ void* GuardedFactory(
         return FatalAndNull(context, "STEAM_FACTORY_UNAVAILABLE");
     }
     void* const raw = original(version);
-    if (decision == InterfaceDecision::AllowOwnershipIdentity) {
-        return raw;
+    if (context->fatalState->IsFatal()) {
+        return nullptr;
     }
-    void* const wrapped = WrapProtected(raw, requested);
+    void* const wrapped = WrapInterface(
+        raw,
+        requested,
+        decision,
+        context->fatalState);
+    if (context->fatalState->IsFatal()) {
+        return nullptr;
+    }
     return wrapped != nullptr || raw == nullptr
         ? wrapped
         : FatalAndNull(context, "STEAM_WRAPPER_UNAVAILABLE");
@@ -153,6 +186,24 @@ const std::array<void*, kSteamFactorySlotCapacity> detours{
 
 }  // namespace
 
+FatalState::FatalState(const FatalReporter reporter) noexcept
+    : reporter_(reporter) {}
+
+void FatalState::EnterDenyOnly() noexcept {
+    fatal_.store(true, std::memory_order_release);
+}
+
+void FatalState::Trigger(const char* const code) noexcept {
+    EnterDenyOnly();
+    if (reporter_ != nullptr) {
+        reporter_(code);
+    }
+}
+
+bool FatalState::IsFatal() const noexcept {
+    return fatal_.load(std::memory_order_acquire);
+}
+
 class SteamFactoryCallbackBlock::Impl final {
 public:
     Impl() noexcept : lock(factoryCallbackGate) {}
@@ -175,9 +226,9 @@ SteamFactoryCallbackBlock::~SteamFactoryCallbackBlock() = default;
 SteamFactorySlotStatus RegisterSteamFactorySlot(
     const std::size_t slot,
     const std::vector<std::string>& declaredInterfaces,
-    const FatalReporter fatalReporter) noexcept {
+    const std::shared_ptr<FatalState>& fatalState) noexcept {
     if (slot >= slots.size() || declaredInterfaces.empty()
-        || fatalReporter == nullptr) {
+        || fatalState == nullptr) {
         return SteamFactorySlotStatus::InvalidConfiguration;
     }
     try {
@@ -193,7 +244,7 @@ SteamFactorySlotStatus RegisterSteamFactorySlot(
         }
         auto candidate = std::make_shared<SlotContext>();
         candidate->declaredInterfaces = declaredInterfaces;
-        candidate->fatalReporter = fatalReporter;
+        candidate->fatalState = fatalState;
         std::scoped_lock lock(slotsMutex);
         if (slots[slot] != nullptr) {
             return SteamFactorySlotStatus::SlotUnavailable;

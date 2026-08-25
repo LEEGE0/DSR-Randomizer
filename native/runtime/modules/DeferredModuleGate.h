@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -38,5 +39,26 @@ enum class DeferredModuleGateCleanupStatus {
     const DeferredModuleGateConfiguration& configuration) noexcept;
 [[nodiscard]] DeferredModuleGateCleanupStatus UninstallDeferredModuleGate() noexcept;
 [[nodiscard]] bool DeferredModuleGateIsInstalled() noexcept;
+
+namespace Testing {
+
+struct DeferredModuleGateLifecycleSnapshot {
+    bool contextRetained;
+    bool denyOnly;
+    std::size_t hooksRetained;
+    std::size_t factorySlotsRetained;
+};
+
+// Synthetic test subprocesses are started before worker threads and act as the
+// Task 5 suspended-launch proof seam. Production callers cannot use the normal
+// install API until Task 5 supplies a verifiable proof.
+[[nodiscard]] DeferredModuleGateInstallStatus
+InstallDeferredModuleGateForSyntheticSuspendedProcess(
+    const DeferredModuleGateConfiguration& configuration) noexcept;
+void FailNextFactoryPublication() noexcept;
+[[nodiscard]] DeferredModuleGateLifecycleSnapshot
+CurrentGateLifecycle() noexcept;
+
+}  // namespace Testing
 
 }  // namespace DSRRandomizer::Modules

@@ -1,6 +1,8 @@
 add_library(DSRRandomizer.Runtime.Core STATIC
   ProtectionBootstrap.cpp
   ProtectionBootstrap.h
+  hooks/MinHookCoordinator.cpp
+  hooks/MinHookCoordinator.h
   modules/DeferredModuleGate.cpp
   modules/DeferredModuleGate.h
   network/WinsockHooks.cpp
@@ -21,6 +23,7 @@ target_link_libraries(DSRRandomizer.Runtime.Core
   PUBLIC
     minhook
     BCrypt
+    Psapi
     Shell32
     Ole32
     Ws2_32)

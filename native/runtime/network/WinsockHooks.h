@@ -45,6 +45,9 @@ class HookPlatform {
 public:
     virtual ~HookPlatform() = default;
 
+    virtual void BeginMutation() noexcept {}
+    virtual void EndMutation() noexcept {}
+
     virtual bool Initialize() noexcept = 0;
     virtual void* ResolveTarget(
         const wchar_t* moduleName,

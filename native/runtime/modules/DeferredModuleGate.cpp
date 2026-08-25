@@ -1,21 +1,25 @@
 #include "modules/DeferredModuleGate.h"
 
 #include <Windows.h>
+#include <TlHelp32.h>
+#include <Psapi.h>
 #include <bcrypt.h>
-#include <MinHook.h>
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <cctype>
 #include <cstdint>
+#include <cstring>
 #include <cwctype>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <string_view>
 #include <utility>
 
+#include "hooks/MinHookCoordinator.h"
 #include "steam/SteamPolicy.h"
 
 namespace DSRRandomizer::Modules {
@@ -33,7 +37,7 @@ struct UniqueHandle final {
     UniqueHandle() = default;
     explicit UniqueHandle(const HANDLE handle) noexcept : value(handle) {}
     ~UniqueHandle() {
-        if (value != INVALID_HANDLE_VALUE) {
+        if (value != INVALID_HANDLE_VALUE && value != nullptr) {
             CloseHandle(value);
         }
     }
@@ -44,11 +48,38 @@ struct UniqueHandle final {
     }
     UniqueHandle& operator=(UniqueHandle&& other) noexcept {
         if (this != &other) {
-            if (value != INVALID_HANDLE_VALUE) {
+            if (value != INVALID_HANDLE_VALUE && value != nullptr) {
                 CloseHandle(value);
             }
             value = other.value;
             other.value = INVALID_HANDLE_VALUE;
+        }
+        return *this;
+    }
+};
+
+struct PinnedModule final {
+    HMODULE value = nullptr;
+
+    PinnedModule() = default;
+    explicit PinnedModule(const HMODULE module) noexcept : value(module) {}
+    ~PinnedModule() {
+        if (value != nullptr) {
+            FreeLibrary(value);
+        }
+    }
+    PinnedModule(const PinnedModule&) = delete;
+    PinnedModule& operator=(const PinnedModule&) = delete;
+    PinnedModule(PinnedModule&& other) noexcept : value(other.value) {
+        other.value = nullptr;
+    }
+    PinnedModule& operator=(PinnedModule&& other) noexcept {
+        if (this != &other) {
+            if (value != nullptr) {
+                FreeLibrary(value);
+            }
+            value = other.value;
+            other.value = nullptr;
         }
         return *this;
     }
@@ -64,20 +95,15 @@ struct ModuleRecord {
     std::wstring canonicalPath;
     std::wstring baseName;
     UniqueHandle expectedFile;
+    FILE_ID_INFO expectedIdentity{};
     std::array<std::uint8_t, 32> expectedSha256{};
     bool allowDeferred = false;
     std::vector<std::string> declaredInterfaces;
     std::vector<ProtectedExport> protectedExports;
     std::mutex admissionMutex;
     HMODULE admittedModule = nullptr;
-    HMODULE pinnedModule = nullptr;
+    PinnedModule pinnedModule;
     bool admitted = false;
-
-    ~ModuleRecord() {
-        if (pinnedModule != nullptr) {
-            FreeLibrary(pinnedModule);
-        }
-    }
 };
 
 struct Trampolines {
@@ -90,11 +116,20 @@ struct Trampolines {
 
 struct GateContext {
     std::vector<std::unique_ptr<ModuleRecord>> modules;
-    Steam::FatalReporter fatalReporter = nullptr;
+    std::shared_ptr<Steam::FatalState> fatalState;
     Trampolines trampolines;
-    std::atomic<bool> denyOnly{false};
     std::mutex slotMutex;
     std::array<bool, Steam::kSteamFactorySlotCapacity> slots{};
+    std::mutex quarantineMutex;
+    std::vector<HMODULE> quarantinedModules;
+
+    ~GateContext() {
+        for (const auto module : quarantinedModules) {
+            if (module != nullptr) {
+                FreeLibrary(module);
+            }
+        }
+    }
 };
 
 struct HookEntry {
@@ -108,17 +143,18 @@ struct Lifecycle {
     std::shared_ptr<GateContext> context;
     std::vector<HookEntry> hooks;
     bool initialized = false;
-    bool ownsInitialization = false;
     bool mayBeEnabled = false;
 };
 
 std::atomic<std::shared_ptr<GateContext>> activeContext;
 std::atomic<bool> gateInstalled{false};
+std::atomic<std::uint32_t> failFactoryPublication{};
 Lifecycle lifecycle;
 std::mutex installMutex;
-std::mutex minHookMutex;
 std::mutex hooksMutex;
+std::recursive_mutex loaderCallbackMutex;
 std::shared_mutex callbackGate;
+thread_local std::uint32_t callbackDepth = 0;
 thread_local std::uint32_t internalBypassDepth = 0;
 
 class InternalBypass final {
@@ -127,6 +163,26 @@ public:
     ~InternalBypass() { --internalBypassDepth; }
     InternalBypass(const InternalBypass&) = delete;
     InternalBypass& operator=(const InternalBypass&) = delete;
+};
+
+class CallbackLease final {
+public:
+    CallbackLease() {
+        nested_ = callbackDepth++ != 0;
+        if (!nested_) {
+            callbackLock_.emplace(callbackGate);
+            loaderLock_.emplace(loaderCallbackMutex);
+        }
+    }
+    ~CallbackLease() { --callbackDepth; }
+    CallbackLease(const CallbackLease&) = delete;
+    CallbackLease& operator=(const CallbackLease&) = delete;
+    [[nodiscard]] bool IsNested() const noexcept { return nested_; }
+
+private:
+    bool nested_ = false;
+    std::optional<std::unique_lock<std::recursive_mutex>> loaderLock_;
+    std::optional<std::shared_lock<std::shared_mutex>> callbackLock_;
 };
 
 bool EqualsPath(
@@ -174,6 +230,20 @@ bool ReadModulePath(const HMODULE module, std::wstring& path) {
     return true;
 }
 
+bool ReadMappedDevicePath(const HMODULE module, std::wstring& path) {
+    std::vector<wchar_t> buffer(32768);
+    const auto length = GetMappedFileNameW(
+        GetCurrentProcess(),
+        reinterpret_cast<void*>(module),
+        buffer.data(),
+        static_cast<DWORD>(buffer.size()));
+    if (length == 0 || length == buffer.size()) {
+        return false;
+    }
+    path.assign(buffer.data(), length);
+    return path.starts_with(L"\\Device\\");
+}
+
 bool ReadCanonicalPath(const HANDLE file, std::wstring& path) {
     const auto required = GetFinalPathNameByHandleW(file, nullptr, 0, 0);
     if (required == 0) {
@@ -201,6 +271,45 @@ UniqueHandle OpenPinnedReadOnly(const std::wstring& path) noexcept {
         OPEN_EXISTING,
         FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
         nullptr));
+}
+
+UniqueHandle OpenMappedBacking(const std::wstring& devicePath) noexcept {
+    const std::wstring globalPath = L"\\\\?\\GLOBALROOT" + devicePath;
+    return OpenPinnedReadOnly(globalPath);
+}
+
+bool ReadFileIdentity(const HANDLE file, FILE_ID_INFO& identity) noexcept {
+    return GetFileInformationByHandleEx(
+        file,
+        FileIdInfo,
+        &identity,
+        sizeof(identity)) != FALSE;
+}
+
+bool SameFileIdentity(
+    const FILE_ID_INFO& first,
+    const FILE_ID_INFO& second) noexcept {
+    return first.VolumeSerialNumber == second.VolumeSerialNumber
+        && std::memcmp(
+            first.FileId.Identifier,
+            second.FileId.Identifier,
+            sizeof(first.FileId.Identifier)) == 0;
+}
+
+bool PinModule(const HMODULE module, PinnedModule& pinned) noexcept {
+    HMODULE reference = nullptr;
+    if (!GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+            reinterpret_cast<LPCWSTR>(module),
+            &reference)
+        || reference != module) {
+        if (reference != nullptr) {
+            FreeLibrary(reference);
+        }
+        return false;
+    }
+    pinned = PinnedModule(reference);
+    return true;
 }
 
 bool IsCanonicalAbsolutePath(const std::wstring& path) {
@@ -295,11 +404,31 @@ bool HashFileHandle(
 bool Fatal(
     const std::shared_ptr<GateContext>& context,
     const char* const code) noexcept {
-    if (context != nullptr && context->fatalReporter != nullptr) {
-        context->denyOnly.store(true, std::memory_order_release);
-        context->fatalReporter(code);
+    if (context != nullptr && context->fatalState != nullptr) {
+        context->fatalState->Trigger(code);
     }
     return false;
+}
+
+bool IsFatal(const std::shared_ptr<GateContext>& context) noexcept {
+    return context == nullptr || context->fatalState == nullptr
+        || context->fatalState->IsFatal();
+}
+
+void Quarantine(
+    const std::shared_ptr<GateContext>& context,
+    const HMODULE module) noexcept {
+    if (context == nullptr || module == nullptr) {
+        return;
+    }
+    try {
+        std::scoped_lock lock(context->quarantineMutex);
+        context->quarantinedModules.push_back(module);
+    }
+    catch (...) {
+        // A non-resumable fatal has already been established. Leaking the
+        // withheld loader reference is safer than publishing or unloading it.
+    }
 }
 
 std::size_t AllocateFactorySlot(GateContext& context) noexcept {
@@ -322,26 +451,58 @@ void ReleaseFactorySlot(GateContext& context, const std::size_t slot) noexcept {
     }
 }
 
-void RollBackFactoryHooks(
+bool ConsumeFactoryPublicationFault() noexcept {
+    auto value = failFactoryPublication.load(std::memory_order_acquire);
+    while (value != 0) {
+        if (failFactoryPublication.compare_exchange_weak(
+                value,
+                value - 1,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool RollBackFactoryHooks(
     GateContext& context,
     std::vector<HookEntry>& created) noexcept {
-    std::scoped_lock hookLock(minHookMutex);
-    for (auto& hook : created) {
-        if (hook.target != nullptr) {
-            static_cast<void>(MH_DisableHook(hook.target));
+    Hooks::MinHookMutationLease mutation;
+    std::vector<bool> disabled(created.size(), false);
+    for (std::size_t index = 0; index < created.size(); ++index) {
+        const auto status = Hooks::DisableHook(created[index].target);
+        disabled[index] = status == MH_OK || status == MH_ERROR_DISABLED
+            || status == MH_ERROR_NOT_CREATED;
+    }
+
+    std::vector<HookEntry> retained;
+    for (std::size_t index = created.size(); index > 0; --index) {
+        auto& hook = created[index - 1];
+        const auto status = Hooks::RemoveHook(hook.target);
+        if (status == MH_OK || status == MH_ERROR_NOT_CREATED) {
+            Steam::UnregisterSteamFactorySlot(hook.factorySlot);
+            ReleaseFactorySlot(context, hook.factorySlot);
+            hook.created = false;
+        }
+        else {
+            retained.push_back(hook);
         }
     }
-    Steam::SteamFactoryCallbackBlock callbackBlock;
-    for (auto iterator = created.rbegin(); iterator != created.rend(); ++iterator) {
-        if (iterator->target != nullptr) {
-            static_cast<void>(MH_RemoveHook(iterator->target));
-        }
-        if (iterator->factorySlot < Steam::kSteamFactorySlotCapacity) {
-            Steam::UnregisterSteamFactorySlot(iterator->factorySlot);
-            ReleaseFactorySlot(context, iterator->factorySlot);
-        }
+    if (!retained.empty()) {
+        std::scoped_lock lifecycleLock(hooksMutex);
+        lifecycle.mayBeEnabled = lifecycle.mayBeEnabled
+            || std::any_of(
+                disabled.begin(),
+                disabled.end(),
+                [](const bool value) { return !value; });
+        lifecycle.hooks.insert(
+            lifecycle.hooks.end(),
+            retained.begin(),
+            retained.end());
     }
     created.clear();
+    return retained.empty();
 }
 
 bool ProtectFactoryExports(
@@ -349,49 +510,57 @@ bool ProtectFactoryExports(
     ModuleRecord& record,
     const HMODULE module) noexcept {
     std::vector<HookEntry> created;
+    bool complete = true;
     try {
-        std::scoped_lock hookLock(minHookMutex);
+        Hooks::MinHookMutationLease mutation;
         for (auto& exportEntry : record.protectedExports) {
             const auto slot = AllocateFactorySlot(*context);
             if (slot >= Steam::kSteamFactorySlotCapacity
                 || Steam::RegisterSteamFactorySlot(
                     slot,
                     record.declaredInterfaces,
-                    context->fatalReporter)
+                    context->fatalState)
                     != Steam::SteamFactorySlotStatus::Success) {
                 if (slot < Steam::kSteamFactorySlotCapacity) {
                     ReleaseFactorySlot(*context, slot);
                 }
+                complete = false;
                 break;
             }
 
             void* const target = reinterpret_cast<void*>(
-                context->trampolines.getProcAddress(module, exportEntry.name.c_str()));
+                context->trampolines.getProcAddress(
+                    module,
+                    exportEntry.name.c_str()));
             void* const detour = Steam::SteamFactoryDetourAddress(slot);
             void* original = nullptr;
             if (target == nullptr || detour == nullptr
-                || MH_CreateHook(target, detour, &original) != MH_OK
-                || !Steam::SetSteamFactoryOriginal(
-                    slot,
-                    reinterpret_cast<Steam::Synthetic::FactoryFunction>(original))
-                || MH_QueueEnableHook(target) != MH_OK) {
-                if (target != nullptr) {
-                    static_cast<void>(MH_RemoveHook(target));
-                }
+                || Hooks::CreateHook(target, detour, &original) != MH_OK) {
                 Steam::UnregisterSteamFactorySlot(slot);
                 ReleaseFactorySlot(*context, slot);
+                complete = false;
                 break;
             }
             created.push_back({target, true, true, slot});
+            if (!Steam::SetSteamFactoryOriginal(
+                    slot,
+                    reinterpret_cast<Steam::Synthetic::FactoryFunction>(
+                        original))
+                || Hooks::QueueEnableHook(target) != MH_OK) {
+                complete = false;
+                break;
+            }
             exportEntry.slot = slot;
             exportEntry.target = target;
         }
 
-        if (created.size() != record.protectedExports.size()
-            || MH_ApplyQueued() != MH_OK) {
-            // Rollback occurs after releasing the MinHook serialization lock.
+        if (complete && created.size() == record.protectedExports.size()) {
+            complete = Hooks::ApplyQueuedHooks() == MH_OK;
         }
-        else {
+        if (complete && ConsumeFactoryPublicationFault()) {
+            complete = false;
+        }
+        if (complete && !IsFatal(context)) {
             std::scoped_lock lifecycleLock(hooksMutex);
             lifecycle.mayBeEnabled = true;
             lifecycle.hooks.insert(
@@ -402,8 +571,9 @@ bool ProtectFactoryExports(
         }
     }
     catch (...) {
+        complete = false;
     }
-    RollBackFactoryHooks(*context, created);
+    static_cast<void>(RollBackFactoryHooks(*context, created));
     return Fatal(context, "STEAM_HOOK_FAILED");
 }
 
@@ -419,6 +589,9 @@ AdmissionResult AdmitModuleCore(
     if (context == nullptr || module == nullptr) {
         return {};
     }
+    if (IsFatal(context)) {
+        return {true, false, nullptr};
+    }
     const auto alreadyAdmitted = std::find_if(
         context->modules.begin(),
         context->modules.end(),
@@ -427,13 +600,20 @@ AdmissionResult AdmitModuleCore(
             return record->admitted && record->admittedModule == module;
         });
     if (alreadyAdmitted != context->modules.end()) {
-        return {true, true, alreadyAdmitted->get()};
+        return IsFatal(context)
+            ? AdmissionResult{true, false, alreadyAdmitted->get()}
+            : AdmissionResult{true, true, alreadyAdmitted->get()};
     }
-    std::wstring modulePath;
-    if (!ReadModulePath(module, modulePath)) {
-        return {};
+
+    PinnedModule pinned;
+    if (!PinModule(module, pinned)) {
+        return {true, Fatal(context, "STEAM_MODULE_IDENTITY_UNAVAILABLE"), nullptr};
     }
-    const auto baseName = BaseName(modulePath);
+    std::wstring loaderPath;
+    if (!ReadModulePath(pinned.value, loaderPath)) {
+        return {true, Fatal(context, "STEAM_MODULE_IDENTITY_UNAVAILABLE"), nullptr};
+    }
+    const auto baseName = BaseName(loaderPath);
     const auto found = std::find_if(
         context->modules.begin(),
         context->modules.end(),
@@ -443,49 +623,55 @@ AdmissionResult AdmitModuleCore(
     if (found == context->modules.end()) {
         return {};
     }
+
     ModuleRecord& record = **found;
     std::scoped_lock admissionLock(record.admissionMutex);
     if (record.admitted) {
-        if (record.admittedModule == module) {
-            return {true, true, &record};
-        }
-        return {true, Fatal(context, "STEAM_MODULE_PATH_MISMATCH"), &record};
+        return record.admittedModule == module && !IsFatal(context)
+            ? AdmissionResult{true, true, &record}
+            : AdmissionResult{
+                true,
+                Fatal(context, "STEAM_MODULE_PATH_MISMATCH"),
+                &record};
     }
-    if (context->denyOnly.load(std::memory_order_acquire)) {
-        return {true, Fatal(context, "STEAM_GATE_UNAVAILABLE"), &record};
+    if (IsFatal(context)) {
+        return {true, false, &record};
     }
 
     InternalBypass bypass;
-    auto actualFile = OpenPinnedReadOnly(modulePath);
+    std::wstring mappedNameBefore;
+    if (!ReadMappedDevicePath(pinned.value, mappedNameBefore)) {
+        return {
+            true,
+            Fatal(context, "STEAM_MODULE_IDENTITY_UNAVAILABLE"),
+            &record};
+    }
+    auto backingFile = OpenMappedBacking(mappedNameBefore);
+    std::wstring mappedNameAfter;
+    FILE_ID_INFO actualIdentity{};
     std::wstring canonicalActual;
-    if (actualFile.value == INVALID_HANDLE_VALUE
-        || !ReadCanonicalPath(actualFile.value, canonicalActual)
+    if (backingFile.value == INVALID_HANDLE_VALUE
+        || !ReadMappedDevicePath(pinned.value, mappedNameAfter)
+        || !EqualsPath(mappedNameBefore, mappedNameAfter)
+        || !ReadFileIdentity(backingFile.value, actualIdentity)
+        || !SameFileIdentity(actualIdentity, record.expectedIdentity)
+        || !ReadCanonicalPath(backingFile.value, canonicalActual)
         || !EqualsPath(canonicalActual, record.canonicalPath)) {
         return {true, Fatal(context, "STEAM_MODULE_PATH_MISMATCH"), &record};
     }
     std::array<std::uint8_t, 32> actualHash{};
-    if (!HashFileHandle(actualFile.value, actualHash)
+    if (!HashFileHandle(backingFile.value, actualHash)
         || !std::equal(
             actualHash.begin(),
             actualHash.end(),
             record.expectedSha256.begin())) {
         return {true, Fatal(context, "STEAM_MODULE_HASH_MISMATCH"), &record};
     }
-    HMODULE pinned = nullptr;
-    if (!GetModuleHandleExW(
-            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
-            reinterpret_cast<LPCWSTR>(module),
-            &pinned)
-        || pinned != module) {
-        if (pinned != nullptr) {
-            FreeLibrary(pinned);
-        }
-        return {true, Fatal(context, "STEAM_MODULE_IDENTITY_UNAVAILABLE"), &record};
-    }
-    record.pinnedModule = pinned;
-    if (!ProtectFactoryExports(context, record, module)) {
+    if (IsFatal(context) || !ProtectFactoryExports(context, record, module)
+        || IsFatal(context)) {
         return {true, false, &record};
     }
+    record.pinnedModule = std::move(pinned);
     record.admittedModule = module;
     record.admitted = true;
     return {true, true, &record};
@@ -559,6 +745,83 @@ bool RequestedTarget(
     }
 }
 
+bool ModuleIsRequestedTarget(
+    const std::shared_ptr<GateContext>& context,
+    const HMODULE module) noexcept {
+    try {
+        std::wstring path;
+        return module != nullptr && ReadModulePath(module, path)
+            && RequestedTarget(context, path);
+    }
+    catch (...) {
+        static_cast<void>(Fatal(context, "STEAM_GATE_UNAVAILABLE"));
+        return true;
+    }
+}
+
+bool EnumerateMatchingModules(
+    const std::wstring& baseName,
+    std::vector<PinnedModule>& matches) noexcept {
+    try {
+        UniqueHandle snapshot;
+        for (std::size_t retry = 0; retry < 8; ++retry) {
+            snapshot = UniqueHandle(CreateToolhelp32Snapshot(
+                TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32,
+                GetCurrentProcessId()));
+            if (snapshot.value != INVALID_HANDLE_VALUE
+                || GetLastError() != ERROR_BAD_LENGTH) {
+                break;
+            }
+        }
+        if (snapshot.value == INVALID_HANDLE_VALUE) {
+            return false;
+        }
+        MODULEENTRY32W entry{};
+        entry.dwSize = sizeof(entry);
+        if (!Module32FirstW(snapshot.value, &entry)) {
+            return GetLastError() == ERROR_NO_MORE_FILES;
+        }
+        do {
+            if (BaseName(entry.szModule) != baseName) {
+                continue;
+            }
+            PinnedModule pinned;
+            if (!PinModule(entry.hModule, pinned)) {
+                return false;
+            }
+            matches.push_back(std::move(pinned));
+        } while (Module32NextW(snapshot.value, &entry));
+        return GetLastError() == ERROR_NO_MORE_FILES;
+    }
+    catch (...) {
+        return false;
+    }
+}
+
+bool ScanAndAdmitExpectedModules(
+    const std::shared_ptr<GateContext>& context,
+    const bool requireEager) noexcept {
+    for (const auto& record : context->modules) {
+        std::vector<PinnedModule> matches;
+        if (!EnumerateMatchingModules(record->baseName, matches)) {
+            return Fatal(context, "STEAM_MODULE_ENUMERATION_FAILED");
+        }
+        if (matches.size() > 1) {
+            return Fatal(context, "STEAM_MODULE_DUPLICATE_BASENAME");
+        }
+        if (matches.size() == 1) {
+            const auto admission = AdmitModule(context, matches.front().value);
+            if (!admission.target || !admission.admitted) {
+                return false;
+            }
+        }
+        else if (requireEager || !record->allowDeferred) {
+            return Fatal(context, "STEAM_MODULE_REQUIRED_EAGER");
+        }
+    }
+    return !IsFatal(context);
+}
+
 bool AdmitAfterLoad(
     const std::shared_ptr<GateContext>& context,
     const HMODULE returnedModule,
@@ -568,120 +831,143 @@ bool AdmitAfterLoad(
         return false;
     }
     if (!returnedAdmission.target && requestedTarget) {
-        static_cast<void>(Fatal(context, "STEAM_MODULE_IDENTITY_UNAVAILABLE"));
-        return false;
+        return Fatal(context, "STEAM_MODULE_IDENTITY_UNAVAILABLE");
     }
+    return ScanAndAdmitExpectedModules(context, false);
+}
 
-    // A LoadLibrary call may map a protected module as a dependency while
-    // returning the outer module. Protect every newly present expectation
-    // before releasing that outer handle to its caller.
-    for (const auto& record : context->modules) {
-        bool admitted = false;
-        {
-            std::scoped_lock admissionLock(record->admissionMutex);
-            admitted = record->admitted;
-        }
-        if (admitted) {
-            continue;
-        }
-        const HMODULE loaded = GetModuleHandleW(record->baseName.c_str());
-        if (loaded != nullptr) {
-            const auto dependencyAdmission = AdmitModule(context, loaded);
-            if (!dependencyAdmission.target || !dependencyAdmission.admitted) {
-                return false;
-            }
-        }
+template <typename Original, typename Path, typename Call>
+HMODULE HookLoader(
+    const Original original,
+    const Path path,
+    Call&& call) noexcept {
+    const auto context = activeContext.load(std::memory_order_acquire);
+    if (context == nullptr || original == nullptr || IsFatal(context)) {
+        SetLastError(ERROR_ACCESS_DENIED);
+        return nullptr;
     }
-    return true;
+    CallbackLease callback;
+    if (IsFatal(context)) {
+        SetLastError(ERROR_ACCESS_DENIED);
+        return nullptr;
+    }
+    const bool requestedTarget = RequestedTarget(context, path);
+    if (callback.IsNested() && requestedTarget) {
+        static_cast<void>(Fatal(context, "STEAM_NESTED_PROTECTED_LOAD"));
+        SetLastError(ERROR_ACCESS_DENIED);
+        return nullptr;
+    }
+    const HMODULE module = call();
+    if (internalBypassDepth != 0) {
+        if (IsFatal(context)) {
+            Quarantine(context, module);
+            return nullptr;
+        }
+        return module;
+    }
+    if (IsFatal(context)) {
+        Quarantine(context, module);
+        SetLastError(ERROR_ACCESS_DENIED);
+        return nullptr;
+    }
+    if (module == nullptr || callback.IsNested()) {
+        return IsFatal(context) ? nullptr : module;
+    }
+    if (!AdmitAfterLoad(context, module, requestedTarget) || IsFatal(context)) {
+        Quarantine(context, module);
+        SetLastError(ERROR_ACCESS_DENIED);
+        return nullptr;
+    }
+    return module;
 }
 
 HMODULE WINAPI HookLoadLibraryA(const LPCSTR fileName) {
-    std::shared_lock callbackLock(callbackGate);
     const auto context = activeContext.load(std::memory_order_acquire);
-    if (context == nullptr || context->trampolines.loadLibraryA == nullptr) {
-        SetLastError(ERROR_ACCESS_DENIED);
-        return nullptr;
-    }
-    const HMODULE module = context->trampolines.loadLibraryA(fileName);
-    if (internalBypassDepth != 0 || module == nullptr) {
-        return module;
-    }
-    return AdmitAfterLoad(context, module, RequestedTarget(context, fileName))
-        ? module
-        : nullptr;
+    const auto original = context == nullptr
+        ? nullptr
+        : context->trampolines.loadLibraryA;
+    return HookLoader(original, fileName, [original, fileName]() {
+        return original(fileName);
+    });
 }
 
 HMODULE WINAPI HookLoadLibraryW(const LPCWSTR fileName) {
-    std::shared_lock callbackLock(callbackGate);
     const auto context = activeContext.load(std::memory_order_acquire);
-    if (context == nullptr || context->trampolines.loadLibraryW == nullptr) {
-        SetLastError(ERROR_ACCESS_DENIED);
-        return nullptr;
-    }
-    const HMODULE module = context->trampolines.loadLibraryW(fileName);
-    if (internalBypassDepth != 0 || module == nullptr) {
-        return module;
-    }
-    return AdmitAfterLoad(context, module, RequestedTarget(context, fileName))
-        ? module
-        : nullptr;
+    const auto original = context == nullptr
+        ? nullptr
+        : context->trampolines.loadLibraryW;
+    return HookLoader(
+        original,
+        std::wstring_view(fileName == nullptr ? L"" : fileName),
+        [original, fileName]() { return original(fileName); });
 }
 
 HMODULE WINAPI HookLoadLibraryExA(
     const LPCSTR fileName,
     const HANDLE file,
     const DWORD flags) {
-    std::shared_lock callbackLock(callbackGate);
     const auto context = activeContext.load(std::memory_order_acquire);
-    if (context == nullptr || context->trampolines.loadLibraryExA == nullptr) {
-        SetLastError(ERROR_ACCESS_DENIED);
-        return nullptr;
-    }
-    const HMODULE module = context->trampolines.loadLibraryExA(fileName, file, flags);
-    if (internalBypassDepth != 0 || module == nullptr) {
-        return module;
-    }
-    return AdmitAfterLoad(context, module, RequestedTarget(context, fileName))
-        ? module
-        : nullptr;
+    const auto original = context == nullptr
+        ? nullptr
+        : context->trampolines.loadLibraryExA;
+    return HookLoader(original, fileName, [original, fileName, file, flags]() {
+        return original(fileName, file, flags);
+    });
 }
 
 HMODULE WINAPI HookLoadLibraryExW(
     const LPCWSTR fileName,
     const HANDLE file,
     const DWORD flags) {
-    std::shared_lock callbackLock(callbackGate);
     const auto context = activeContext.load(std::memory_order_acquire);
-    if (context == nullptr || context->trampolines.loadLibraryExW == nullptr) {
-        SetLastError(ERROR_ACCESS_DENIED);
-        return nullptr;
-    }
-    const HMODULE module = context->trampolines.loadLibraryExW(fileName, file, flags);
-    if (internalBypassDepth != 0 || module == nullptr) {
-        return module;
-    }
-    return AdmitAfterLoad(context, module, RequestedTarget(context, fileName))
-        ? module
-        : nullptr;
+    const auto original = context == nullptr
+        ? nullptr
+        : context->trampolines.loadLibraryExW;
+    return HookLoader(
+        original,
+        std::wstring_view(fileName == nullptr ? L"" : fileName),
+        [original, fileName, file, flags]() {
+            return original(fileName, file, flags);
+        });
 }
 
 FARPROC WINAPI HookGetProcAddress(
     const HMODULE module,
     const LPCSTR procedureName) {
-    std::shared_lock callbackLock(callbackGate);
     const auto context = activeContext.load(std::memory_order_acquire);
-    if (context == nullptr || context->trampolines.getProcAddress == nullptr) {
+    if (context == nullptr || context->trampolines.getProcAddress == nullptr
+        || IsFatal(context)) {
+        SetLastError(ERROR_ACCESS_DENIED);
+        return nullptr;
+    }
+    CallbackLease callback;
+    if (IsFatal(context)) {
         SetLastError(ERROR_ACCESS_DENIED);
         return nullptr;
     }
     if (internalBypassDepth != 0) {
         return context->trampolines.getProcAddress(module, procedureName);
     }
+    if (callback.IsNested()) {
+        if (ModuleIsRequestedTarget(context, module)) {
+            static_cast<void>(Fatal(context, "STEAM_NESTED_PROTECTED_SYMBOL"));
+            SetLastError(ERROR_ACCESS_DENIED);
+            return nullptr;
+        }
+        const auto result = context->trampolines.getProcAddress(
+            module,
+            procedureName);
+        return IsFatal(context) ? nullptr : result;
+    }
+
     const auto admission = AdmitModule(context, module);
     if (!admission.target) {
-        return context->trampolines.getProcAddress(module, procedureName);
+        const auto result = context->trampolines.getProcAddress(
+            module,
+            procedureName);
+        return IsFatal(context) ? nullptr : result;
     }
-    if (!admission.admitted || admission.record == nullptr) {
+    if (!admission.admitted || admission.record == nullptr || IsFatal(context)) {
         return nullptr;
     }
     if (reinterpret_cast<std::uintptr_t>(procedureName) <= 0xffffU) {
@@ -696,10 +982,15 @@ FARPROC WINAPI HookGetProcAddress(
             return exportEntry.name == requested;
         });
     if (found != admission.record->protectedExports.end()) {
-        return reinterpret_cast<FARPROC>(
-            Steam::SteamFactoryDetourAddress(found->slot));
+        return IsFatal(context)
+            ? nullptr
+            : reinterpret_cast<FARPROC>(
+                Steam::SteamFactoryDetourAddress(found->slot));
     }
-    return context->trampolines.getProcAddress(module, procedureName);
+    const auto result = context->trampolines.getProcAddress(
+        module,
+        procedureName);
+    return IsFatal(context) ? nullptr : result;
 }
 
 struct LoaderHookDefinition {
@@ -732,7 +1023,8 @@ bool BuildContext(
         return false;
     }
     auto candidate = std::make_shared<GateContext>();
-    candidate->fatalReporter = configuration.fatalReporter;
+    candidate->fatalState = std::make_shared<Steam::FatalState>(
+        configuration.fatalReporter);
     const Steam::SteamPolicy policy;
     std::size_t exportCount = 0;
     for (const auto& source : configuration.modules) {
@@ -750,7 +1042,10 @@ bool BuildContext(
         if (record->expectedFile.value == INVALID_HANDLE_VALUE
             || !ReadCanonicalPath(
                 record->expectedFile.value,
-                record->canonicalPath)) {
+                record->canonicalPath)
+            || !ReadFileIdentity(
+                record->expectedFile.value,
+                record->expectedIdentity)) {
             return false;
         }
         const std::wstring_view finalPath(record->canonicalPath);
@@ -801,8 +1096,8 @@ bool BuildContext(
                     return std::count_if(
                         record->protectedExports.begin(),
                         record->protectedExports.end(),
-                        [&exportEntry](const ProtectedExport& candidate) {
-                            return candidate.name == exportEntry.name;
+                        [&exportEntry](const ProtectedExport& candidateExport) {
+                            return candidateExport.name == exportEntry.name;
                         }) != 1;
                 })) {
             return false;
@@ -824,18 +1119,19 @@ bool BuildContext(
 }
 
 DeferredModuleGateCleanupStatus CleanupLocked() noexcept {
+    Hooks::MinHookMutationLease mutation;
     gateInstalled.store(false, std::memory_order_release);
-    if (lifecycle.context != nullptr) {
-        lifecycle.context->denyOnly.store(true, std::memory_order_release);
+    if (lifecycle.context != nullptr && lifecycle.context->fatalState != nullptr) {
+        lifecycle.context->fatalState->EnterDenyOnly();
     }
     auto disableKnownHooks = []() noexcept {
         bool disabled = true;
-        std::scoped_lock hookLock(minHookMutex, hooksMutex);
-        for (auto& hook : lifecycle.hooks) {
+        std::scoped_lock hookLock(hooksMutex);
+        for (const auto& hook : lifecycle.hooks) {
             if (!hook.created) {
                 continue;
             }
-            const auto status = MH_DisableHook(hook.target);
+            const auto status = Hooks::DisableHook(hook.target);
             disabled = (status == MH_OK || status == MH_ERROR_DISABLED
                     || status == MH_ERROR_NOT_CREATED)
                 && disabled;
@@ -846,25 +1142,25 @@ DeferredModuleGateCleanupStatus CleanupLocked() noexcept {
         return DeferredModuleGateCleanupStatus::Incomplete;
     }
 
+    {
+        std::unique_lock callbackDrain(callbackGate);
+    }
+    Steam::SteamFactoryCallbackBlock factoryCallbackBlock;
     std::unique_lock callbackLock(callbackGate);
-    // A loader callback that began before the first disable may have admitted a
-    // factory while cleanup waited. With loader/symbol callbacks now quiesced,
-    // disable the complete final set before blocking factory callbacks.
     if (!disableKnownHooks()) {
         return DeferredModuleGateCleanupStatus::Incomplete;
     }
     lifecycle.mayBeEnabled = false;
-    Steam::SteamFactoryCallbackBlock factoryCallbackBlock;
     bool removed = true;
     {
-        std::scoped_lock hookLock(minHookMutex, hooksMutex);
+        std::scoped_lock hookLock(hooksMutex);
         for (auto iterator = lifecycle.hooks.rbegin();
              iterator != lifecycle.hooks.rend();
              ++iterator) {
             if (!iterator->created) {
                 continue;
             }
-            const auto status = MH_RemoveHook(iterator->target);
+            const auto status = Hooks::RemoveHook(iterator->target);
             if (status == MH_OK || status == MH_ERROR_NOT_CREATED) {
                 iterator->created = false;
                 if (iterator->factorySlot < Steam::kSteamFactorySlotCapacity) {
@@ -884,22 +1180,16 @@ DeferredModuleGateCleanupStatus CleanupLocked() noexcept {
     if (!removed) {
         return DeferredModuleGateCleanupStatus::Incomplete;
     }
-
-    if (lifecycle.initialized && lifecycle.ownsInitialization) {
-        std::scoped_lock hookLock(minHookMutex);
-        const auto status = MH_Uninitialize();
-        if (status != MH_OK && status != MH_ERROR_NOT_INITIALIZED) {
-            return DeferredModuleGateCleanupStatus::Incomplete;
-        }
+    if (lifecycle.initialized && !Hooks::ReleaseMinHook()) {
+        return DeferredModuleGateCleanupStatus::Incomplete;
     }
+    lifecycle.initialized = false;
     activeContext.store({}, std::memory_order_release);
     lifecycle = {};
     return DeferredModuleGateCleanupStatus::Success;
 }
 
-}  // namespace
-
-DeferredModuleGateInstallStatus InstallDeferredModuleGate(
+DeferredModuleGateInstallStatus InstallWithSuspendedProof(
     const DeferredModuleGateConfiguration& configuration) noexcept {
     std::scoped_lock installLock(installMutex);
     if (lifecycle.context != nullptr
@@ -907,84 +1197,84 @@ DeferredModuleGateInstallStatus InstallDeferredModuleGate(
         return DeferredModuleGateInstallStatus::HookInstallFailed;
     }
     try {
+        Hooks::MinHookMutationLease mutation;
         std::shared_ptr<GateContext> context;
         if (!BuildContext(configuration, context)) {
             return DeferredModuleGateInstallStatus::InvalidConfiguration;
         }
-        bool loaderHooksReady = true;
-        {
-            std::scoped_lock hookLock(minHookMutex);
-            const auto initialize = MH_Initialize();
-            lifecycle.ownsInitialization = initialize == MH_OK;
-            if (!lifecycle.ownsInitialization
-                && initialize != MH_ERROR_ALREADY_INITIALIZED) {
-                return DeferredModuleGateInstallStatus::HookInstallFailed;
-            }
-            lifecycle.initialized = true;
-            lifecycle.context = context;
-
-            const HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
-            if (kernel == nullptr) {
-                loaderHooksReady = false;
-            }
-            if (loaderHooksReady) {
-                const auto definitions = LoaderHooks(*context);
-                lifecycle.hooks.reserve(
-                    definitions.size() + Steam::kSteamFactorySlotCapacity);
-                for (const auto& definition : definitions) {
-                    void* const target = reinterpret_cast<void*>(
-                        GetProcAddress(kernel, definition.procedure));
-                    if (target == nullptr
-                        || MH_CreateHook(
-                            target,
-                            definition.detour,
-                            definition.original) != MH_OK) {
-                        loaderHooksReady = false;
-                        break;
-                    }
-                    lifecycle.hooks.push_back({target, true, false});
+        if (!Hooks::AcquireMinHook()) {
+            return DeferredModuleGateInstallStatus::HookInstallFailed;
+        }
+        lifecycle.initialized = true;
+        lifecycle.context = context;
+        bool ready = true;
+        const HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
+        if (kernel == nullptr) {
+            ready = false;
+        }
+        if (ready) {
+            const auto definitions = LoaderHooks(*context);
+            lifecycle.hooks.reserve(
+                definitions.size() + Steam::kSteamFactorySlotCapacity);
+            for (const auto& definition : definitions) {
+                void* const target = reinterpret_cast<void*>(
+                    GetProcAddress(kernel, definition.procedure));
+                if (target == nullptr
+                    || Hooks::CreateHook(
+                        target,
+                        definition.detour,
+                        definition.original) != MH_OK) {
+                    ready = false;
+                    break;
                 }
-            }
-            if (loaderHooksReady) {
-                for (const auto& hook : lifecycle.hooks) {
-                    if (MH_QueueEnableHook(hook.target) != MH_OK) {
-                        loaderHooksReady = false;
-                        break;
-                    }
-                }
-            }
-            if (loaderHooksReady) {
-                lifecycle.mayBeEnabled = true;
-                activeContext.store(context, std::memory_order_release);
-                loaderHooksReady = MH_ApplyQueued() == MH_OK;
+                lifecycle.hooks.push_back({target, true, false});
             }
         }
-        if (!loaderHooksReady) {
+        if (ready) {
+            for (const auto& hook : lifecycle.hooks) {
+                if (Hooks::QueueEnableHook(hook.target) != MH_OK) {
+                    ready = false;
+                    break;
+                }
+            }
+        }
+        if (ready) {
+            lifecycle.mayBeEnabled = true;
+            activeContext.store(context, std::memory_order_release);
+            ready = Hooks::ApplyQueuedHooks() == MH_OK;
+        }
+        if (!ready) {
+            static_cast<void>(Fatal(context, "STEAM_HOOK_FAILED"));
             static_cast<void>(CleanupLocked());
             return DeferredModuleGateInstallStatus::HookInstallFailed;
         }
 
-        for (const auto& record : context->modules) {
-            const HMODULE loaded = GetModuleHandleW(record->baseName.c_str());
-            if (loaded != nullptr) {
-                const auto admission = AdmitModule(context, loaded);
-                if (!admission.target || !admission.admitted) {
-                    static_cast<void>(CleanupLocked());
-                    return DeferredModuleGateInstallStatus::AdmissionFailed;
-                }
-            }
-            else if (!record->allowDeferred) {
-                static_cast<void>(CleanupLocked());
-                return DeferredModuleGateInstallStatus::AdmissionFailed;
-            }
+        // Toolhelp is not independently loader-stable. This scan is valid only
+        // under the Testing suspended-process proof. After resume, all scans run
+        // from the serialized outermost loader callback.
+        if (!ScanAndAdmitExpectedModules(context, false)) {
+            static_cast<void>(CleanupLocked());
+            return DeferredModuleGateInstallStatus::AdmissionFailed;
         }
         gateInstalled.store(true, std::memory_order_release);
         return DeferredModuleGateInstallStatus::Success;
     }
     catch (...) {
+        if (lifecycle.context != nullptr) {
+            static_cast<void>(Fatal(lifecycle.context, "STEAM_GATE_UNAVAILABLE"));
+        }
         static_cast<void>(CleanupLocked());
         return DeferredModuleGateInstallStatus::HookInstallFailed;
     }
+}
+
+}  // namespace
+
+DeferredModuleGateInstallStatus InstallDeferredModuleGate(
+    const DeferredModuleGateConfiguration&) noexcept {
+    // Task 5 owns production proof that initialization runs while the target is
+    // suspended. Until that proof exists, production cannot arm this gate.
+    return DeferredModuleGateInstallStatus::InvalidConfiguration;
 }
 
 DeferredModuleGateCleanupStatus UninstallDeferredModuleGate() noexcept {
@@ -995,5 +1285,39 @@ DeferredModuleGateCleanupStatus UninstallDeferredModuleGate() noexcept {
 bool DeferredModuleGateIsInstalled() noexcept {
     return gateInstalled.load(std::memory_order_acquire);
 }
+
+namespace Testing {
+
+DeferredModuleGateInstallStatus
+InstallDeferredModuleGateForSyntheticSuspendedProcess(
+    const DeferredModuleGateConfiguration& configuration) noexcept {
+    return InstallWithSuspendedProof(configuration);
+}
+
+void FailNextFactoryPublication() noexcept {
+    failFactoryPublication.fetch_add(1, std::memory_order_acq_rel);
+}
+
+DeferredModuleGateLifecycleSnapshot CurrentGateLifecycle() noexcept {
+    std::scoped_lock installLock(installMutex);
+    DeferredModuleGateLifecycleSnapshot snapshot{};
+    snapshot.contextRetained = lifecycle.context != nullptr;
+    snapshot.denyOnly = lifecycle.context != nullptr
+        && lifecycle.context->fatalState != nullptr
+        && lifecycle.context->fatalState->IsFatal();
+    std::scoped_lock hookLock(hooksMutex);
+    for (const auto& hook : lifecycle.hooks) {
+        if (!hook.created) {
+            continue;
+        }
+        ++snapshot.hooksRetained;
+        if (hook.factorySlot < Steam::kSteamFactorySlotCapacity) {
+            ++snapshot.factorySlotsRetained;
+        }
+    }
+    return snapshot;
+}
+
+}  // namespace Testing
 
 }  // namespace DSRRandomizer::Modules

@@ -153,7 +153,9 @@ InitStatus InitializeCore(
                 static_cast<void>(UninstallProtectionGroups());
                 return InitStatus::SteamConfigurationUnavailable;
             }
-            if (Modules::InstallDeferredModuleGate(configuration)
+            if (Modules::Testing::
+                    InstallDeferredModuleGateForSyntheticSuspendedProcess(
+                        configuration)
                 != Modules::DeferredModuleGateInstallStatus::Success) {
                 static_cast<void>(UninstallProtectionGroups());
                 return InitStatus::DeferredModuleGateInstallFailed;
