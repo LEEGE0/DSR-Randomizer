@@ -42,11 +42,20 @@ enum class DeferredModuleGateCleanupStatus {
 
 namespace Testing {
 
+using CountedStringSnapshotHook = void(*)() noexcept;
+
 struct DeferredModuleGateLifecycleSnapshot {
     bool contextRetained;
     bool denyOnly;
     std::size_t hooksRetained;
     std::size_t factorySlotsRetained;
+};
+
+struct NativeSymbolDelegationProbeSnapshot {
+    std::uint32_t firstOriginalCalls;
+    std::uint32_t chainedOriginalCalls;
+    std::int32_t status;
+    bool resultPublished;
 };
 
 // Synthetic test subprocesses are started before worker threads and act as the
@@ -76,6 +85,9 @@ GateRetainedFactorySlotCountForReporter() noexcept;
 [[nodiscard]] std::int32_t CallOriginalLdrLoadDllForSyntheticCallout(
     const std::wstring& path,
     void** module) noexcept;
+[[nodiscard]] NativeSymbolDelegationProbeSnapshot
+ProbeNativeSymbolDelegationChain() noexcept;
+void SetCountedStringSnapshotHook(CountedStringSnapshotHook hook) noexcept;
 
 }  // namespace Testing
 

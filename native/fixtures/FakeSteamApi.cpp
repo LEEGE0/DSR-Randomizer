@@ -9,6 +9,7 @@ namespace {
 
 std::atomic<std::uint32_t> protectedCalls{0};
 std::atomic<std::uint32_t> identityCalls{0};
+std::atomic<std::uint32_t> factoryCalls{0};
 std::atomic<DWORD> unexpectedFactoryExitCode{0};
 std::atomic<HANDLE> identityEnteredEvent{};
 std::atomic<HANDLE> identityReleaseEvent{};
@@ -56,6 +57,7 @@ bool IsKnownVersion(const char* const version) noexcept {
 
 extern "C" __declspec(dllexport) void* __cdecl FakeSteamFactory(
     const char* const version) noexcept {
+    factoryCalls.fetch_add(1, std::memory_order_relaxed);
     const auto unexpectedExit = unexpectedFactoryExitCode.load(
         std::memory_order_relaxed);
     if (!IsKnownVersion(version) && unexpectedExit != 0) {
@@ -77,6 +79,7 @@ extern "C" __declspec(dllexport) void* __cdecl FakeSteamFactory(
 extern "C" __declspec(dllexport) void __cdecl FakeSteamResetCounters() noexcept {
     protectedCalls.store(0, std::memory_order_relaxed);
     identityCalls.store(0, std::memory_order_relaxed);
+    factoryCalls.store(0, std::memory_order_relaxed);
     unexpectedFactoryExitCode.store(0, std::memory_order_relaxed);
 }
 
@@ -88,6 +91,11 @@ FakeSteamProtectedCallCount() noexcept {
 extern "C" __declspec(dllexport) std::uint32_t __cdecl
 FakeSteamIdentityCallCount() noexcept {
     return identityCalls.load(std::memory_order_relaxed);
+}
+
+extern "C" __declspec(dllexport) std::uint32_t __cdecl
+FakeSteamFactoryCallCount() noexcept {
+    return factoryCalls.load(std::memory_order_relaxed);
 }
 
 extern "C" __declspec(dllexport) void __cdecl

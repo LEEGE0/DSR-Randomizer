@@ -26,6 +26,7 @@ using DSRRandomizer::Modules::DeferredModuleGateConfiguration;
 using DSRRandomizer::Modules::DeferredModuleGateInstallStatus;
 using DSRRandomizer::Modules::DeferredModuleExpectation;
 using Factory = DSRRandomizer::Steam::Synthetic::FactoryFunction;
+using ResetCounters = void(__cdecl*)() noexcept;
 using QueryCounter = std::uint32_t(__cdecl*)() noexcept;
 using SetIdentityBlockEvents = void(__cdecl*)(HANDLE, HANDLE) noexcept;
 using SetFactoryBlockEvents = void(__cdecl*)(HANDLE, HANDLE) noexcept;
@@ -57,6 +58,13 @@ std::atomic<std::uint32_t> fatalCount{};
 std::atomic<const char*> lastFatal{};
 std::atomic<bool> denyObservedByAllocationReporter{};
 std::atomic<std::size_t> slotsObservedByAllocationReporter{};
+Factory eagerFactoryForReporter = nullptr;
+QueryCounter factoryCountForReporter = nullptr;
+std::atomic<void*> factoryResultObservedByReporter{};
+std::atomic<std::uint32_t> rawFactoryCallsObservedByReporter{};
+std::atomic<void*> countedMetadataPage{};
+std::atomic<SIZE_T> countedMetadataPageSize{};
+std::atomic<DWORD> countedMetadataOldProtection{};
 
 void ReturningFatalReporter(const char* const code) noexcept {
     lastFatal.store(code, std::memory_order_release);
@@ -72,6 +80,35 @@ void AllocationFatalReporter(const char* const code) noexcept {
             GateRetainedFactorySlotCountForReporter(),
         std::memory_order_release);
     ReturningFatalReporter(code);
+}
+
+void AppliedFactoryFatalReporter(const char* const code) noexcept {
+    void* const result = eagerFactoryForReporter == nullptr
+        ? reinterpret_cast<void*>(1)
+        : eagerFactoryForReporter("SteamMatchMaking009");
+    factoryResultObservedByReporter.store(result, std::memory_order_release);
+    rawFactoryCallsObservedByReporter.store(
+        factoryCountForReporter == nullptr ? UINT32_MAX : factoryCountForReporter(),
+        std::memory_order_release);
+    ReturningFatalReporter(code);
+}
+
+void InvalidateCountedMetadataAfterSnapshot() noexcept {
+    const auto page = countedMetadataPage.load(std::memory_order_acquire);
+    const auto size = countedMetadataPageSize.load(std::memory_order_acquire);
+    DWORD oldProtection = 0;
+    if (page != nullptr && size != 0) {
+        auto* const metadata = static_cast<ANSI_STRING*>(page);
+        metadata->Buffer = reinterpret_cast<PCHAR>(1);
+        metadata->Length = USHRT_MAX;
+        metadata->MaximumLength = 0;
+    }
+    if (page != nullptr && size != 0
+        && VirtualProtect(page, size, PAGE_NOACCESS, &oldProtection)) {
+        countedMetadataOldProtection.store(
+            oldProtection,
+            std::memory_order_release);
+    }
 }
 
 int Fail(const char* const message) {
@@ -503,6 +540,52 @@ int RunPostCreateFailure(const std::wstring& fakePath) {
         : Fail("post-create failure orphaned hook state or reported before deny");
 }
 
+int RunAppliedFactoryReporterRetention(const std::wstring& fakePath) {
+    const HMODULE module = LoadLibraryW(fakePath.c_str());
+    const auto rawFactory = Resolve<Factory>(module, "FakeSteamFactory");
+    const auto reset = Resolve<ResetCounters>(module, "FakeSteamResetCounters");
+    const auto factoryCount = Resolve<QueryCounter>(
+        module,
+        "FakeSteamFactoryCallCount");
+    if (module == nullptr || rawFactory == nullptr || reset == nullptr
+        || factoryCount == nullptr) {
+        return Fail("applied factory reporter setup failed");
+    }
+    reset();
+    eagerFactoryForReporter = rawFactory;
+    factoryCountForReporter = factoryCount;
+    factoryResultObservedByReporter.store(
+        reinterpret_cast<void*>(1),
+        std::memory_order_release);
+    rawFactoryCallsObservedByReporter.store(UINT32_MAX, std::memory_order_release);
+    DSRRandomizer::Modules::Testing::FailNextFactoryPublication();
+    const auto install = InstallTestGate(Configuration(
+        fakePath,
+        false,
+        &AppliedFactoryFatalReporter));
+    const auto retained = DSRRandomizer::Modules::Testing::CurrentGateLifecycle();
+    const bool deniedThroughReporter = install
+            == DeferredModuleGateInstallStatus::AdmissionFailed
+        && factoryResultObservedByReporter.load(std::memory_order_acquire) == nullptr
+        && rawFactoryCallsObservedByReporter.load(std::memory_order_acquire) == 0
+        && factoryCount() == 0
+        && retained.contextRetained && retained.denyOnly
+        && retained.factorySlotsRetained != 0
+        && rawFactory("SteamMatchMaking009") == nullptr
+        && factoryCount() == 0;
+    const auto cleanup = DSRRandomizer::Modules::UninstallDeferredModuleGate();
+    const bool rawRestoredAfterCleanup = rawFactory("SteamMatchMaking009") != nullptr
+        && factoryCount() == 1;
+    eagerFactoryForReporter = nullptr;
+    factoryCountForReporter = nullptr;
+    FreeLibrary(module);
+    return deniedThroughReporter
+            && cleanup == DeferredModuleGateCleanupStatus::Success
+            && rawRestoredAfterCleanup
+        ? 0
+        : Fail("applied factory escaped during reporter or failure handoff");
+}
+
 int RunActiveFactoryRollback(const std::wstring& fakePath) {
     const HMODULE module = LoadLibraryW(fakePath.c_str());
     const auto rawFactory = Resolve<Factory>(module, "FakeSteamFactory");
@@ -513,15 +596,20 @@ int RunActiveFactoryRollback(const std::wstring& fakePath) {
     const HANDLE allowRollback = MakeManualEvent();
     const HANDLE factoryEntered = MakeManualEvent();
     const HANDLE factoryRelease = MakeManualEvent();
+    const HANDLE afterInitialDisable = MakeManualEvent();
     const HANDLE beforeFactoryDrain = MakeManualEvent();
     const HANDLE installDone = MakeManualEvent();
+    const HANDLE cleanupDone = MakeManualEvent();
     const HANDLE installStart = MakeManualEvent();
+    const HANDLE cleanupStart = MakeManualEvent();
     const HANDLE callbackStart = MakeManualEvent();
     if (module == nullptr || rawFactory == nullptr || setFactoryBlock == nullptr
         || afterApply == nullptr || allowRollback == nullptr
         || factoryEntered == nullptr || factoryRelease == nullptr
-        || beforeFactoryDrain == nullptr || installDone == nullptr
-        || installStart == nullptr || callbackStart == nullptr) {
+        || afterInitialDisable == nullptr || beforeFactoryDrain == nullptr
+        || installDone == nullptr
+        || cleanupDone == nullptr || installStart == nullptr
+        || cleanupStart == nullptr || callbackStart == nullptr) {
         return Fail("active factory rollback setup failed");
     }
     setFactoryBlock(factoryEntered, factoryRelease);
@@ -529,11 +617,13 @@ int RunActiveFactoryRollback(const std::wstring& fakePath) {
         afterApply,
         allowRollback);
     DSRRandomizer::Modules::Testing::SetGateCleanupPhaseEvents(
-        nullptr,
+        afterInitialDisable,
         beforeFactoryDrain);
     DSRRandomizer::Modules::Testing::FailNextFactoryPublication();
     DeferredModuleGateInstallStatus installStatus =
         DeferredModuleGateInstallStatus::Success;
+    DeferredModuleGateCleanupStatus cleanupStatus =
+        DeferredModuleGateCleanupStatus::Incomplete;
     void* callbackResult = reinterpret_cast<void*>(1);
     std::thread callback([&]() {
         WaitForSingleObject(callbackStart, INFINITE);
@@ -543,6 +633,11 @@ int RunActiveFactoryRollback(const std::wstring& fakePath) {
         WaitForSingleObject(installStart, INFINITE);
         installStatus = InstallTestGate(Configuration(fakePath, false));
         SetEvent(installDone);
+    });
+    std::thread cleanup([&]() {
+        WaitForSingleObject(cleanupStart, INFINITE);
+        cleanupStatus = DSRRandomizer::Modules::UninstallDeferredModuleGate();
+        SetEvent(cleanupDone);
     });
     SetEvent(installStart);
     if (!WaitSignaled(afterApply)) {
@@ -554,35 +649,52 @@ int RunActiveFactoryRollback(const std::wstring& fakePath) {
     }
     FreeLibrary(module);
     SetEvent(allowRollback);
-    if (!WaitSignaled(beforeFactoryDrain)) {
+    if (!WaitSignaled(installDone)) {
         ExitProcess(104);
     }
-    const bool rollbackBlocked =
-        WaitForSingleObject(installDone, 0) == WAIT_TIMEOUT;
+    const auto retained = DSRRandomizer::Modules::Testing::CurrentGateLifecycle();
+    const bool noImplicitDrain =
+        WaitForSingleObject(afterInitialDisable, 0) == WAIT_TIMEOUT
+        && WaitForSingleObject(beforeFactoryDrain, 0) == WAIT_TIMEOUT;
     SetEvent(factoryRelease);
     callback.join();
     install.join();
+    SetEvent(cleanupStart);
+    if (!WaitSignaled(afterInitialDisable)) {
+        ExitProcess(105);
+    }
+    if (!WaitSignaled(beforeFactoryDrain)) {
+        ExitProcess(106);
+    }
+    if (!WaitSignaled(cleanupDone)) {
+        ExitProcess(107);
+    }
+    cleanup.join();
     DSRRandomizer::Modules::Testing::SetFactoryPublicationPauseEvents(
         nullptr,
         nullptr);
     DSRRandomizer::Modules::Testing::SetGateCleanupPhaseEvents(nullptr, nullptr);
     const bool unloaded = GetModuleHandleW(FileName(fakePath).c_str()) == nullptr;
-    const auto cleanup = DSRRandomizer::Modules::UninstallDeferredModuleGate();
     CloseEvents({
         afterApply,
         allowRollback,
         factoryEntered,
         factoryRelease,
+        afterInitialDisable,
         beforeFactoryDrain,
         installDone,
+        cleanupDone,
         installStart,
+        cleanupStart,
         callbackStart,
     });
-    return rollbackBlocked && callbackResult == nullptr && unloaded
+    return noImplicitDrain && callbackResult == nullptr
+            && retained.contextRetained && retained.denyOnly
+            && retained.factorySlotsRetained != 0 && unloaded
             && installStatus == DeferredModuleGateInstallStatus::AdmissionFailed
-            && cleanup == DeferredModuleGateCleanupStatus::Success
+            && cleanupStatus == DeferredModuleGateCleanupStatus::Success
         ? 0
-        : Fail("factory rollback released module state before callback drain");
+        : Fail("explicit factory cleanup did not retain and drain active state");
 }
 
 int RunUnhookedLoaderCallout(
@@ -936,6 +1048,122 @@ int RunDirectNativeSymbolAlternates(const std::wstring& fakePath) {
     return guarded && cleanup == DeferredModuleGateCleanupStatus::Success
         ? 0
         : Fail("alternate native resolver returned the raw protected export");
+}
+
+int RunNativeDelegationOneShot(const std::wstring& fakePath) {
+    const HMODULE module = LoadLibraryW(fakePath.c_str());
+    if (module == nullptr
+        || InstallTestGate(Configuration(fakePath, false))
+            != DeferredModuleGateInstallStatus::Success) {
+        return Fail("native delegation probe setup failed");
+    }
+    const auto probe = DSRRandomizer::Modules::Testing::
+        ProbeNativeSymbolDelegationChain();
+    const auto code = lastFatal.load(std::memory_order_acquire);
+    const bool oneShot = probe.firstOriginalCalls == 1
+        && probe.chainedOriginalCalls == 0
+        && probe.status < 0 && !probe.resultPublished
+        && code != nullptr
+        && std::strcmp(code, "STEAM_NATIVE_SYMBOL_MALFORMED") == 0;
+    const auto cleanup = DSRRandomizer::Modules::UninstallDeferredModuleGate();
+    FreeLibrary(module);
+    return oneShot && cleanup == DeferredModuleGateCleanupStatus::Success
+        ? 0
+        : Fail("native resolver chain received more than one delegation");
+}
+
+void* AllocateCountedMetadataPage(SIZE_T& pageSize) {
+    SYSTEM_INFO system{};
+    GetSystemInfo(&system);
+    pageSize = system.dwPageSize;
+    return VirtualAlloc(
+        nullptr,
+        pageSize,
+        MEM_RESERVE | MEM_COMMIT,
+        PAGE_READWRITE);
+}
+
+bool RestoreCountedMetadataPage(void* const page, const SIZE_T pageSize) {
+    const auto oldProtection = countedMetadataOldProtection.load(
+        std::memory_order_acquire);
+    DWORD ignored = 0;
+    return page != nullptr && pageSize != 0 && oldProtection != 0
+        && VirtualProtect(page, pageSize, oldProtection, &ignored);
+}
+
+void PrepareCountedMetadataFault(void* const page, const SIZE_T pageSize) {
+    countedMetadataOldProtection.store(0, std::memory_order_release);
+    countedMetadataPageSize.store(pageSize, std::memory_order_release);
+    countedMetadataPage.store(page, std::memory_order_release);
+    DSRRandomizer::Modules::Testing::SetCountedStringSnapshotHook(
+        &InvalidateCountedMetadataAfterSnapshot);
+}
+
+void ClearCountedMetadataFault() {
+    DSRRandomizer::Modules::Testing::SetCountedStringSnapshotHook(nullptr);
+    countedMetadataPage.store(nullptr, std::memory_order_release);
+    countedMetadataPageSize.store(0, std::memory_order_release);
+}
+
+int RunCountedUnicodeSnapshot(const std::wstring& fakePath) {
+    const auto native = ResolveNativeApis();
+    if (native.load == nullptr
+        || InstallTestGate(Configuration(fakePath, true))
+            != DeferredModuleGateInstallStatus::Success) {
+        return Fail("counted Unicode snapshot setup failed");
+    }
+    SIZE_T pageSize = 0;
+    void* const page = AllocateCountedMetadataPage(pageSize);
+    if (page == nullptr) {
+        return Fail("counted Unicode metadata allocation failed");
+    }
+    auto* const name = static_cast<UNICODE_STRING*>(page);
+    *name = NativeName(fakePath);
+    PrepareCountedMetadataFault(page, pageSize);
+    HANDLE module = nullptr;
+    const auto status = native.load(nullptr, nullptr, name, &module);
+    const bool restored = RestoreCountedMetadataPage(page, pageSize);
+    ClearCountedMetadataFault();
+    const bool safeSnapshot = restored && status >= 0 && module != nullptr;
+    const auto cleanup = DSRRandomizer::Modules::UninstallDeferredModuleGate();
+    if (module != nullptr) {
+        FreeLibrary(static_cast<HMODULE>(module));
+    }
+    VirtualFree(page, 0, MEM_RELEASE);
+    return safeSnapshot && cleanup == DeferredModuleGateCleanupStatus::Success
+        ? 0
+        : Fail("native Unicode metadata was reread after validation");
+}
+
+int RunCountedAnsiSnapshot(const std::wstring& fakePath) {
+    const auto native = ResolveNativeApis();
+    const HMODULE module = LoadLibraryW(fakePath.c_str());
+    if (native.resolve == nullptr || module == nullptr
+        || InstallTestGate(Configuration(fakePath, false))
+            != DeferredModuleGateInstallStatus::Success) {
+        return Fail("counted ANSI snapshot setup failed");
+    }
+    SIZE_T pageSize = 0;
+    void* const page = AllocateCountedMetadataPage(pageSize);
+    if (page == nullptr) {
+        return Fail("counted ANSI metadata allocation failed");
+    }
+    char factoryName[] = "FakeSteamFactory";
+    auto* const name = static_cast<ANSI_STRING*>(page);
+    *name = NativeProcedure(factoryName);
+    PrepareCountedMetadataFault(page, pageSize);
+    void* factoryAddress = nullptr;
+    const auto status = native.resolve(module, name, 0, &factoryAddress);
+    const bool restored = RestoreCountedMetadataPage(page, pageSize);
+    ClearCountedMetadataFault();
+    const bool safeSnapshot = restored && status >= 0
+        && factoryAddress == DSRRandomizer::Steam::SteamFactoryDetourAddress(0);
+    const auto cleanup = DSRRandomizer::Modules::UninstallDeferredModuleGate();
+    VirtualFree(page, 0, MEM_RELEASE);
+    FreeLibrary(module);
+    return safeSnapshot && cleanup == DeferredModuleGateCleanupStatus::Success
+        ? 0
+        : Fail("native ANSI metadata was reread after validation");
 }
 
 int RunMalformedNativeLoad(const std::wstring& fakePath) {
@@ -1360,6 +1588,7 @@ int RunParent(
         L"identity-teardown",
         L"mutation-barrier",
         L"post-create-failure",
+        L"applied-factory-reporter",
         L"active-factory-rollback",
         L"eager-replacement",
         L"deferred-replacement",
@@ -1377,6 +1606,9 @@ int RunParent(
         L"direct-native-load",
         L"direct-native-symbol",
         L"direct-native-symbol-alternates",
+        L"native-delegation-one-shot",
+        L"counted-unicode-snapshot",
+        L"counted-ansi-snapshot",
         L"malformed-native-load",
         L"ambiguous-native-load",
         L"malformed-native-symbol",
@@ -1436,6 +1668,9 @@ int wmain(const int argc, wchar_t** const argv) {
         if (mode == L"post-create-failure") {
             return RunPostCreateFailure(fakePath);
         }
+        if (mode == L"applied-factory-reporter") {
+            return RunAppliedFactoryReporterRetention(fakePath);
+        }
         if (mode == L"active-factory-rollback") {
             return RunActiveFactoryRollback(fakePath);
         }
@@ -1489,6 +1724,15 @@ int wmain(const int argc, wchar_t** const argv) {
         }
         if (mode == L"direct-native-symbol-alternates") {
             return RunDirectNativeSymbolAlternates(fakePath);
+        }
+        if (mode == L"native-delegation-one-shot") {
+            return RunNativeDelegationOneShot(fakePath);
+        }
+        if (mode == L"counted-unicode-snapshot") {
+            return RunCountedUnicodeSnapshot(fakePath);
+        }
+        if (mode == L"counted-ansi-snapshot") {
+            return RunCountedAnsiSnapshot(fakePath);
         }
         if (mode == L"malformed-native-load") {
             return RunMalformedNativeLoad(fakePath);

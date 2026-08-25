@@ -189,6 +189,7 @@ std::atomic<HANDLE> afterInitialDisableEvent{};
 std::atomic<HANDLE> beforeFactoryDrainEvent{};
 std::atomic<HANDLE> afterFactoryApplyEvent{};
 std::atomic<HANDLE> allowFactoryRollbackEvent{};
+std::atomic<Testing::CountedStringSnapshotHook> countedStringSnapshotHook{};
 Lifecycle lifecycle;
 std::mutex installMutex;
 std::mutex hooksMutex;
@@ -270,6 +271,15 @@ bool SafeWritePointer(void** const destination, void* const value) noexcept {
     }
 }
 
+void InvokeCountedStringSnapshotHook() noexcept {
+    const auto hook = countedStringSnapshotHook.exchange(
+        nullptr,
+        std::memory_order_acq_rel);
+    if (hook != nullptr) {
+        hook();
+    }
+}
+
 bool SafeCopyNativeUnicode(
     const UNICODE_STRING* const source,
     wchar_t* const destination,
@@ -278,20 +288,27 @@ bool SafeCopyNativeUnicode(
     if (source == nullptr || destination == nullptr || capacity == 0) {
         return false;
     }
+    PWSTR buffer = nullptr;
+    USHORT byteLength = 0;
+    USHORT maximumByteLength = 0;
     __try {
-        if (source->Buffer == nullptr || source->Length == 0
-            || (source->Length % sizeof(wchar_t)) != 0
-            || source->Length > source->MaximumLength) {
+        buffer = source->Buffer;
+        byteLength = source->Length;
+        maximumByteLength = source->MaximumLength;
+        InvokeCountedStringSnapshotHook();
+        if (buffer == nullptr || byteLength == 0
+            || (byteLength % sizeof(wchar_t)) != 0
+            || byteLength > maximumByteLength) {
             return false;
         }
         const auto characters = static_cast<std::size_t>(
-            source->Length / sizeof(wchar_t));
+            byteLength / sizeof(wchar_t));
         if (characters >= capacity) {
             return false;
         }
         std::memcpy(
             destination,
-            source->Buffer,
+            buffer,
             characters * sizeof(wchar_t));
         destination[characters] = L'\0';
         length = characters;
@@ -310,15 +327,22 @@ bool SafeCopyNativeAnsi(
     if (source == nullptr || destination == nullptr || capacity == 0) {
         return false;
     }
+    PCHAR buffer = nullptr;
+    USHORT byteLength = 0;
+    USHORT maximumByteLength = 0;
     __try {
-        if (source->Buffer == nullptr || source->Length == 0
-            || source->Length > source->MaximumLength
-            || source->Length >= capacity) {
+        buffer = source->Buffer;
+        byteLength = source->Length;
+        maximumByteLength = source->MaximumLength;
+        InvokeCountedStringSnapshotHook();
+        if (buffer == nullptr || byteLength == 0
+            || byteLength > maximumByteLength
+            || byteLength >= capacity) {
             return false;
         }
-        std::memcpy(destination, source->Buffer, source->Length);
-        destination[source->Length] = '\0';
-        length = source->Length;
+        std::memcpy(destination, buffer, byteLength);
+        destination[byteLength] = '\0';
+        length = byteLength;
         return true;
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -1033,12 +1057,34 @@ bool RollBackFactoryHooks(
     return retainedCount == 0;
 }
 
+void RetainAppliedFactoryHooks(std::vector<HookEntry>& created) noexcept {
+    std::scoped_lock lifecycleLock(hooksMutex);
+    lifecycle.mayBeEnabled = true;
+    lifecycle.hooks.insert(
+        lifecycle.hooks.end(),
+        created.begin(),
+        created.end());
+    created.clear();
+}
+
+bool LifecycleOwnsFactoryHooks() noexcept {
+    std::scoped_lock lifecycleLock(hooksMutex);
+    return std::any_of(
+        lifecycle.hooks.begin(),
+        lifecycle.hooks.end(),
+        [](const HookEntry& hook) {
+            return hook.created
+                && hook.factorySlot < Steam::kSteamFactorySlotCapacity;
+        });
+}
+
 bool ProtectFactoryExports(
     const std::shared_ptr<GateContext>& context,
     ModuleRecord& record,
     const HMODULE module) noexcept {
     std::vector<HookEntry> created;
     bool complete = true;
+    bool applied = false;
     try {
         created.reserve(record.protectedExports.size());
         Hooks::MinHookMutationLease mutation;
@@ -1092,6 +1138,7 @@ bool ProtectFactoryExports(
 
         if (complete && created.size() == record.protectedExports.size()) {
             complete = Hooks::ApplyQueuedHooks() == MH_OK;
+            applied = complete;
         }
         if (complete) {
             SignalTestEvent(afterFactoryApplyEvent);
@@ -1118,7 +1165,12 @@ bool ProtectFactoryExports(
         complete = false;
     }
     context->fatalState->EnterDenyOnly();
-    static_cast<void>(RollBackFactoryHooks(*context, created));
+    if (applied) {
+        RetainAppliedFactoryHooks(created);
+    }
+    else {
+        static_cast<void>(RollBackFactoryHooks(*context, created));
+    }
     return Fatal(context, "STEAM_HOOK_FAILED");
 }
 
@@ -1212,12 +1264,15 @@ AdmissionResult AdmitModuleCore(
             record.expectedSha256.begin())) {
         return {true, Fatal(context, "STEAM_MODULE_HASH_MISMATCH"), &record};
     }
+    // Lifecycle ownership of the module must precede factory-hook application:
+    // a post-apply failure retains the detour and can hand failure back while a
+    // callback is still executing code from this mapped image.
+    record.pinnedModule = std::move(pinned);
+    record.admittedModule = module;
     if (IsFatal(context) || !ProtectFactoryExports(context, record, module)
         || IsFatal(context)) {
         return {true, false, &record};
     }
-    record.pinnedModule = std::move(pinned);
-    record.admittedModule = module;
     record.admitted = true;
     return {true, true, &record};
 }
@@ -1871,7 +1926,7 @@ NTSTATUS GuardNativeProcedureAddress(
     if (nativeSymbolDelegationAllowance != 0
         && !IsWithinLoaderCallout(context)
         && ConsumeNativeDelegation(nativeSymbolDelegationAllowance)) {
-        const auto status = invokeOriginal(
+        const auto status = original(
             procedureName,
             ordinal,
             &result);
@@ -2410,7 +2465,9 @@ DeferredModuleGateInstallStatus InstallWithSuspendedProof(
         // under the Testing suspended-process proof. After resume, all scans run
         // from the serialized outermost loader callback.
         if (!ScanAndAdmitExpectedModules(context, false)) {
-            static_cast<void>(CleanupLocked());
+            if (!LifecycleOwnsFactoryHooks()) {
+                static_cast<void>(CleanupLocked());
+            }
             return DeferredModuleGateInstallStatus::AdmissionFailed;
         }
         gateInstalled.store(true, std::memory_order_release);
@@ -2420,7 +2477,9 @@ DeferredModuleGateInstallStatus InstallWithSuspendedProof(
         if (lifecycle.context != nullptr) {
             static_cast<void>(Fatal(lifecycle.context, "STEAM_GATE_UNAVAILABLE"));
         }
-        static_cast<void>(CleanupLocked());
+        if (!LifecycleOwnsFactoryHooks()) {
+            static_cast<void>(CleanupLocked());
+        }
         return DeferredModuleGateInstallStatus::HookInstallFailed;
     }
 }
@@ -2563,6 +2622,69 @@ std::int32_t CallOriginalLdrLoadDllForSyntheticCallout(
     const auto status = load(nullptr, nullptr, &name, &loaded);
     *module = loaded;
     return status;
+}
+
+NativeSymbolDelegationProbeSnapshot
+ProbeNativeSymbolDelegationChain() noexcept {
+    NativeSymbolDelegationProbeSnapshot snapshot{};
+    const auto context = activeContext.load(std::memory_order_acquire);
+    const auto module = GetModuleHandleW(L"kernel32.dll");
+    if (context == nullptr || module == nullptr) {
+        snapshot.status = kNativeAccessDenied;
+        return snapshot;
+    }
+
+    char firstNameBuffer[] = "first";
+    ANSI_STRING firstName{};
+    firstName.Buffer = firstNameBuffer;
+    firstName.Length = 5;
+    firstName.MaximumLength = 5;
+    char chainedNameBuffer[] = "x";
+    ANSI_STRING malformedChainedName{};
+    malformedChainedName.Buffer = chainedNameBuffer;
+    malformedChainedName.Length = 1;
+    malformedChainedName.MaximumLength = 0;
+    void* result = reinterpret_cast<void*>(1);
+    nativeSymbolDelegationAllowance = 1;
+    snapshot.status = GuardNativeProcedureAddress(
+        context,
+        module,
+        &firstName,
+        0,
+        &result,
+        [&context, module, &snapshot, &malformedChainedName](
+            PANSI_STRING,
+            const ULONG,
+            void** const destination) noexcept {
+            ++snapshot.firstOriginalCalls;
+            void* chainedResult = reinterpret_cast<void*>(1);
+            const auto chainedStatus = GuardNativeProcedureAddress(
+                context,
+                module,
+                &malformedChainedName,
+                0,
+                &chainedResult,
+                [&snapshot](
+                    PANSI_STRING,
+                    const ULONG,
+                    void** const chainedDestination) noexcept {
+                    ++snapshot.chainedOriginalCalls;
+                    *chainedDestination = reinterpret_cast<void*>(2);
+                    return kNativeSuccess;
+                });
+            if (chainedStatus >= kNativeSuccess) {
+                *destination = chainedResult;
+            }
+            return chainedStatus;
+        });
+    nativeSymbolDelegationAllowance = 0;
+    snapshot.resultPublished = result != nullptr;
+    return snapshot;
+}
+
+void SetCountedStringSnapshotHook(
+    const CountedStringSnapshotHook hook) noexcept {
+    countedStringSnapshotHook.store(hook, std::memory_order_release);
 }
 
 }  // namespace Testing
