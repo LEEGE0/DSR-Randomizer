@@ -1,5 +1,69 @@
 include(${CMAKE_SOURCE_DIR}/cmake/MinHook.cmake)
 
+file(READ "${CMAKE_SOURCE_DIR}/config/compatibility-profiles.json" profile_json)
+string(JSON profile_count LENGTH "${profile_json}" profiles)
+if(NOT profile_count EQUAL 1)
+  message(FATAL_ERROR "The native guard requires exactly one release-pinned profile")
+endif()
+string(JSON profile_schema GET "${profile_json}" schemaVersion)
+if(NOT profile_schema EQUAL 1)
+  message(FATAL_ERROR "The native guard supports compatibility profile schema v1 only")
+endif()
+string(JSON PROFILE_EXECUTABLE_MODULE GET
+  "${profile_json}" profiles 0 executableModule)
+string(JSON PROFILE_MACHINE GET
+  "${profile_json}" profiles 0 executable machine)
+string(JSON PROFILE_TIMESTAMP GET
+  "${profile_json}" profiles 0 executable peTimestamp)
+string(JSON PROFILE_IMAGE_SIZE GET
+  "${profile_json}" profiles 0 executable sizeOfImage)
+string(JSON PROFILE_TARGET_COUNT LENGTH
+  "${profile_json}" profiles 0 gameServiceTargets)
+set(PROFILE_TARGETS "")
+if(PROFILE_TARGET_COUNT GREATER 0)
+  math(EXPR profile_target_last "${PROFILE_TARGET_COUNT} - 1")
+  foreach(profile_target_index RANGE 0 ${profile_target_last})
+    string(JSON target_module GET "${profile_json}"
+      profiles 0 gameServiceTargets ${profile_target_index} module)
+    string(JSON target_rva GET "${profile_json}"
+      profiles 0 gameServiceTargets ${profile_target_index} rva)
+    string(JSON target_fingerprint GET "${profile_json}"
+      profiles 0 gameServiceTargets ${profile_target_index} fingerprintSha256)
+    string(JSON target_length GET "${profile_json}"
+      profiles 0 gameServiceTargets ${profile_target_index} patchLength)
+    string(JSON target_action GET "${profile_json}"
+      profiles 0 gameServiceTargets ${profile_target_index} action)
+    string(LENGTH "${target_fingerprint}" target_fingerprint_length)
+    if(NOT target_fingerprint_length EQUAL 64
+        OR target_fingerprint MATCHES "[^0-9A-Fa-f]")
+      message(FATAL_ERROR "A game-service fingerprint is not SHA-256")
+    endif()
+    if(target_action STREQUAL "ForceOffline")
+      set(target_action_cpp "InternalTargetAction::ForceOffline")
+    elseif(target_action STREQUAL "DenyCall")
+      set(target_action_cpp "InternalTargetAction::DenyCall")
+    else()
+      message(FATAL_ERROR "A game-service target action is unsupported")
+    endif()
+    set(target_fingerprint_cpp "")
+    foreach(profile_byte_index RANGE 0 31)
+      math(EXPR profile_hex_index "${profile_byte_index} * 2")
+      string(SUBSTRING "${target_fingerprint}" ${profile_hex_index} 2 target_byte)
+      string(APPEND target_fingerprint_cpp "0x${target_byte}")
+      if(NOT profile_byte_index EQUAL 31)
+        string(APPEND target_fingerprint_cpp ", ")
+      endif()
+    endforeach()
+    string(APPEND PROFILE_TARGETS
+      "    Target{L\"${target_module}\", ${target_rva}ULL, {${target_fingerprint_cpp}}, ${target_length}ULL, ${target_action_cpp}},\n")
+  endforeach()
+endif()
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated/game")
+configure_file(
+  "${CMAKE_CURRENT_SOURCE_DIR}/runtime/game/CompatibilityProfile.generated.h.in"
+  "${CMAKE_BINARY_DIR}/generated/game/CompatibilityProfile.generated.h"
+  @ONLY)
+
 function(dsr_configure_target target_name)
   target_compile_definitions(${target_name}
     PRIVATE
@@ -257,3 +321,19 @@ add_test(
     $<TARGET_FILE:DSRRandomizer.NestedSteamBridge>
     $<TARGET_FILE:DSRRandomizer.StaticSteamCarrier>
     $<TARGET_FILE:DSRRandomizer.NativeLoaderCallout>)
+
+add_executable(GameServiceGuardTests
+  tests/GameServiceGuardTests.cpp)
+target_compile_features(GameServiceGuardTests PRIVATE cxx_std_20)
+target_link_libraries(GameServiceGuardTests
+  PRIVATE
+    DSRRandomizer.Runtime.Core
+    BCrypt)
+target_include_directories(GameServiceGuardTests
+  PRIVATE
+    ${CMAKE_SOURCE_DIR}/native/runtime)
+dsr_configure_target(GameServiceGuardTests)
+set_target_properties(GameServiceGuardTests PROPERTIES
+  CXX_EXTENSIONS OFF)
+
+add_test(NAME GameServiceGuardTests COMMAND GameServiceGuardTests)

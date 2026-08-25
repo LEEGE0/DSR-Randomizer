@@ -3,6 +3,8 @@ add_library(DSRRandomizer.Runtime.Core STATIC
   ProtectionBootstrap.h
   hooks/MinHookCoordinator.cpp
   hooks/MinHookCoordinator.h
+  game/GameServiceGuard.cpp
+  game/GameServiceGuard.h
   modules/DeferredModuleGate.cpp
   modules/DeferredModuleGate.h
   network/WinsockHooks.cpp
@@ -17,7 +19,9 @@ target_compile_features(DSRRandomizer.Runtime.Core PUBLIC cxx_std_20)
 target_include_directories(DSRRandomizer.Runtime.Core
   PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_SOURCE_DIR}/native/include)
+    ${CMAKE_SOURCE_DIR}/native/include
+  PRIVATE
+    ${CMAKE_BINARY_DIR}/generated)
 dsr_configure_target(DSRRandomizer.Runtime.Core)
 target_link_libraries(DSRRandomizer.Runtime.Core
   PUBLIC

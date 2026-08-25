@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "profiles": [
+    {
+      "id": "dsr-steam-a45aaa36",
+      "executableModule": "DarkSoulsRemastered.exe",
+      "executable": {
+        "length": 50286344,
+        "sha256": "a45aaa36dd2f6cc151670a639ea5547043cf38ea79ff4178b963c6ed71f98d7b",
+        "machine": 34404,
+        "peTimestamp": 1665452630,
+        "sizeOfImage": 52015104
+      },
+      "fixedSaveLength": 4326608,
+      "protocolVersion": 2,
+      "modules": [
+        {
+          "name": "steam_api64.dll",
+          "length": 245536,
+          "sha256": "a0a5ac6dcd3d9255bb9c71bae3a71b6bf90c56f4fce46ff0d65533d7ef89b8d8",
+          "machine": 34404,
+          "peTimestamp": 1493160285,
+          "sizeOfImage": 262144
+        }
+      ],
+      "gameServiceTargets": [
+        {
+          "module": "DarkSoulsRemastered.exe",
+          "rva": 2928864,
+          "fingerprintSha256": "1cf979917f14922bf98683a0d63a3ba9251491a0b0f6bfb59c9793b5c837e135",
+          "patchLength": 16,
+          "action": "ForceOffline"
+        },
+        {
+          "module": "DarkSoulsRemastered.exe",
+          "rva": 12537520,
+          "fingerprintSha256": "066ff7a4499d90014e191ed161d69c20f4f352d53173515109c375e3144d1760",
+          "patchLength": 16,
+          "action": "DenyCall"
+        },
+        {
+          "module": "DarkSoulsRemastered.exe",
+          "rva": 17468352,
+          "fingerprintSha256": "93b836eba984d38f9cadd7f8a90afc3999cec8334f7358f38f398f35be93199a",
+          "patchLength": 16,
+          "action": "DenyCall"
+        },
+        {
+          "module": "DarkSoulsRemastered.exe",
+          "rva": 17529920,
+          "fingerprintSha256": "980e2ccade7b248df10b25f06255a5270bbdd16834cfa57d9a8f405948dc7da3",
+          "patchLength": 16,
+          "action": "DenyCall"
+        }
+      ]
+    }
+  ]
+}

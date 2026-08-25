@@ -1,0 +1,26 @@
+#pragma once
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+
+#include "game/GameServiceGuard.h"
+
+namespace DSRRandomizer::Game::Generated {
+
+struct Target {
+    const wchar_t* moduleName;
+    std::uintptr_t rva;
+    std::array<std::uint8_t, 32> fingerprintSha256;
+    std::size_t patchLength;
+    InternalTargetAction action;
+};
+
+inline constexpr wchar_t kExecutableModule[] = L"@PROFILE_EXECUTABLE_MODULE@";
+inline constexpr std::uint16_t kMachine = @PROFILE_MACHINE@;
+inline constexpr std::uint32_t kTimestamp = @PROFILE_TIMESTAMP@U;
+inline constexpr std::uint32_t kSizeOfImage = @PROFILE_IMAGE_SIZE@U;
+inline constexpr std::array<Target, @PROFILE_TARGET_COUNT@> kTargets{{
+@PROFILE_TARGETS@}};
+
+}  // namespace DSRRandomizer::Game::Generated

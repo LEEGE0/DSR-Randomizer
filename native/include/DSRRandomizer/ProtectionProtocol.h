@@ -25,6 +25,7 @@ enum class ProtectionFlags : std::uint64_t {
     Winsock = 1ULL << 3,
     SteamInterfaces = 1ULL << 4,
     DeferredModuleGate = 1ULL << 5,
+    GameServiceOffline = 1ULL << 6,
 };
 
 #pragma pack(push, 1)

@@ -6,6 +6,7 @@
 #include <atomic>
 #include <string>
 
+#include "game/GameServiceGuard.h"
 #include "modules/DeferredModuleGate.h"
 #include "network/WinsockHooks.h"
 #include "save/SaveHooks.h"
@@ -65,6 +66,10 @@ bool SocketConfigurationIsEmpty(const ProtectionInitBlock& block) noexcept {
 }
 
 bool UninstallProtectionGroups() noexcept {
+    if (Game::UninstallGameServiceGuard()
+        != Game::GameServiceGuardCleanupStatus::Success) {
+        return false;
+    }
     if (Save::UninstallSaveHooks() != Save::SaveHookCleanupStatus::Success) {
         return false;
     }
@@ -114,10 +119,13 @@ InitStatus InitializeCore(
         static_cast<std::uint64_t>(ProtectionFlags::SteamInterfaces);
     constexpr auto deferredModuleGateFlag =
         static_cast<std::uint64_t>(ProtectionFlags::DeferredModuleGate);
+    constexpr auto gameServiceOfflineFlag =
+        static_cast<std::uint64_t>(ProtectionFlags::GameServiceOffline);
     constexpr auto saveFlags = saveKnownFolderFlag | saveFileIoFlag;
     constexpr auto steamFlags = steamInterfacesFlag | deferredModuleGateFlag;
     constexpr auto supportedFlags =
-        bootstrapFlag | saveFlags | winsockFlag | steamFlags;
+        bootstrapFlag | saveFlags | winsockFlag | steamFlags
+        | gameServiceOfflineFlag;
     if ((block->requiredFlags & bootstrapFlag) == 0
         || (block->requiredFlags & ~supportedFlags) != 0
         || ((block->requiredFlags & saveFlags) != 0
@@ -139,6 +147,19 @@ InitStatus InitializeCore(
                 != Network::WinsockHookInstallStatus::Success) {
             static_cast<void>(Network::UninstallWinsockHooks());
             return InitStatus::WinsockHookInstallFailed;
+        }
+    }
+
+    if ((block->requiredFlags & gameServiceOfflineFlag) != 0) {
+        const auto gameStatus = Game::InstallPinnedGameServiceGuard();
+        if (gameStatus == Game::GameServiceGuardInstallStatus::ProfileMismatch
+            || gameStatus == Game::GameServiceGuardInstallStatus::InvalidConfiguration) {
+            static_cast<void>(UninstallProtectionGroups());
+            return InitStatus::GameServiceProfileMismatch;
+        }
+        if (gameStatus != Game::GameServiceGuardInstallStatus::Success) {
+            static_cast<void>(UninstallProtectionGroups());
+            return InitStatus::GameServiceHookFailed;
         }
     }
 

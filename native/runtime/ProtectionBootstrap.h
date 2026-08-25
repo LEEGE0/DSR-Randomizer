@@ -22,6 +22,8 @@ enum class InitStatus : std::uint32_t {
     WinsockHookInstallFailed = 7,
     SteamConfigurationUnavailable = 8,
     DeferredModuleGateInstallFailed = 9,
+    GameServiceProfileMismatch = 10,
+    GameServiceHookFailed = 11,
 };
 
 InitStatus InitializeProtection(ProtectionInitBlock* block) noexcept;

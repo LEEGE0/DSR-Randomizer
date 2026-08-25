@@ -12,7 +12,11 @@ public enum ProtectionFlags : ulong
     None = 0,
     Bootstrap = 1UL << 0,
     SaveKnownFolder = 1UL << 1,
-    SaveFileIo = 1UL << 2
+    SaveFileIo = 1UL << 2,
+    Winsock = 1UL << 3,
+    SteamInterfaces = 1UL << 4,
+    DeferredModuleGate = 1UL << 5,
+    GameServiceOffline = 1UL << 6
 }
 
 public sealed record GuardSavePathConfiguration(
