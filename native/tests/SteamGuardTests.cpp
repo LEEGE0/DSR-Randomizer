@@ -10,6 +10,8 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "DSRRandomizer/ProtectionProtocol.h"
@@ -73,6 +75,32 @@ private:
 
 static_assert(sizeof(ProductionSteamId) == sizeof(std::uint64_t));
 
+#pragma pack(push, 1)
+class ProductionGameId final {
+public:
+    ProductionGameId() noexcept : value_(0) {}
+    explicit ProductionGameId(const std::uint64_t value) noexcept
+        : value_(value) {}
+
+private:
+    std::uint64_t value_;
+};
+#pragma pack(pop)
+
+struct ProductionP2PSessionState {
+    std::uint8_t connectionActive;
+    std::uint8_t connecting;
+    std::uint8_t sessionError;
+    std::uint8_t usingRelay;
+    std::int32_t bytesQueuedForSend;
+    std::int32_t packetsQueuedForSend;
+    std::uint32_t remoteIp;
+    std::uint16_t remotePort;
+};
+
+static_assert(sizeof(ProductionGameId) == sizeof(std::uint64_t));
+static_assert(sizeof(ProductionP2PSessionState) == 20);
+
 void* __cdecl ProductionRawFactory(const char* version) noexcept;
 
 std::uintptr_t ProductionRawProtected(void*, ...) noexcept {
@@ -130,34 +158,1093 @@ void ProductionAbiFatalReporter(const char*) noexcept {
     ++productionAbiFatalCalls;
 }
 
+using I32 = std::int32_t;
+using I64 = std::int64_t;
+using U16 = std::uint16_t;
+using U32 = std::uint32_t;
+using U64 = std::uint64_t;
+using ProductionWarningMessageHook = void(__cdecl*)(I32, const char*);
+using ProductionPostApiResultHook = void(__cdecl*)();
+using ProductionCheckCallbackRegisteredHook = U32(__cdecl*)(I32);
+
+struct ProductionSteamParamStringArray;
+
+// These declarations are the reviewed Windows ABI matrix.  Each invocation
+// below is compiled through its slot's exact method type instead of deriving a
+// heterogeneous function pointer from the supplied test arguments.
+struct SteamClient017Abi;
+struct SteamUser019Abi;
+struct SteamMatchmaking009Abi;
+struct SteamNetworking005Abi;
+struct SteamRemoteStorage014Abi;
+
 template <typename Result, typename... Arguments>
-Result CallProductionSlot(
+using ProductionMethod = Result(*)(void*, Arguments...) noexcept;
+
+template <typename Interface, std::size_t Slot>
+struct ProductionSlotSignature;
+
+#define DECLARE_SLOT_SIGNATURE0(Interface, Slot, Result)       \
+    template <>                                               \
+    struct ProductionSlotSignature<Interface, Slot> final {   \
+        using Method = ProductionMethod<Result>;              \
+    }
+
+#define DECLARE_SLOT_SIGNATURE(Interface, Slot, Result, ...)   \
+    template <>                                               \
+    struct ProductionSlotSignature<Interface, Slot> final {   \
+        using Method = ProductionMethod<Result, __VA_ARGS__>; \
+    }
+
+DECLARE_SLOT_SIGNATURE0(SteamClient017Abi, 0, I32);
+DECLARE_SLOT_SIGNATURE(SteamClient017Abi, 1, bool, I32);
+DECLARE_SLOT_SIGNATURE(SteamClient017Abi, 2, I32, I32);
+DECLARE_SLOT_SIGNATURE(SteamClient017Abi, 3, I32, I32*, I32);
+DECLARE_SLOT_SIGNATURE(SteamClient017Abi, 4, void, I32, I32);
+DECLARE_SLOT_SIGNATURE(SteamClient017Abi, 5, void*, I32, I32, const char*);
+DECLARE_SLOT_SIGNATURE(SteamClient017Abi, 6, void*, I32, I32, const char*);
+DECLARE_SLOT_SIGNATURE(SteamClient017Abi, 7, void, U32, U16);
+DECLARE_SLOT_SIGNATURE(SteamClient017Abi, 8, void*, I32, I32, const char*);
+DECLARE_SLOT_SIGNATURE(SteamClient017Abi, 9, void*, I32, const char*);
+DECLARE_SLOT_SIGNATURE(SteamClient017Abi, 10, void*, I32, I32, const char*);
+DECLARE_SLOT_SIGNATURE(SteamClient017Abi, 11, void*, I32, I32, const char*);
+DECLARE_SLOT_SIGNATURE(SteamClient017Abi, 12, void*, I32, I32, const char*);
+DECLARE_SLOT_SIGNATURE(SteamClient017Abi, 13, void*, I32, I32, const char*);
+DECLARE_SLOT_SIGNATURE(SteamClient017Abi, 14, void*, I32, I32, const char*);
+DECLARE_SLOT_SIGNATURE(SteamClient017Abi, 15, void*, I32, I32, const char*);
+DECLARE_SLOT_SIGNATURE(SteamClient017Abi, 16, void*, I32, I32, const char*);
+DECLARE_SLOT_SIGNATURE(SteamClient017Abi, 17, void*, I32, I32, const char*);
+DECLARE_SLOT_SIGNATURE(SteamClient017Abi, 18, void*, I32, I32, const char*);
+DECLARE_SLOT_SIGNATURE0(SteamClient017Abi, 19, void);
+DECLARE_SLOT_SIGNATURE0(SteamClient017Abi, 20, U32);
+DECLARE_SLOT_SIGNATURE(
+    SteamClient017Abi, 21, void, ProductionWarningMessageHook);
+DECLARE_SLOT_SIGNATURE0(SteamClient017Abi, 22, bool);
+DECLARE_SLOT_SIGNATURE(SteamClient017Abi, 23, void*, I32, I32, const char*);
+DECLARE_SLOT_SIGNATURE(SteamClient017Abi, 24, void*, I32, I32, const char*);
+DECLARE_SLOT_SIGNATURE(SteamClient017Abi, 25, void*, I32, I32, const char*);
+DECLARE_SLOT_SIGNATURE(SteamClient017Abi, 26, void*, I32, I32, const char*);
+DECLARE_SLOT_SIGNATURE(SteamClient017Abi, 27, void*, I32, I32, const char*);
+DECLARE_SLOT_SIGNATURE(SteamClient017Abi, 28, void*, I32, I32, const char*);
+DECLARE_SLOT_SIGNATURE(SteamClient017Abi, 29, void*, I32, I32, const char*);
+DECLARE_SLOT_SIGNATURE(SteamClient017Abi, 30, void*, I32, I32, const char*);
+DECLARE_SLOT_SIGNATURE(
+    SteamClient017Abi, 31, void, ProductionPostApiResultHook);
+DECLARE_SLOT_SIGNATURE(
+    SteamClient017Abi, 32, void, ProductionPostApiResultHook);
+DECLARE_SLOT_SIGNATURE(
+    SteamClient017Abi, 33, void, ProductionCheckCallbackRegisteredHook);
+DECLARE_SLOT_SIGNATURE(SteamClient017Abi, 34, void*, I32, I32, const char*);
+DECLARE_SLOT_SIGNATURE(SteamClient017Abi, 35, void*, I32, I32, const char*);
+
+DECLARE_SLOT_SIGNATURE0(SteamUser019Abi, 0, I32);
+DECLARE_SLOT_SIGNATURE0(SteamUser019Abi, 1, bool);
+DECLARE_SLOT_SIGNATURE0(SteamUser019Abi, 2, ProductionSteamId);
+DECLARE_SLOT_SIGNATURE(
+    SteamUser019Abi,
+    3,
+    I32,
+    void*,
+    I32,
+    ProductionSteamId,
+    U32,
+    U16,
+    bool);
+DECLARE_SLOT_SIGNATURE(SteamUser019Abi, 4, void, U32, U16);
+DECLARE_SLOT_SIGNATURE(SteamUser019Abi, 5, void, ProductionGameId, I32, const char*);
+DECLARE_SLOT_SIGNATURE(SteamUser019Abi, 6, bool, char*, I32);
+DECLARE_SLOT_SIGNATURE0(SteamUser019Abi, 7, void);
+DECLARE_SLOT_SIGNATURE0(SteamUser019Abi, 8, void);
+DECLARE_SLOT_SIGNATURE(SteamUser019Abi, 9, I32, U32*, U32*, U32);
+DECLARE_SLOT_SIGNATURE(
+    SteamUser019Abi,
+    10,
+    I32,
+    bool,
+    void*,
+    U32,
+    U32*,
+    bool,
+    void*,
+    U32,
+    U32*,
+    U32);
+DECLARE_SLOT_SIGNATURE(
+    SteamUser019Abi, 11, I32, const void*, U32, void*, U32, U32*, U32);
+DECLARE_SLOT_SIGNATURE0(SteamUser019Abi, 12, U32);
+DECLARE_SLOT_SIGNATURE(SteamUser019Abi, 13, U32, void*, I32, U32*);
+DECLARE_SLOT_SIGNATURE(
+    SteamUser019Abi, 14, I32, const void*, I32, ProductionSteamId);
+DECLARE_SLOT_SIGNATURE(SteamUser019Abi, 15, void, ProductionSteamId);
+DECLARE_SLOT_SIGNATURE(SteamUser019Abi, 16, void, U32);
+DECLARE_SLOT_SIGNATURE(SteamUser019Abi, 17, I32, ProductionSteamId, U32);
+DECLARE_SLOT_SIGNATURE0(SteamUser019Abi, 18, bool);
+DECLARE_SLOT_SIGNATURE(SteamUser019Abi, 19, void, ProductionSteamId, U32, U16);
+DECLARE_SLOT_SIGNATURE(SteamUser019Abi, 20, U64, const void*, I32);
+DECLARE_SLOT_SIGNATURE(SteamUser019Abi, 21, bool, void*, I32, U32*);
+DECLARE_SLOT_SIGNATURE(SteamUser019Abi, 22, I32, I32, bool);
+DECLARE_SLOT_SIGNATURE0(SteamUser019Abi, 23, I32);
+DECLARE_SLOT_SIGNATURE(SteamUser019Abi, 24, U64, const char*);
+DECLARE_SLOT_SIGNATURE0(SteamUser019Abi, 25, bool);
+DECLARE_SLOT_SIGNATURE0(SteamUser019Abi, 26, bool);
+DECLARE_SLOT_SIGNATURE0(SteamUser019Abi, 27, bool);
+DECLARE_SLOT_SIGNATURE0(SteamUser019Abi, 28, bool);
+
+DECLARE_SLOT_SIGNATURE0(SteamMatchmaking009Abi, 0, I32);
+DECLARE_SLOT_SIGNATURE(
+    SteamMatchmaking009Abi, 1, bool, I32, U32*, U32*, U16*, U16*, U32*, U32*);
+DECLARE_SLOT_SIGNATURE(
+    SteamMatchmaking009Abi, 2, I32, U32, U32, U16, U16, U32, U32);
+DECLARE_SLOT_SIGNATURE(
+    SteamMatchmaking009Abi, 3, bool, U32, U32, U16, U16, U32);
+DECLARE_SLOT_SIGNATURE0(SteamMatchmaking009Abi, 4, U64);
+DECLARE_SLOT_SIGNATURE(
+    SteamMatchmaking009Abi, 5, void, const char*, const char*, I32);
+DECLARE_SLOT_SIGNATURE(
+    SteamMatchmaking009Abi, 6, void, const char*, I32, I32);
+DECLARE_SLOT_SIGNATURE(SteamMatchmaking009Abi, 7, void, const char*, I32);
+DECLARE_SLOT_SIGNATURE(SteamMatchmaking009Abi, 8, void, I32);
+DECLARE_SLOT_SIGNATURE(SteamMatchmaking009Abi, 9, void, I32);
+DECLARE_SLOT_SIGNATURE(SteamMatchmaking009Abi, 10, void, I32);
+DECLARE_SLOT_SIGNATURE(SteamMatchmaking009Abi, 11, void, ProductionSteamId);
+DECLARE_SLOT_SIGNATURE(SteamMatchmaking009Abi, 12, ProductionSteamId, I32);
+DECLARE_SLOT_SIGNATURE(SteamMatchmaking009Abi, 13, U64, I32, I32);
+DECLARE_SLOT_SIGNATURE(SteamMatchmaking009Abi, 14, U64, ProductionSteamId);
+DECLARE_SLOT_SIGNATURE(SteamMatchmaking009Abi, 15, void, ProductionSteamId);
+DECLARE_SLOT_SIGNATURE(
+    SteamMatchmaking009Abi, 16, bool, ProductionSteamId, ProductionSteamId);
+DECLARE_SLOT_SIGNATURE(SteamMatchmaking009Abi, 17, I32, ProductionSteamId);
+DECLARE_SLOT_SIGNATURE(
+    SteamMatchmaking009Abi, 18, ProductionSteamId, ProductionSteamId, I32);
+DECLARE_SLOT_SIGNATURE(
+    SteamMatchmaking009Abi, 19, const char*, ProductionSteamId, const char*);
+DECLARE_SLOT_SIGNATURE(
+    SteamMatchmaking009Abi, 20, bool, ProductionSteamId, const char*, const char*);
+DECLARE_SLOT_SIGNATURE(SteamMatchmaking009Abi, 21, I32, ProductionSteamId);
+DECLARE_SLOT_SIGNATURE(
+    SteamMatchmaking009Abi,
+    22,
+    bool,
+    ProductionSteamId,
+    I32,
+    char*,
+    I32,
+    char*,
+    I32);
+DECLARE_SLOT_SIGNATURE(
+    SteamMatchmaking009Abi, 23, bool, ProductionSteamId, const char*);
+DECLARE_SLOT_SIGNATURE(
+    SteamMatchmaking009Abi,
+    24,
+    const char*,
+    ProductionSteamId,
+    ProductionSteamId,
+    const char*);
+DECLARE_SLOT_SIGNATURE(
+    SteamMatchmaking009Abi, 25, void, ProductionSteamId, const char*, const char*);
+DECLARE_SLOT_SIGNATURE(
+    SteamMatchmaking009Abi, 26, bool, ProductionSteamId, const void*, I32);
+DECLARE_SLOT_SIGNATURE(
+    SteamMatchmaking009Abi,
+    27,
+    I32,
+    ProductionSteamId,
+    I32,
+    ProductionSteamId*,
+    void*,
+    I32,
+    I32*);
+DECLARE_SLOT_SIGNATURE(SteamMatchmaking009Abi, 28, bool, ProductionSteamId);
+DECLARE_SLOT_SIGNATURE(
+    SteamMatchmaking009Abi,
+    29,
+    void,
+    ProductionSteamId,
+    U32,
+    U16,
+    ProductionSteamId);
+DECLARE_SLOT_SIGNATURE(
+    SteamMatchmaking009Abi,
+    30,
+    bool,
+    ProductionSteamId,
+    U32*,
+    U16*,
+    ProductionSteamId*);
+DECLARE_SLOT_SIGNATURE(SteamMatchmaking009Abi, 31, bool, ProductionSteamId, I32);
+DECLARE_SLOT_SIGNATURE(SteamMatchmaking009Abi, 32, I32, ProductionSteamId);
+DECLARE_SLOT_SIGNATURE(SteamMatchmaking009Abi, 33, bool, ProductionSteamId, I32);
+DECLARE_SLOT_SIGNATURE(SteamMatchmaking009Abi, 34, bool, ProductionSteamId, bool);
+DECLARE_SLOT_SIGNATURE(
+    SteamMatchmaking009Abi, 35, ProductionSteamId, ProductionSteamId);
+DECLARE_SLOT_SIGNATURE(
+    SteamMatchmaking009Abi, 36, bool, ProductionSteamId, ProductionSteamId);
+DECLARE_SLOT_SIGNATURE(
+    SteamMatchmaking009Abi, 37, bool, ProductionSteamId, ProductionSteamId);
+
+DECLARE_SLOT_SIGNATURE(
+    SteamNetworking005Abi, 0, bool, ProductionSteamId, const void*, U32, I32, I32);
+DECLARE_SLOT_SIGNATURE(SteamNetworking005Abi, 1, bool, U32*, I32);
+DECLARE_SLOT_SIGNATURE(
+    SteamNetworking005Abi, 2, bool, void*, U32, U32*, ProductionSteamId*, I32);
+DECLARE_SLOT_SIGNATURE(SteamNetworking005Abi, 3, bool, ProductionSteamId);
+DECLARE_SLOT_SIGNATURE(SteamNetworking005Abi, 4, bool, ProductionSteamId);
+DECLARE_SLOT_SIGNATURE(SteamNetworking005Abi, 5, bool, ProductionSteamId, I32);
+DECLARE_SLOT_SIGNATURE(
+    SteamNetworking005Abi, 6, bool, ProductionSteamId, ProductionP2PSessionState*);
+DECLARE_SLOT_SIGNATURE(SteamNetworking005Abi, 7, bool, bool);
+DECLARE_SLOT_SIGNATURE(SteamNetworking005Abi, 8, U32, I32, U32, U16, bool);
+DECLARE_SLOT_SIGNATURE(
+    SteamNetworking005Abi, 9, U32, ProductionSteamId, I32, I32, bool);
+DECLARE_SLOT_SIGNATURE(SteamNetworking005Abi, 10, U32, U32, U16, I32);
+DECLARE_SLOT_SIGNATURE(SteamNetworking005Abi, 11, bool, U32, bool);
+DECLARE_SLOT_SIGNATURE(SteamNetworking005Abi, 12, bool, U32, bool);
+DECLARE_SLOT_SIGNATURE(SteamNetworking005Abi, 13, bool, U32, void*, U32, bool);
+DECLARE_SLOT_SIGNATURE(SteamNetworking005Abi, 14, bool, U32, U32*);
+DECLARE_SLOT_SIGNATURE(SteamNetworking005Abi, 15, bool, U32, void*, U32, U32*);
+DECLARE_SLOT_SIGNATURE(SteamNetworking005Abi, 16, bool, U32, U32*, U32*);
+DECLARE_SLOT_SIGNATURE(
+    SteamNetworking005Abi, 17, bool, U32, void*, U32, U32*, U32*);
+DECLARE_SLOT_SIGNATURE(
+    SteamNetworking005Abi,
+    18,
+    bool,
+    U32,
+    ProductionSteamId*,
+    I32*,
+    U32*,
+    U16*);
+DECLARE_SLOT_SIGNATURE(SteamNetworking005Abi, 19, bool, U32, U32*, U16*);
+DECLARE_SLOT_SIGNATURE(SteamNetworking005Abi, 20, I32, U32);
+DECLARE_SLOT_SIGNATURE(SteamNetworking005Abi, 21, I32, U32);
+
+DECLARE_SLOT_SIGNATURE(
+    SteamRemoteStorage014Abi, 0, bool, const char*, const void*, I32);
+DECLARE_SLOT_SIGNATURE(
+    SteamRemoteStorage014Abi, 1, I32, const char*, void*, I32);
+DECLARE_SLOT_SIGNATURE(
+    SteamRemoteStorage014Abi, 2, U64, const char*, const void*, U32);
+DECLARE_SLOT_SIGNATURE(
+    SteamRemoteStorage014Abi, 3, U64, const char*, U32, U32);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 4, bool, U64, void*, U32);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 5, bool, const char*);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 6, bool, const char*);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 7, U64, const char*);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 8, bool, const char*, I32);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 9, U64, const char*);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 10, bool, U64, const void*, I32);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 11, bool, U64);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 12, bool, U64);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 13, bool, const char*);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 14, bool, const char*);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 15, I32, const char*);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 16, I64, const char*);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 17, I32, const char*);
+DECLARE_SLOT_SIGNATURE0(SteamRemoteStorage014Abi, 18, I32);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 19, const char*, I32, I32*);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 20, bool, U64*, U64*);
+DECLARE_SLOT_SIGNATURE0(SteamRemoteStorage014Abi, 21, bool);
+DECLARE_SLOT_SIGNATURE0(SteamRemoteStorage014Abi, 22, bool);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 23, void, bool);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 24, U64, U64, U32);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 25, bool, U64, I32*, I32*);
+DECLARE_SLOT_SIGNATURE(
+    SteamRemoteStorage014Abi, 26, bool, U64, U32*, char**, I32*, ProductionSteamId*);
+DECLARE_SLOT_SIGNATURE(
+    SteamRemoteStorage014Abi, 27, I32, U64, void*, I32, U32, I32);
+DECLARE_SLOT_SIGNATURE0(SteamRemoteStorage014Abi, 28, I32);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 29, U64, I32);
+DECLARE_SLOT_SIGNATURE(
+    SteamRemoteStorage014Abi,
+    30,
+    U64,
+    const char*,
+    const char*,
+    U32,
+    const char*,
+    const char*,
+    I32,
+    ProductionSteamParamStringArray*,
+    I32);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 31, U64, U64);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 32, bool, U64, const char*);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 33, bool, U64, const char*);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 34, bool, U64, const char*);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 35, bool, U64, const char*);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 36, bool, U64, I32);
+DECLARE_SLOT_SIGNATURE(
+    SteamRemoteStorage014Abi, 37, bool, U64, ProductionSteamParamStringArray*);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 38, U64, U64);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 39, U64, U64, U32);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 40, U64, U64);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 41, U64, U32);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 42, U64, U64);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 43, U64, U32);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 44, U64, U64);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 45, bool, U64, const char*);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 46, U64, U64);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 47, U64, U64, bool);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 48, U64, U64);
+DECLARE_SLOT_SIGNATURE(
+    SteamRemoteStorage014Abi,
+    49,
+    U64,
+    ProductionSteamId,
+    U32,
+    ProductionSteamParamStringArray*,
+    ProductionSteamParamStringArray*);
+DECLARE_SLOT_SIGNATURE(
+    SteamRemoteStorage014Abi,
+    50,
+    U64,
+    I32,
+    const char*,
+    const char*,
+    const char*,
+    U32,
+    const char*,
+    const char*,
+    I32,
+    ProductionSteamParamStringArray*);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 51, U64, U64, I32);
+DECLARE_SLOT_SIGNATURE(SteamRemoteStorage014Abi, 52, U64, I32, U32);
+DECLARE_SLOT_SIGNATURE(
+    SteamRemoteStorage014Abi,
+    53,
+    U64,
+    I32,
+    U32,
+    U32,
+    U32,
+    ProductionSteamParamStringArray*,
+    ProductionSteamParamStringArray*);
+DECLARE_SLOT_SIGNATURE(
+    SteamRemoteStorage014Abi, 54, U64, U64, const char*, U32);
+
+#undef DECLARE_SLOT_SIGNATURE
+#undef DECLARE_SLOT_SIGNATURE0
+
+template <typename Interface, std::size_t Slot, typename... Arguments>
+decltype(auto) CallProductionSlot(
     void* const interfaceValue,
-    const std::size_t slot,
-    Arguments... arguments) {
+    Arguments&&... arguments) {
+    using Method = typename ProductionSlotSignature<Interface, Slot>::Method;
+    static_assert(std::is_invocable_v<Method, void*, Arguments...>);
     auto** const vtable = *reinterpret_cast<void***>(interfaceValue);
-    const auto method = reinterpret_cast<Result(*)(void*, Arguments...) noexcept>(
-        vtable[slot]);
-    return method(interfaceValue, arguments...);
+    Method method = nullptr;
+    static_assert(sizeof(method) == sizeof(vtable[Slot]));
+    std::memcpy(&method, &vtable[Slot], sizeof(method));
+    return method(interfaceValue, std::forward<Arguments>(arguments)...);
 }
 
-bool CallEveryProductionSlot(
-    void* const value,
-    const std::size_t count,
-    const std::initializer_list<std::size_t> classReturnSlots = {}) {
-    if (value == nullptr) {
-        return false;
+struct SlotMatrix final {
+    bool valid = true;
+    std::size_t calls = 0;
+
+    template <typename Actual, typename Expected>
+    void Equal(const Actual& actual, const Expected& expected) noexcept {
+        ++calls;
+        valid = (actual == expected) && valid;
     }
-    for (std::size_t slot = 0; slot < count; ++slot) {
-        if (std::find(
-                classReturnSlots.begin(),
-                classReturnSlots.end(),
-                slot) != classReturnSlots.end()) {
-            continue;
-        }
-        static_cast<void>(CallProductionSlot<std::uintptr_t>(value, slot));
+
+    template <typename Actual, typename Expected>
+    void Output(const Actual& actual, const Expected& expected) noexcept {
+        valid = (actual == expected) && valid;
     }
-    return true;
+
+    void VoidCall() noexcept { ++calls; }
+
+    template <typename Value, std::size_t Size>
+    void Zeroed(const std::array<Value, Size>& values) noexcept {
+        valid = std::all_of(
+                    values.begin(),
+                    values.end(),
+                    [](const Value& value) { return value == Value{}; })
+            && valid;
+    }
+};
+
+bool VerifyUser019Slots(void* const user) {
+    SlotMatrix matrix;
+    matrix.Equal(CallProductionSlot<SteamUser019Abi, 0>(user), 0);
+    matrix.Equal(CallProductionSlot<SteamUser019Abi, 1>(user), false);
+    matrix.Equal(
+        CallProductionSlot<SteamUser019Abi, 2>(user).Value(),
+        kProductionSteamId);
+    std::array<std::byte, 8> authBlob{};
+    matrix.Equal(
+        CallProductionSlot<SteamUser019Abi, 3>(user,
+            authBlob.data(),
+            static_cast<I32>(authBlob.size()),
+            ProductionSteamId{},
+            U32{},
+            U16{},
+            false),
+        0);
+    CallProductionSlot<SteamUser019Abi, 4>(user, U32{}, U16{});
+    matrix.VoidCall();
+    CallProductionSlot<SteamUser019Abi, 5>(user, ProductionGameId{}, I32{}, "event");
+    matrix.VoidCall();
+    std::array<char, 8> userFolder;
+    userFolder.fill('x');
+    matrix.Equal(
+        CallProductionSlot<SteamUser019Abi, 6>(user, userFolder.data(), static_cast<I32>(userFolder.size())),
+        false);
+    matrix.Output(userFolder[0], '\0');
+    CallProductionSlot<SteamUser019Abi, 7>(user);
+    matrix.VoidCall();
+    CallProductionSlot<SteamUser019Abi, 8>(user);
+    matrix.VoidCall();
+    U32 compressed = UINT32_MAX;
+    U32 uncompressed = UINT32_MAX;
+    matrix.Equal(
+        CallProductionSlot<SteamUser019Abi, 9>(user, &compressed, &uncompressed, U32{}),
+        1);
+    matrix.Output(compressed, U32{});
+    matrix.Output(uncompressed, U32{});
+    std::array<std::byte, 8> voiceCompressed;
+    std::array<std::byte, 8> voiceUncompressed;
+    voiceCompressed.fill(std::byte{0xa5});
+    voiceUncompressed.fill(std::byte{0xa5});
+    compressed = UINT32_MAX;
+    uncompressed = UINT32_MAX;
+    matrix.Equal(
+        CallProductionSlot<SteamUser019Abi, 10>(user,
+            true,
+            voiceCompressed.data(),
+            static_cast<U32>(voiceCompressed.size()),
+            &compressed,
+            true,
+            voiceUncompressed.data(),
+            static_cast<U32>(voiceUncompressed.size()),
+            &uncompressed,
+            U32{}),
+        1);
+    matrix.Output(compressed, U32{});
+    matrix.Output(uncompressed, U32{});
+    matrix.Zeroed(voiceCompressed);
+    matrix.Zeroed(voiceUncompressed);
+    std::array<std::byte, 8> decompressed;
+    decompressed.fill(std::byte{0xa5});
+    U32 decompressedBytes = UINT32_MAX;
+    matrix.Equal(
+        CallProductionSlot<SteamUser019Abi, 11>(user,
+            voiceCompressed.data(),
+            U32{},
+            decompressed.data(),
+            static_cast<U32>(decompressed.size()),
+            &decompressedBytes,
+            U32{}),
+        1);
+    matrix.Output(decompressedBytes, U32{});
+    matrix.Zeroed(decompressed);
+    matrix.Equal(CallProductionSlot<SteamUser019Abi, 12>(user), U32{});
+    std::array<std::byte, 8> ticket;
+    ticket.fill(std::byte{0xa5});
+    U32 ticketBytes = UINT32_MAX;
+    matrix.Equal(
+        CallProductionSlot<SteamUser019Abi, 13>(user,
+            ticket.data(),
+            static_cast<I32>(ticket.size()),
+            &ticketBytes),
+        U32{});
+    matrix.Output(ticketBytes, U32{});
+    matrix.Zeroed(ticket);
+    matrix.Equal(
+        CallProductionSlot<SteamUser019Abi, 14>(user, ticket.data(), I32{}, ProductionSteamId{}),
+        1);
+    CallProductionSlot<SteamUser019Abi, 15>(user, ProductionSteamId{});
+    matrix.VoidCall();
+    CallProductionSlot<SteamUser019Abi, 16>(user, U32{});
+    matrix.VoidCall();
+    matrix.Equal(
+        CallProductionSlot<SteamUser019Abi, 17>(user, ProductionSteamId{}, U32{}),
+        1);
+    matrix.Equal(CallProductionSlot<SteamUser019Abi, 18>(user), false);
+    CallProductionSlot<SteamUser019Abi, 19>(user, ProductionSteamId{}, U32{}, U16{});
+    matrix.VoidCall();
+    matrix.Equal(
+        CallProductionSlot<SteamUser019Abi, 20>(user, nullptr, I32{}), U64{});
+    std::array<std::byte, 8> encryptedTicket;
+    encryptedTicket.fill(std::byte{0xa5});
+    U32 encryptedBytes = UINT32_MAX;
+    matrix.Equal(
+        CallProductionSlot<SteamUser019Abi, 21>(user,
+            encryptedTicket.data(),
+            static_cast<I32>(encryptedTicket.size()),
+            &encryptedBytes),
+        false);
+    matrix.Output(encryptedBytes, U32{});
+    matrix.Zeroed(encryptedTicket);
+    matrix.Equal(CallProductionSlot<SteamUser019Abi, 22>(user, I32{}, false), 0);
+    matrix.Equal(CallProductionSlot<SteamUser019Abi, 23>(user), 0);
+    matrix.Equal(CallProductionSlot<SteamUser019Abi, 24>(user, "redirect"), U64{});
+    matrix.Equal(CallProductionSlot<SteamUser019Abi, 25>(user), false);
+    matrix.Equal(CallProductionSlot<SteamUser019Abi, 26>(user), false);
+    matrix.Equal(CallProductionSlot<SteamUser019Abi, 27>(user), false);
+    matrix.Equal(CallProductionSlot<SteamUser019Abi, 28>(user), false);
+    return matrix.valid && matrix.calls == 29;
+}
+
+bool VerifyMatchmaking009Slots(void* const matchmaking) {
+    SlotMatrix matrix;
+    matrix.Equal(CallProductionSlot<SteamMatchmaking009Abi, 0>(matchmaking), 0);
+    U32 appId = UINT32_MAX;
+    U32 ip = UINT32_MAX;
+    U16 connectionPort = UINT16_MAX;
+    U16 queryPort = UINT16_MAX;
+    U32 flags = UINT32_MAX;
+    U32 lastPlayed = UINT32_MAX;
+    matrix.Equal(
+        CallProductionSlot<SteamMatchmaking009Abi, 1>(matchmaking,
+            I32{},
+            &appId,
+            &ip,
+            &connectionPort,
+            &queryPort,
+            &flags,
+            &lastPlayed),
+        false);
+    matrix.Output(appId, U32{});
+    matrix.Output(ip, U32{});
+    matrix.Output(connectionPort, U16{});
+    matrix.Output(queryPort, U16{});
+    matrix.Output(flags, U32{});
+    matrix.Output(lastPlayed, U32{});
+    matrix.Equal(
+        CallProductionSlot<SteamMatchmaking009Abi, 2>(matchmaking, U32{}, U32{}, U16{}, U16{}, U32{}, U32{}),
+        0);
+    matrix.Equal(
+        CallProductionSlot<SteamMatchmaking009Abi, 3>(matchmaking, U32{}, U32{}, U16{}, U16{}, U32{}),
+        false);
+    matrix.Equal(CallProductionSlot<SteamMatchmaking009Abi, 4>(matchmaking), U64{});
+    CallProductionSlot<SteamMatchmaking009Abi, 5>(matchmaking, "key", "value", I32{});
+    matrix.VoidCall();
+    CallProductionSlot<SteamMatchmaking009Abi, 6>(matchmaking, "key", I32{}, I32{});
+    matrix.VoidCall();
+    CallProductionSlot<SteamMatchmaking009Abi, 7>(matchmaking, "key", I32{});
+    matrix.VoidCall();
+    CallProductionSlot<SteamMatchmaking009Abi, 8>(matchmaking, I32{});
+    matrix.VoidCall();
+    CallProductionSlot<SteamMatchmaking009Abi, 9>(matchmaking, I32{});
+    matrix.VoidCall();
+    CallProductionSlot<SteamMatchmaking009Abi, 10>(matchmaking, I32{});
+    matrix.VoidCall();
+    CallProductionSlot<SteamMatchmaking009Abi, 11>(matchmaking, ProductionSteamId{});
+    matrix.VoidCall();
+    matrix.Output(
+        CallProductionSlot<SteamMatchmaking009Abi, 12>(matchmaking, I32{}).Value(),
+        U64{});
+    ++matrix.calls;
+    matrix.Equal(
+        CallProductionSlot<SteamMatchmaking009Abi, 13>(matchmaking, I32{}, I32{}), U64{});
+    matrix.Equal(
+        CallProductionSlot<SteamMatchmaking009Abi, 14>(matchmaking, ProductionSteamId{}), U64{});
+    CallProductionSlot<SteamMatchmaking009Abi, 15>(matchmaking, ProductionSteamId{});
+    matrix.VoidCall();
+    matrix.Equal(
+        CallProductionSlot<SteamMatchmaking009Abi, 16>(matchmaking, ProductionSteamId{}, ProductionSteamId{}),
+        false);
+    matrix.Equal(
+        CallProductionSlot<SteamMatchmaking009Abi, 17>(matchmaking, ProductionSteamId{}), 0);
+    matrix.Output(
+        CallProductionSlot<SteamMatchmaking009Abi, 18>(matchmaking, ProductionSteamId{}, I32{}).Value(),
+        U64{});
+    ++matrix.calls;
+    matrix.Equal(
+        std::strcmp(
+            CallProductionSlot<SteamMatchmaking009Abi, 19>(matchmaking, ProductionSteamId{}, "key"),
+            ""),
+        0);
+    matrix.Equal(
+        CallProductionSlot<SteamMatchmaking009Abi, 20>(matchmaking, ProductionSteamId{}, "key", "value"),
+        false);
+    matrix.Equal(
+        CallProductionSlot<SteamMatchmaking009Abi, 21>(matchmaking, ProductionSteamId{}), 0);
+    std::array<char, 8> key;
+    std::array<char, 8> value;
+    key.fill('x');
+    value.fill('x');
+    matrix.Equal(
+        CallProductionSlot<SteamMatchmaking009Abi, 22>(matchmaking,
+            ProductionSteamId{},
+            I32{},
+            key.data(),
+            static_cast<I32>(key.size()),
+            value.data(),
+            static_cast<I32>(value.size())),
+        false);
+    matrix.Output(key[0], '\0');
+    matrix.Output(value[0], '\0');
+    matrix.Equal(
+        CallProductionSlot<SteamMatchmaking009Abi, 23>(matchmaking, ProductionSteamId{}, "key"),
+        false);
+    matrix.Equal(
+        std::strcmp(
+            CallProductionSlot<SteamMatchmaking009Abi, 24>(matchmaking,
+                ProductionSteamId{},
+                ProductionSteamId{},
+                "key"),
+            ""),
+        0);
+    CallProductionSlot<SteamMatchmaking009Abi, 25>(matchmaking, ProductionSteamId{}, "key", "value");
+    matrix.VoidCall();
+    std::array<std::byte, 8> chat;
+    chat.fill(std::byte{0xa5});
+    matrix.Equal(
+        CallProductionSlot<SteamMatchmaking009Abi, 26>(matchmaking,
+            ProductionSteamId{},
+            chat.data(),
+            static_cast<I32>(chat.size())),
+        false);
+    ProductionSteamId chatUser(kProductionSteamId);
+    I32 chatType = -1;
+    matrix.Equal(
+        CallProductionSlot<SteamMatchmaking009Abi, 27>(matchmaking,
+            ProductionSteamId{},
+            I32{},
+            &chatUser,
+            chat.data(),
+            static_cast<I32>(chat.size()),
+            &chatType),
+        0);
+    matrix.Output(chatUser.Value(), U64{});
+    matrix.Output(chatType, 0);
+    matrix.Zeroed(chat);
+    matrix.Equal(
+        CallProductionSlot<SteamMatchmaking009Abi, 28>(matchmaking, ProductionSteamId{}), false);
+    CallProductionSlot<SteamMatchmaking009Abi, 29>(matchmaking,
+        ProductionSteamId{},
+        U32{},
+        U16{},
+        ProductionSteamId{});
+    matrix.VoidCall();
+    ip = UINT32_MAX;
+    connectionPort = UINT16_MAX;
+    ProductionSteamId gameServer(kProductionSteamId);
+    matrix.Equal(
+        CallProductionSlot<SteamMatchmaking009Abi, 30>(matchmaking,
+            ProductionSteamId{},
+            &ip,
+            &connectionPort,
+            &gameServer),
+        false);
+    matrix.Output(ip, U32{});
+    matrix.Output(connectionPort, U16{});
+    matrix.Output(gameServer.Value(), U64{});
+    matrix.Equal(
+        CallProductionSlot<SteamMatchmaking009Abi, 31>(matchmaking, ProductionSteamId{}, I32{}),
+        false);
+    matrix.Equal(
+        CallProductionSlot<SteamMatchmaking009Abi, 32>(matchmaking, ProductionSteamId{}), 0);
+    matrix.Equal(
+        CallProductionSlot<SteamMatchmaking009Abi, 33>(matchmaking, ProductionSteamId{}, I32{}),
+        false);
+    matrix.Equal(
+        CallProductionSlot<SteamMatchmaking009Abi, 34>(matchmaking, ProductionSteamId{}, false),
+        false);
+    matrix.Output(
+        CallProductionSlot<SteamMatchmaking009Abi, 35>(matchmaking, ProductionSteamId{}).Value(),
+        U64{});
+    ++matrix.calls;
+    matrix.Equal(
+        CallProductionSlot<SteamMatchmaking009Abi, 36>(matchmaking, ProductionSteamId{}, ProductionSteamId{}),
+        false);
+    matrix.Equal(
+        CallProductionSlot<SteamMatchmaking009Abi, 37>(matchmaking, ProductionSteamId{}, ProductionSteamId{}),
+        false);
+    return matrix.valid && matrix.calls == 38;
+}
+
+bool VerifyNetworking005Slots(void* const networking) {
+    SlotMatrix matrix;
+    std::array<std::byte, 8> packet;
+    packet.fill(std::byte{0xa5});
+    matrix.Equal(
+        CallProductionSlot<SteamNetworking005Abi, 0>(networking,
+            ProductionSteamId{},
+            packet.data(),
+            static_cast<U32>(packet.size()),
+            I32{},
+            I32{}),
+        false);
+    U32 messageSize = UINT32_MAX;
+    matrix.Equal(
+        CallProductionSlot<SteamNetworking005Abi, 1>(networking, &messageSize, I32{}), false);
+    matrix.Output(messageSize, U32{});
+    messageSize = UINT32_MAX;
+    ProductionSteamId remote(kProductionSteamId);
+    matrix.Equal(
+        CallProductionSlot<SteamNetworking005Abi, 2>(networking,
+            packet.data(),
+            static_cast<U32>(packet.size()),
+            &messageSize,
+            &remote,
+            I32{}),
+        false);
+    matrix.Output(messageSize, U32{});
+    matrix.Output(remote.Value(), U64{});
+    matrix.Zeroed(packet);
+    matrix.Equal(
+        CallProductionSlot<SteamNetworking005Abi, 3>(networking, ProductionSteamId{}), false);
+    matrix.Equal(
+        CallProductionSlot<SteamNetworking005Abi, 4>(networking, ProductionSteamId{}), false);
+    matrix.Equal(
+        CallProductionSlot<SteamNetworking005Abi, 5>(networking, ProductionSteamId{}, I32{}),
+        false);
+    ProductionP2PSessionState state{};
+    const ProductionP2PSessionState zeroState{};
+    std::memset(&state, 0xa5, sizeof(state));
+    matrix.Equal(
+        CallProductionSlot<SteamNetworking005Abi, 6>(networking, ProductionSteamId{}, &state),
+        false);
+    matrix.Output(
+        std::memcmp(
+            &state,
+            &zeroState,
+            sizeof(state)),
+        0);
+    matrix.Equal(CallProductionSlot<SteamNetworking005Abi, 7>(networking, false), false);
+    matrix.Equal(
+        CallProductionSlot<SteamNetworking005Abi, 8>(networking, I32{}, U32{}, U16{}, false),
+        U32{});
+    matrix.Equal(
+        CallProductionSlot<SteamNetworking005Abi, 9>(networking, ProductionSteamId{}, I32{}, I32{}, false),
+        U32{});
+    matrix.Equal(
+        CallProductionSlot<SteamNetworking005Abi, 10>(networking, U32{}, U16{}, I32{}),
+        U32{});
+    matrix.Equal(CallProductionSlot<SteamNetworking005Abi, 11>(networking, U32{}, false), false);
+    matrix.Equal(CallProductionSlot<SteamNetworking005Abi, 12>(networking, U32{}, false), false);
+    matrix.Equal(
+        CallProductionSlot<SteamNetworking005Abi, 13>(networking,
+            U32{},
+            packet.data(),
+            static_cast<U32>(packet.size()),
+            false),
+        false);
+    messageSize = UINT32_MAX;
+    matrix.Equal(
+        CallProductionSlot<SteamNetworking005Abi, 14>(networking, U32{}, &messageSize), false);
+    matrix.Output(messageSize, U32{});
+    packet.fill(std::byte{0xa5});
+    messageSize = UINT32_MAX;
+    matrix.Equal(
+        CallProductionSlot<SteamNetworking005Abi, 15>(networking,
+            U32{},
+            packet.data(),
+            static_cast<U32>(packet.size()),
+            &messageSize),
+        false);
+    matrix.Output(messageSize, U32{});
+    matrix.Zeroed(packet);
+    messageSize = UINT32_MAX;
+    U32 socket = UINT32_MAX;
+    matrix.Equal(
+        CallProductionSlot<SteamNetworking005Abi, 16>(networking, U32{}, &messageSize, &socket),
+        false);
+    matrix.Output(messageSize, U32{});
+    matrix.Output(socket, U32{});
+    packet.fill(std::byte{0xa5});
+    messageSize = UINT32_MAX;
+    socket = UINT32_MAX;
+    matrix.Equal(
+        CallProductionSlot<SteamNetworking005Abi, 17>(networking,
+            U32{},
+            packet.data(),
+            static_cast<U32>(packet.size()),
+            &messageSize,
+            &socket),
+        false);
+    matrix.Output(messageSize, U32{});
+    matrix.Output(socket, U32{});
+    matrix.Zeroed(packet);
+    remote = ProductionSteamId(kProductionSteamId);
+    I32 socketStatus = -1;
+    U32 remoteIp = UINT32_MAX;
+    U16 remotePort = UINT16_MAX;
+    matrix.Equal(
+        CallProductionSlot<SteamNetworking005Abi, 18>(networking,
+            U32{},
+            &remote,
+            &socketStatus,
+            &remoteIp,
+            &remotePort),
+        false);
+    matrix.Output(remote.Value(), U64{});
+    matrix.Output(socketStatus, 0);
+    matrix.Output(remoteIp, U32{});
+    matrix.Output(remotePort, U16{});
+    remoteIp = UINT32_MAX;
+    remotePort = UINT16_MAX;
+    matrix.Equal(
+        CallProductionSlot<SteamNetworking005Abi, 19>(networking, U32{}, &remoteIp, &remotePort),
+        false);
+    matrix.Output(remoteIp, U32{});
+    matrix.Output(remotePort, U16{});
+    matrix.Equal(CallProductionSlot<SteamNetworking005Abi, 20>(networking, U32{}), 0);
+    matrix.Equal(CallProductionSlot<SteamNetworking005Abi, 21>(networking, U32{}), 0);
+    return matrix.valid && matrix.calls == 22;
+}
+
+bool VerifyRemoteStorage014Slots(void* const storage) {
+    SlotMatrix matrix;
+    std::array<std::byte, 8> data;
+    data.fill(std::byte{0xa5});
+    matrix.Equal(
+        CallProductionSlot<SteamRemoteStorage014Abi, 0>(storage, "file", data.data(), static_cast<I32>(data.size())),
+        false);
+    matrix.Equal(
+        CallProductionSlot<SteamRemoteStorage014Abi, 1>(storage, "file", data.data(), static_cast<I32>(data.size())),
+        0);
+    matrix.Zeroed(data);
+    matrix.Equal(
+        CallProductionSlot<SteamRemoteStorage014Abi, 2>(storage, "file", data.data(), static_cast<U32>(data.size())),
+        U64{});
+    matrix.Equal(
+        CallProductionSlot<SteamRemoteStorage014Abi, 3>(storage, "file", U32{}, U32{}), U64{});
+    data.fill(std::byte{0xa5});
+    matrix.Equal(
+        CallProductionSlot<SteamRemoteStorage014Abi, 4>(storage, U64{}, data.data(), static_cast<U32>(data.size())),
+        false);
+    matrix.Zeroed(data);
+    matrix.Equal(CallProductionSlot<SteamRemoteStorage014Abi, 5>(storage, "file"), false);
+    matrix.Equal(CallProductionSlot<SteamRemoteStorage014Abi, 6>(storage, "file"), false);
+    matrix.Equal(CallProductionSlot<SteamRemoteStorage014Abi, 7>(storage, "file"), U64{});
+    matrix.Equal(
+        CallProductionSlot<SteamRemoteStorage014Abi, 8>(storage, "file", I32{}), false);
+    matrix.Equal(CallProductionSlot<SteamRemoteStorage014Abi, 9>(storage, "file"), UINT64_MAX);
+    matrix.Equal(
+        CallProductionSlot<SteamRemoteStorage014Abi, 10>(storage, U64{}, data.data(), static_cast<I32>(data.size())),
+        false);
+    matrix.Equal(CallProductionSlot<SteamRemoteStorage014Abi, 11>(storage, U64{}), false);
+    matrix.Equal(CallProductionSlot<SteamRemoteStorage014Abi, 12>(storage, U64{}), false);
+    matrix.Equal(CallProductionSlot<SteamRemoteStorage014Abi, 13>(storage, "file"), false);
+    matrix.Equal(CallProductionSlot<SteamRemoteStorage014Abi, 14>(storage, "file"), false);
+    matrix.Equal(CallProductionSlot<SteamRemoteStorage014Abi, 15>(storage, "file"), 0);
+    matrix.Equal(CallProductionSlot<SteamRemoteStorage014Abi, 16>(storage, "file"), I64{});
+    matrix.Equal(CallProductionSlot<SteamRemoteStorage014Abi, 17>(storage, "file"), 0);
+    matrix.Equal(CallProductionSlot<SteamRemoteStorage014Abi, 18>(storage), 0);
+    I32 fileSize = -1;
+    matrix.Equal(
+        std::strcmp(
+            CallProductionSlot<SteamRemoteStorage014Abi, 19>(storage, I32{}, &fileSize),
+            ""),
+        0);
+    matrix.Output(fileSize, 0);
+    U64 totalBytes = UINT64_MAX;
+    U64 availableBytes = UINT64_MAX;
+    matrix.Equal(
+        CallProductionSlot<SteamRemoteStorage014Abi, 20>(storage, &totalBytes, &availableBytes),
+        false);
+    matrix.Output(totalBytes, U64{});
+    matrix.Output(availableBytes, U64{});
+    matrix.Equal(CallProductionSlot<SteamRemoteStorage014Abi, 21>(storage), false);
+    matrix.Equal(CallProductionSlot<SteamRemoteStorage014Abi, 22>(storage), false);
+    CallProductionSlot<SteamRemoteStorage014Abi, 23>(storage, false);
+    matrix.VoidCall();
+    matrix.Equal(CallProductionSlot<SteamRemoteStorage014Abi, 24>(storage, U64{}, U32{}), U64{});
+    I32 downloaded = -1;
+    I32 expected = -1;
+    matrix.Equal(
+        CallProductionSlot<SteamRemoteStorage014Abi, 25>(storage, U64{}, &downloaded, &expected),
+        false);
+    matrix.Output(downloaded, 0);
+    matrix.Output(expected, 0);
+    U32 detailsAppId = UINT32_MAX;
+    char* detailsName = reinterpret_cast<char*>(1);
+    fileSize = -1;
+    ProductionSteamId owner(kProductionSteamId);
+    matrix.Equal(
+        CallProductionSlot<SteamRemoteStorage014Abi, 26>(storage,
+            U64{},
+            &detailsAppId,
+            &detailsName,
+            &fileSize,
+            &owner),
+        false);
+    matrix.Output(detailsAppId, U32{});
+    matrix.Output(detailsName, static_cast<char*>(nullptr));
+    matrix.Output(fileSize, 0);
+    matrix.Output(owner.Value(), U64{});
+    data.fill(std::byte{0xa5});
+    matrix.Equal(
+        CallProductionSlot<SteamRemoteStorage014Abi, 27>(storage,
+            U64{},
+            data.data(),
+            static_cast<I32>(data.size()),
+            U32{},
+            I32{}),
+        0);
+    matrix.Zeroed(data);
+    matrix.Equal(CallProductionSlot<SteamRemoteStorage014Abi, 28>(storage), 0);
+    matrix.Equal(CallProductionSlot<SteamRemoteStorage014Abi, 29>(storage, I32{}), UINT64_MAX);
+    matrix.Equal(
+        CallProductionSlot<SteamRemoteStorage014Abi, 30>(storage,
+            "file",
+            "preview",
+            U32{},
+            "title",
+            "description",
+            I32{},
+            nullptr,
+            I32{}),
+        U64{});
+    matrix.Equal(CallProductionSlot<SteamRemoteStorage014Abi, 31>(storage, U64{}), UINT64_MAX);
+    matrix.Equal(
+        CallProductionSlot<SteamRemoteStorage014Abi, 32>(storage, U64{}, "file"), false);
+    matrix.Equal(
+        CallProductionSlot<SteamRemoteStorage014Abi, 33>(storage, U64{}, "preview"), false);
+    matrix.Equal(
+        CallProductionSlot<SteamRemoteStorage014Abi, 34>(storage, U64{}, "title"), false);
+    matrix.Equal(
+        CallProductionSlot<SteamRemoteStorage014Abi, 35>(storage, U64{}, "description"), false);
+    matrix.Equal(CallProductionSlot<SteamRemoteStorage014Abi, 36>(storage, U64{}, I32{}), false);
+    matrix.Equal(CallProductionSlot<SteamRemoteStorage014Abi, 37>(storage, U64{}, nullptr), false);
+    matrix.Equal(CallProductionSlot<SteamRemoteStorage014Abi, 38>(storage, U64{}), U64{});
+    matrix.Equal(CallProductionSlot<SteamRemoteStorage014Abi, 39>(storage, U64{}, U32{}), U64{});
+    matrix.Equal(CallProductionSlot<SteamRemoteStorage014Abi, 40>(storage, U64{}), U64{});
+    matrix.Equal(CallProductionSlot<SteamRemoteStorage014Abi, 41>(storage, U32{}), U64{});
+    matrix.Equal(CallProductionSlot<SteamRemoteStorage014Abi, 42>(storage, U64{}), U64{});
+    matrix.Equal(CallProductionSlot<SteamRemoteStorage014Abi, 43>(storage, U32{}), U64{});
+    matrix.Equal(CallProductionSlot<SteamRemoteStorage014Abi, 44>(storage, U64{}), U64{});
+    matrix.Equal(
+        CallProductionSlot<SteamRemoteStorage014Abi, 45>(storage, U64{}, "change"), false);
+    matrix.Equal(CallProductionSlot<SteamRemoteStorage014Abi, 46>(storage, U64{}), U64{});
+    matrix.Equal(CallProductionSlot<SteamRemoteStorage014Abi, 47>(storage, U64{}, false), U64{});
+    matrix.Equal(CallProductionSlot<SteamRemoteStorage014Abi, 48>(storage, U64{}), U64{});
+    matrix.Equal(
+        CallProductionSlot<SteamRemoteStorage014Abi, 49>(storage, ProductionSteamId{}, U32{}, nullptr, nullptr),
+        U64{});
+    matrix.Equal(
+        CallProductionSlot<SteamRemoteStorage014Abi, 50>(storage,
+            I32{},
+            "account",
+            "video",
+            "preview",
+            U32{},
+            "title",
+            "description",
+            I32{},
+            nullptr),
+        U64{});
+    matrix.Equal(CallProductionSlot<SteamRemoteStorage014Abi, 51>(storage, U64{}, I32{}), U64{});
+    matrix.Equal(CallProductionSlot<SteamRemoteStorage014Abi, 52>(storage, I32{}, U32{}), U64{});
+    matrix.Equal(
+        CallProductionSlot<SteamRemoteStorage014Abi, 53>(storage, I32{}, U32{}, U32{}, U32{}, nullptr, nullptr),
+        U64{});
+    matrix.Equal(
+        CallProductionSlot<SteamRemoteStorage014Abi, 54>(storage, U64{}, "location", U32{}),
+        U64{});
+    return matrix.valid && matrix.calls == 55;
+}
+
+bool VerifyClient017SafeSlots(
+    void* const client,
+    void*& user,
+    void*& matchmaking,
+    void*& networking,
+    void*& storage) {
+    SlotMatrix matrix;
+    void* const raw = reinterpret_cast<void*>(1);
+    matrix.Equal(CallProductionSlot<SteamClient017Abi, 0>(client), 0);
+    matrix.Equal(CallProductionSlot<SteamClient017Abi, 1>(client, I32{}), false);
+    matrix.Equal(CallProductionSlot<SteamClient017Abi, 2>(client, I32{}), 0);
+    I32 pipe = -1;
+    matrix.Equal(CallProductionSlot<SteamClient017Abi, 3>(client, &pipe, I32{}), 0);
+    matrix.Output(pipe, 0);
+    CallProductionSlot<SteamClient017Abi, 4>(client, I32{}, I32{});
+    matrix.VoidCall();
+    user = CallProductionSlot<SteamClient017Abi, 5>(client, I32{}, I32{}, "SteamUser019");
+    matrix.Equal(user != nullptr && user != &productionUser, true);
+    CallProductionSlot<SteamClient017Abi, 7>(client, U32{}, U16{});
+    matrix.VoidCall();
+    matrix.Equal(
+        CallProductionSlot<SteamClient017Abi, 8>(client, I32{}, I32{}, "SteamFriends015"),
+        raw);
+    matrix.Equal(
+        CallProductionSlot<SteamClient017Abi, 9>(client, I32{}, "SteamUtils009"), raw);
+    matchmaking = CallProductionSlot<SteamClient017Abi, 10>(client, I32{}, I32{}, "SteamMatchMaking009");
+    matrix.Equal(
+        matchmaking != nullptr && matchmaking != &productionMatchmaking,
+        true);
+    matrix.Equal(
+        CallProductionSlot<SteamClient017Abi, 11>(client, I32{}, I32{}, "SteamMatchMakingServers002"),
+        raw);
+    matrix.Equal(
+        CallProductionSlot<SteamClient017Abi, 12>(client, I32{}, I32{}, "SteamFriends015"),
+        raw);
+    matrix.Equal(
+        CallProductionSlot<SteamClient017Abi, 13>(client, I32{}, I32{}, "STEAMUSERSTATS_INTERFACE_VERSION011"),
+        raw);
+    matrix.Equal(
+        CallProductionSlot<SteamClient017Abi, 15>(client, I32{}, I32{}, "STEAMAPPS_INTERFACE_VERSION008"),
+        raw);
+    networking = CallProductionSlot<SteamClient017Abi, 16>(client, I32{}, I32{}, "SteamNetworking005");
+    matrix.Equal(
+        networking != nullptr && networking != &productionNetworking,
+        true);
+    storage = CallProductionSlot<SteamClient017Abi, 17>(client,
+        I32{},
+        I32{},
+        "STEAMREMOTESTORAGE_INTERFACE_VERSION014");
+    matrix.Equal(storage != nullptr && storage != &productionRemoteStorage, true);
+    matrix.Equal(
+        CallProductionSlot<SteamClient017Abi, 18>(client, I32{}, I32{}, "STEAMSCREENSHOTS_INTERFACE_VERSION003"),
+        raw);
+    CallProductionSlot<SteamClient017Abi, 19>(client);
+    matrix.VoidCall();
+    matrix.Equal(CallProductionSlot<SteamClient017Abi, 20>(client), U32{});
+    CallProductionSlot<SteamClient017Abi, 21>(
+        client, static_cast<ProductionWarningMessageHook>(nullptr));
+    matrix.VoidCall();
+    matrix.Equal(CallProductionSlot<SteamClient017Abi, 22>(client), false);
+    matrix.Equal(
+        CallProductionSlot<SteamClient017Abi, 23>(client, I32{}, I32{}, "STEAMHTTP_INTERFACE_VERSION002"),
+        raw);
+    matrix.Equal(
+        CallProductionSlot<SteamClient017Abi, 24>(client,
+            I32{},
+            I32{},
+            "STEAMUNIFIEDMESSAGES_INTERFACE_VERSION001"),
+        raw);
+    matrix.Equal(
+        CallProductionSlot<SteamClient017Abi, 25>(client, I32{}, I32{}, "SteamController005"),
+        raw);
+    matrix.Equal(
+        CallProductionSlot<SteamClient017Abi, 26>(client, I32{}, I32{}, "STEAMUGC_INTERFACE_VERSION010"),
+        raw);
+    matrix.Equal(
+        CallProductionSlot<SteamClient017Abi, 27>(client, I32{}, I32{}, "STEAMAPPLIST_INTERFACE_VERSION001"),
+        raw);
+    matrix.Equal(
+        CallProductionSlot<SteamClient017Abi, 28>(client, I32{}, I32{}, "STEAMMUSIC_INTERFACE_VERSION001"),
+        raw);
+    matrix.Equal(
+        CallProductionSlot<SteamClient017Abi, 29>(client,
+            I32{},
+            I32{},
+            "STEAMMUSICREMOTE_INTERFACE_VERSION001"),
+        raw);
+    matrix.Equal(
+        CallProductionSlot<SteamClient017Abi, 30>(client, I32{}, I32{}, "STEAMHTMLSURFACE_INTERFACE_VERSION_003"),
+        raw);
+    CallProductionSlot<SteamClient017Abi, 31>(
+        client, static_cast<ProductionPostApiResultHook>(nullptr));
+    matrix.VoidCall();
+    CallProductionSlot<SteamClient017Abi, 32>(
+        client, static_cast<ProductionPostApiResultHook>(nullptr));
+    matrix.VoidCall();
+    CallProductionSlot<SteamClient017Abi, 33>(
+        client, static_cast<ProductionCheckCallbackRegisteredHook>(nullptr));
+    matrix.VoidCall();
+    matrix.Equal(
+        CallProductionSlot<SteamClient017Abi, 34>(client, I32{}, I32{}, "STEAMINVENTORY_INTERFACE_V002"),
+        raw);
+    matrix.Equal(
+        CallProductionSlot<SteamClient017Abi, 35>(client, I32{}, I32{}, "STEAMVIDEO_INTERFACE_V002"),
+        raw);
+    return matrix.valid && matrix.calls == 34;
 }
 
 const DeferredModuleGateConfiguration* activeBootstrapConfiguration = nullptr;
@@ -551,6 +1638,22 @@ int VerifyProductionPinnedAbi() {
         "SteamMatchMaking009",
         "SteamNetworking005",
         "STEAMREMOTESTORAGE_INTERFACE_VERSION014",
+        "SteamFriends015",
+        "SteamUtils009",
+        "SteamMatchMakingServers002",
+        "STEAMUSERSTATS_INTERFACE_VERSION011",
+        "STEAMAPPS_INTERFACE_VERSION008",
+        "STEAMSCREENSHOTS_INTERFACE_VERSION003",
+        "STEAMHTTP_INTERFACE_VERSION002",
+        "STEAMUNIFIEDMESSAGES_INTERFACE_VERSION001",
+        "SteamController005",
+        "STEAMUGC_INTERFACE_VERSION010",
+        "STEAMAPPLIST_INTERFACE_VERSION001",
+        "STEAMMUSIC_INTERFACE_VERSION001",
+        "STEAMMUSICREMOTE_INTERFACE_VERSION001",
+        "STEAMHTMLSURFACE_INTERFACE_VERSION_003",
+        "STEAMINVENTORY_INTERFACE_V002",
+        "STEAMVIDEO_INTERFACE_V002",
     };
     const auto fatalState = std::make_shared<DSRRandomizer::Steam::FatalState>(
         &ProductionAbiFatalReporter);
@@ -568,61 +1671,22 @@ int VerifyProductionPinnedAbi() {
     const auto factory = reinterpret_cast<Factory>(
         DSRRandomizer::Steam::SteamFactoryDetourAddress(slot));
     void* const client = factory("SteamClient017");
-    void* const user = CallProductionSlot<void*>(
-        client, 5, std::int32_t{}, std::int32_t{}, "SteamUser019");
-    void* const matchmaking = CallProductionSlot<void*>(
-        client, 10, std::int32_t{}, std::int32_t{}, "SteamMatchMaking009");
-    void* const networking = CallProductionSlot<void*>(
-        client, 16, std::int32_t{}, std::int32_t{}, "SteamNetworking005");
-    void* const remoteStorage = CallProductionSlot<void*>(
-        client, 17, std::int32_t{}, std::int32_t{},
-        "STEAMREMOTESTORAGE_INTERFACE_VERSION014");
+    void* user = nullptr;
+    void* matchmaking = nullptr;
+    void* networking = nullptr;
+    void* remoteStorage = nullptr;
+    const bool clientSlots = VerifyClient017SafeSlots(
+        client, user, matchmaking, networking, remoteStorage);
     const bool noRawProtectedObject = client != &productionClient
         && user != &productionUser
         && matchmaking != &productionMatchmaking
         && networking != &productionNetworking
         && remoteStorage != &productionRemoteStorage;
-    const bool exactIdentity = CallProductionSlot<ProductionSteamId>(user, 2)
-            .Value() == kProductionSteamId
-        && productionRawIdentityCalls == 1;
-    const bool representativeSlots =
-        CallProductionSlot<std::int32_t>(user, 0) == 0
-        && CallProductionSlot<std::int32_t>(
-            user, 14, static_cast<const void*>(nullptr), 0,
-            std::uint64_t{}) == 0
-        && !CallProductionSlot<bool>(user, 28)
-        && CallProductionSlot<std::int32_t>(matchmaking, 0) == 0
-        && std::strcmp(
-            CallProductionSlot<const char*>(
-                matchmaking, 19, std::uint64_t{}, "key"),
-            "") == 0
-        && CallProductionSlot<std::uint64_t>(
-            matchmaking, 13, std::int32_t{}, 4) == 0
-        && CallProductionSlot<ProductionSteamId>(
-            matchmaking, 12, std::int32_t{}).Value() == 0
-        && CallProductionSlot<ProductionSteamId>(
-            matchmaking, 18, std::uint64_t{}, std::int32_t{}).Value() == 0
-        && CallProductionSlot<ProductionSteamId>(
-            matchmaking, 35, std::uint64_t{}).Value() == 0
-        && !CallProductionSlot<bool>(
-            matchmaking, 37, std::uint64_t{}, std::uint64_t{})
-        && !CallProductionSlot<bool>(
-            networking, 0, std::uint64_t{}, nullptr, std::uint32_t{},
-            std::int32_t{}, 0)
-        && !CallProductionSlot<bool>(
-            networking, 11, std::uint32_t{}, false)
-        && CallProductionSlot<std::int32_t>(
-            networking, 21, std::uint32_t{}) == 0
-        && !CallProductionSlot<bool>(
-            remoteStorage, 0, "save", nullptr, std::int32_t{})
-        && CallProductionSlot<std::uint64_t>(
-            remoteStorage, 29, std::int32_t{}) == UINT64_MAX
-        && CallProductionSlot<std::uint64_t>(
-            remoteStorage, 54, std::uint64_t{}, "path", std::uint32_t{}) == 0;
-    const bool everySlotCallable = CallEveryProductionSlot(user, 29, {2})
-        && CallEveryProductionSlot(matchmaking, 38, {12, 18, 35})
-        && CallEveryProductionSlot(networking, 22)
-        && CallEveryProductionSlot(remoteStorage, 55);
+    const bool userSlots = VerifyUser019Slots(user);
+    const bool matchmakingSlots = VerifyMatchmaking009Slots(matchmaking);
+    const bool networkingSlots = VerifyNetworking005Slots(networking);
+    const bool remoteStorageSlots = VerifyRemoteStorage014Slots(remoteStorage);
+    const bool exactIdentity = productionRawIdentityCalls == 1;
     const bool exactWindowsSlotCounts =
         DSRRandomizer::Steam::Testing::ProductionInterfaceSlotCount(
             "SteamClient017") == 36
@@ -638,22 +1702,28 @@ int VerifyProductionPinnedAbi() {
         && productionRawClientGetterCalls >= 4;
 
     const auto clientGetterCallsBeforeUnknown = productionRawClientGetterCalls;
-    const bool unknownClientGatewayDenied = CallProductionSlot<void*>(
-            client,
-            12,
+    const bool unknownClientGatewayDenied = CallProductionSlot<SteamClient017Abi, 6>(client,
             std::int32_t{},
             std::int32_t{},
-            "SteamNetworking999") == nullptr
+            "SteamGameServer012") == nullptr
         && productionRawClientGetterCalls == clientGetterCallsBeforeUnknown
         && fatalState->IsFatal();
+    const bool deactivatedClientGatewayDenied = CallProductionSlot<SteamClient017Abi, 14>(client,
+            std::int32_t{},
+            std::int32_t{},
+            "SteamGameServerStats001") == nullptr
+        && productionRawClientGetterCalls == clientGetterCallsBeforeUnknown;
 
     fatalState->EnterDenyOnly();
     DSRRandomizer::Steam::UnregisterSteamFactorySlot(slot);
-    const bool teardownDeny = CallProductionSlot<ProductionSteamId>(user, 2)
+    const bool teardownDeny = CallProductionSlot<SteamUser019Abi, 2>(user)
             .Value() == 0
-        && !CallProductionSlot<bool>(
-            networking, 0, std::uint64_t{}, nullptr, std::uint32_t{},
-            std::int32_t{}, 0)
+        && !CallProductionSlot<SteamNetworking005Abi, 0>(networking,
+            ProductionSteamId{},
+            nullptr,
+            U32{},
+            I32{},
+            I32{})
         && factory("SteamUser019") == nullptr
         && productionRawIdentityCalls == 1;
 
@@ -676,10 +1746,11 @@ int VerifyProductionPinnedAbi() {
         && factory("SteamUser019") == nullptr;
     DSRRandomizer::Steam::UnregisterSteamFactorySlot(slot);
 
-    return noRawProtectedObject && exactIdentity && representativeSlots
-            && everySlotCallable && exactWindowsSlotCounts
+    return clientSlots && userSlots && matchmakingSlots && networkingSlots
+            && remoteStorageSlots && noRawProtectedObject && exactIdentity
+            && exactWindowsSlotCounts
             && protectedRawNeverCalled && unknownClientGatewayDenied
-            && teardownDeny
+            && deactivatedClientGatewayDenied && teardownDeny
             && returningFatalDenied
         ? 0
         : Fail("production version-pinned Steam ABI was not offline-safe");

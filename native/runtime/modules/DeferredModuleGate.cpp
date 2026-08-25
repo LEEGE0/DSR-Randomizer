@@ -2476,7 +2476,7 @@ DeferredModuleGateCleanupStatus CleanupLocked() noexcept {
     return DeferredModuleGateCleanupStatus::Success;
 }
 
-DeferredModuleGateInstallStatus InstallWithSuspendedProof(
+DeferredModuleGateInstallStatus InstallConfiguredGate(
     const DeferredModuleGateConfiguration& configuration,
     const Steam::SteamInterfaceLayout interfaceLayout) noexcept {
     std::scoped_lock installLock(installMutex);
@@ -2584,7 +2584,7 @@ DeferredModuleGateInstallStatus InstallWithSuspendedProof(
 
 DeferredModuleGateInstallStatus InstallDeferredModuleGate(
     const DeferredModuleGateConfiguration& configuration) noexcept {
-    return InstallWithSuspendedProof(
+    return InstallConfiguredGate(
         configuration,
         Steam::SteamInterfaceLayout::ProductionPinned);
 }
@@ -2603,7 +2603,7 @@ namespace Testing {
 DeferredModuleGateInstallStatus
 InstallDeferredModuleGateForSyntheticSuspendedProcess(
     const DeferredModuleGateConfiguration& configuration) noexcept {
-    return InstallWithSuspendedProof(
+    return InstallConfiguredGate(
         configuration,
         Steam::SteamInterfaceLayout::SyntheticOneSlotForTesting);
 }

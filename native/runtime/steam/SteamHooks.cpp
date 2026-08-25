@@ -6,6 +6,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <limits>
 #include <memory>
@@ -68,6 +69,11 @@ using U32 = std::uint32_t;
 using U16 = std::uint16_t;
 using I64 = std::int64_t;
 using I32 = std::int32_t;
+using WarningMessageHookAbi = void(__cdecl*)(I32, const char*);
+using PostApiResultHookAbi = void(__cdecl*)();
+using CheckCallbackRegisteredHookAbi = U32(__cdecl*)(I32);
+
+struct SteamParamStringArrayAbi;
 
 #pragma pack(push, 1)
 class SteamIdAbi final {
@@ -83,6 +89,56 @@ private:
 #pragma pack(pop)
 
 static_assert(sizeof(SteamIdAbi) == sizeof(U64));
+
+#pragma pack(push, 1)
+class GameIdAbi final {
+public:
+    GameIdAbi() noexcept : value_(0) {}
+    explicit GameIdAbi(const U64 value) noexcept : value_(value) {}
+
+private:
+    U64 value_;
+};
+#pragma pack(pop)
+
+struct P2PSessionStateAbi final {
+    std::uint8_t connectionActive;
+    std::uint8_t connecting;
+    std::uint8_t sessionError;
+    std::uint8_t usingRelay;
+    I32 bytesQueuedForSend;
+    I32 packetsQueuedForSend;
+    U32 remoteIp;
+    U16 remotePort;
+};
+
+static_assert(sizeof(GameIdAbi) == sizeof(U64));
+static_assert(sizeof(P2PSessionStateAbi) == 20);
+
+template <typename Value>
+void ClearOutput(Value* const output) noexcept {
+    if (output != nullptr) {
+        *output = Value{};
+    }
+}
+
+void ClearBuffer(void* const output, const U32 length) noexcept {
+    if (output != nullptr && length != 0) {
+        std::memset(output, 0, length);
+    }
+}
+
+void ClearBuffer(void* const output, const I32 length) noexcept {
+    if (length > 0) {
+        ClearBuffer(output, static_cast<U32>(length));
+    }
+}
+
+void ClearString(char* const output, const I32 length) noexcept {
+    if (output != nullptr && length > 0) {
+        output[0] = '\0';
+    }
+}
 
 template <typename Result, typename... Arguments>
 Result OfflineZero(Wrapper*, Arguments...) noexcept {
@@ -311,11 +367,307 @@ void* ClientUtilsGetter(
     return GuardClientResult(wrapper, raw, version);
 }
 
+I32 OfflineCreateLocalUser(Wrapper*, I32* const pipe, I32) noexcept {
+    ClearOutput(pipe);
+    return 0;
+}
+
+I32 OfflineInitiateGameConnection(
+    Wrapper*,
+    void* const authenticationBlob,
+    const I32 authenticationBlobSize,
+    SteamIdAbi,
+    U32,
+    U16,
+    bool) noexcept {
+    ClearBuffer(authenticationBlob, authenticationBlobSize);
+    return 0;
+}
+
+bool OfflineUserDataFolder(
+    Wrapper*, char* const folder, const I32 folderSize) noexcept {
+    ClearString(folder, folderSize);
+    return false;
+}
+
+I32 OfflineAvailableVoice(
+    Wrapper*,
+    U32* const compressed,
+    U32* const uncompressed,
+    U32) noexcept {
+    ClearOutput(compressed);
+    ClearOutput(uncompressed);
+    return 1;
+}
+
+I32 OfflineGetVoice(
+    Wrapper*,
+    const bool wantsCompressed,
+    void* const compressed,
+    const U32 compressedCapacity,
+    U32* const compressedBytes,
+    const bool wantsUncompressed,
+    void* const uncompressed,
+    const U32 uncompressedCapacity,
+    U32* const uncompressedBytes,
+    U32) noexcept {
+    if (wantsCompressed) {
+        ClearBuffer(compressed, compressedCapacity);
+    }
+    if (wantsUncompressed) {
+        ClearBuffer(uncompressed, uncompressedCapacity);
+    }
+    ClearOutput(compressedBytes);
+    ClearOutput(uncompressedBytes);
+    return 1;
+}
+
+I32 OfflineDecompressVoice(
+    Wrapper*,
+    const void*,
+    U32,
+    void* const output,
+    const U32 outputCapacity,
+    U32* const outputBytes,
+    U32) noexcept {
+    ClearBuffer(output, outputCapacity);
+    ClearOutput(outputBytes);
+    return 1;
+}
+
+U32 OfflineAuthSessionTicket(
+    Wrapper*,
+    void* const ticket,
+    const I32 ticketCapacity,
+    U32* const ticketBytes) noexcept {
+    ClearBuffer(ticket, ticketCapacity);
+    ClearOutput(ticketBytes);
+    return 0;
+}
+
+I32 OfflineBeginAuthSession(
+    Wrapper*, const void*, I32, SteamIdAbi) noexcept {
+    return 1;
+}
+
+I32 OfflineUserLicense(Wrapper*, SteamIdAbi, U32) noexcept {
+    return 1;
+}
+
+bool OfflineEncryptedAppTicket(
+    Wrapper*,
+    void* const ticket,
+    const I32 ticketCapacity,
+    U32* const ticketBytes) noexcept {
+    ClearBuffer(ticket, ticketCapacity);
+    ClearOutput(ticketBytes);
+    return false;
+}
+
+bool OfflineFavoriteGame(
+    Wrapper*,
+    I32,
+    U32* const appId,
+    U32* const ip,
+    U16* const connectionPort,
+    U16* const queryPort,
+    U32* const flags,
+    U32* const lastPlayed) noexcept {
+    ClearOutput(appId);
+    ClearOutput(ip);
+    ClearOutput(connectionPort);
+    ClearOutput(queryPort);
+    ClearOutput(flags);
+    ClearOutput(lastPlayed);
+    return false;
+}
+
+bool OfflineLobbyDataByIndex(
+    Wrapper*,
+    SteamIdAbi,
+    I32,
+    char* const key,
+    const I32 keyCapacity,
+    char* const value,
+    const I32 valueCapacity) noexcept {
+    ClearString(key, keyCapacity);
+    ClearString(value, valueCapacity);
+    return false;
+}
+
+I32 OfflineLobbyChatEntry(
+    Wrapper*,
+    SteamIdAbi,
+    I32,
+    SteamIdAbi* const user,
+    void* const data,
+    const I32 dataCapacity,
+    I32* const chatType) noexcept {
+    ClearOutput(user);
+    ClearBuffer(data, dataCapacity);
+    ClearOutput(chatType);
+    return 0;
+}
+
+bool OfflineLobbyGameServer(
+    Wrapper*,
+    SteamIdAbi,
+    U32* const ip,
+    U16* const port,
+    SteamIdAbi* const server) noexcept {
+    ClearOutput(ip);
+    ClearOutput(port);
+    ClearOutput(server);
+    return false;
+}
+
+bool OfflineP2PPacketAvailable(
+    Wrapper*, U32* const messageSize, I32) noexcept {
+    ClearOutput(messageSize);
+    return false;
+}
+
+bool OfflineReadP2PPacket(
+    Wrapper*,
+    void* const destination,
+    const U32 capacity,
+    U32* const messageSize,
+    SteamIdAbi* const remote,
+    I32) noexcept {
+    ClearBuffer(destination, capacity);
+    ClearOutput(messageSize);
+    ClearOutput(remote);
+    return false;
+}
+
+bool OfflineP2PSessionState(
+    Wrapper*, SteamIdAbi, P2PSessionStateAbi* const state) noexcept {
+    ClearOutput(state);
+    return false;
+}
+
+bool OfflineSocketDataAvailable(
+    Wrapper*, U32, U32* const messageSize) noexcept {
+    ClearOutput(messageSize);
+    return false;
+}
+
+bool OfflineRetrieveSocketData(
+    Wrapper*,
+    U32,
+    void* const destination,
+    const U32 capacity,
+    U32* const messageSize) noexcept {
+    ClearBuffer(destination, capacity);
+    ClearOutput(messageSize);
+    return false;
+}
+
+bool OfflineListenDataAvailable(
+    Wrapper*,
+    U32,
+    U32* const messageSize,
+    U32* const socket) noexcept {
+    ClearOutput(messageSize);
+    ClearOutput(socket);
+    return false;
+}
+
+bool OfflineRetrieveListenData(
+    Wrapper*,
+    U32,
+    void* const destination,
+    const U32 capacity,
+    U32* const messageSize,
+    U32* const socket) noexcept {
+    ClearBuffer(destination, capacity);
+    ClearOutput(messageSize);
+    ClearOutput(socket);
+    return false;
+}
+
+bool OfflineSocketInfo(
+    Wrapper*,
+    U32,
+    SteamIdAbi* const remote,
+    I32* const status,
+    U32* const ip,
+    U16* const port) noexcept {
+    ClearOutput(remote);
+    ClearOutput(status);
+    ClearOutput(ip);
+    ClearOutput(port);
+    return false;
+}
+
+bool OfflineListenSocketInfo(
+    Wrapper*, U32, U32* const ip, U16* const port) noexcept {
+    ClearOutput(ip);
+    ClearOutput(port);
+    return false;
+}
+
+I32 OfflineFileRead(
+    Wrapper*, const char*, void* const data, const I32 capacity) noexcept {
+    ClearBuffer(data, capacity);
+    return 0;
+}
+
+bool OfflineFileReadAsyncComplete(
+    Wrapper*, U64, void* const data, const U32 capacity) noexcept {
+    ClearBuffer(data, capacity);
+    return false;
+}
+
+const char* OfflineFileNameAndSize(Wrapper*, I32, I32* const size) noexcept {
+    ClearOutput(size);
+    return "";
+}
+
+bool OfflineQuota(
+    Wrapper*, U64* const total, U64* const available) noexcept {
+    ClearOutput(total);
+    ClearOutput(available);
+    return false;
+}
+
+bool OfflineUgcProgress(
+    Wrapper*, U64, I32* const downloaded, I32* const expected) noexcept {
+    ClearOutput(downloaded);
+    ClearOutput(expected);
+    return false;
+}
+
+bool OfflineUgcDetails(
+    Wrapper*,
+    U64,
+    U32* const appId,
+    char** const name,
+    I32* const fileSize,
+    SteamIdAbi* const owner) noexcept {
+    ClearOutput(appId);
+    ClearOutput(name);
+    ClearOutput(fileSize);
+    ClearOutput(owner);
+    return false;
+}
+
+I32 OfflineUgcRead(
+    Wrapper*,
+    U64,
+    void* const data,
+    const I32 capacity,
+    U32,
+    I32) noexcept {
+    ClearBuffer(data, capacity);
+    return 0;
+}
+
 const std::array<void*, 36> steamClient017VTable{
     Slot(&OfflineZero<I32>),
     Slot(&OfflineFalse<I32>),
     Slot(&OfflineZero<I32, I32>),
-    Slot(&OfflineZero<I32, I32*, I32>),
+    Slot(&OfflineCreateLocalUser),
     Slot(&OfflineVoid<I32, I32>),
     Slot(&ClientInterfaceGetter<5>),
     Slot(&ClientInterfaceGetter<6>),
@@ -333,7 +685,7 @@ const std::array<void*, 36> steamClient017VTable{
     Slot(&ClientInterfaceGetter<18>),
     Slot(&OfflineVoid<>),
     Slot(&OfflineZero<U32>),
-    Slot(&OfflineVoid<void*>),
+    Slot(&OfflineVoid<WarningMessageHookAbi>),
     Slot(&OfflineFalse<>),
     Slot(&ClientInterfaceGetter<23>),
     Slot(&ClientInterfaceGetter<24>),
@@ -343,9 +695,9 @@ const std::array<void*, 36> steamClient017VTable{
     Slot(&ClientInterfaceGetter<28>),
     Slot(&ClientInterfaceGetter<29>),
     Slot(&ClientInterfaceGetter<30>),
-    Slot(&OfflineVoid<void*>),
-    Slot(&OfflineVoid<void*>),
-    Slot(&OfflineVoid<void*>),
+    Slot(&OfflineVoid<PostApiResultHookAbi>),
+    Slot(&OfflineVoid<PostApiResultHookAbi>),
+    Slot(&OfflineVoid<CheckCallbackRegisteredHookAbi>),
     Slot(&ClientInterfaceGetter<34>),
     Slot(&ClientInterfaceGetter<35>),
 };
@@ -354,25 +706,25 @@ const std::array<void*, 29> steamUser019VTable{
     Slot(&OfflineZero<I32>),
     Slot(&OfflineFalse<>),
     Slot(&ForwardSteamId),
-    Slot(&OfflineZero<I32, void*, I32, U64, U32, U16, bool>),
+    Slot(&OfflineInitiateGameConnection),
     Slot(&OfflineVoid<U32, U16>),
-    Slot(&OfflineVoid<U64, I32, const char*>),
-    Slot(&OfflineFalse<char*, I32>),
+    Slot(&OfflineVoid<GameIdAbi, I32, const char*>),
+    Slot(&OfflineUserDataFolder),
     Slot(&OfflineVoid<>),
     Slot(&OfflineVoid<>),
-    Slot(&OfflineZero<I32, U32*, U32*, U32>),
-    Slot(&OfflineZero<I32, bool, void*, U32, U32*, bool, void*, U32, U32*, U32>),
-    Slot(&OfflineZero<I32, const void*, U32, void*, U32, U32*, U32>),
+    Slot(&OfflineAvailableVoice),
+    Slot(&OfflineGetVoice),
+    Slot(&OfflineDecompressVoice),
     Slot(&OfflineZero<U32>),
-    Slot(&OfflineZero<U32, void*, I32, U32*>),
-    Slot(&OfflineZero<I32, const void*, I32, U64>),
-    Slot(&OfflineVoid<U64>),
+    Slot(&OfflineAuthSessionTicket),
+    Slot(&OfflineBeginAuthSession),
+    Slot(&OfflineVoid<SteamIdAbi>),
     Slot(&OfflineVoid<U32>),
-    Slot(&OfflineZero<I32, U64, U32>),
+    Slot(&OfflineUserLicense),
     Slot(&OfflineFalse<>),
-    Slot(&OfflineVoid<U64, U32, U16>),
-    Slot(&OfflineZero<U64, void*, I32>),
-    Slot(&OfflineFalse<void*, I32, U32*>),
+    Slot(&OfflineVoid<SteamIdAbi, U32, U16>),
+    Slot(&OfflineZero<U64, const void*, I32>),
+    Slot(&OfflineEncryptedAppTicket),
     Slot(&OfflineZero<I32, I32, bool>),
     Slot(&OfflineZero<I32>),
     Slot(&OfflineZero<U64, const char*>),
@@ -384,7 +736,7 @@ const std::array<void*, 29> steamUser019VTable{
 
 const std::array<void*, 38> steamMatchmaking009VTable{
     Slot(&OfflineZero<I32>),
-    Slot(&OfflineFalse<I32, U32*, U32*, U16*, U16*, U32*, U32*>),
+    Slot(&OfflineFavoriteGame),
     Slot(&OfflineZero<I32, U32, U32, U16, U16, U32, U32>),
     Slot(&OfflineFalse<U32, U32, U16, U16, U32>),
     Slot(&OfflineZero<U64>),
@@ -394,66 +746,66 @@ const std::array<void*, 38> steamMatchmaking009VTable{
     Slot(&OfflineVoid<I32>),
     Slot(&OfflineVoid<I32>),
     Slot(&OfflineVoid<I32>),
-    Slot(&OfflineVoid<U64>),
+    Slot(&OfflineVoid<SteamIdAbi>),
     Slot(&OfflineZero<SteamIdAbi, I32>),
     Slot(&OfflineZero<U64, I32, I32>),
-    Slot(&OfflineZero<U64, U64>),
-    Slot(&OfflineVoid<U64>),
-    Slot(&OfflineFalse<U64, U64>),
-    Slot(&OfflineZero<I32, U64>),
-    Slot(&OfflineZero<SteamIdAbi, U64, I32>),
-    Slot(&OfflineEmptyString<U64, const char*>),
-    Slot(&OfflineFalse<U64, const char*, const char*>),
-    Slot(&OfflineZero<I32, U64>),
-    Slot(&OfflineFalse<U64, I32, char*, I32, char*, I32>),
-    Slot(&OfflineFalse<U64, const char*>),
-    Slot(&OfflineEmptyString<U64, U64, const char*>),
-    Slot(&OfflineVoid<U64, const char*, const char*>),
-    Slot(&OfflineFalse<U64, const void*, I32>),
-    Slot(&OfflineZero<I32, U64, I32, U64*, void*, I32, I32*>),
-    Slot(&OfflineFalse<U64>),
-    Slot(&OfflineVoid<U64, U32, U16, U64>),
-    Slot(&OfflineFalse<U64, U32*, U16*, U64*>),
-    Slot(&OfflineFalse<U64, I32>),
-    Slot(&OfflineZero<I32, U64>),
-    Slot(&OfflineFalse<U64, I32>),
-    Slot(&OfflineFalse<U64, bool>),
-    Slot(&OfflineZero<SteamIdAbi, U64>),
-    Slot(&OfflineFalse<U64, U64>),
-    Slot(&OfflineFalse<U64, U64>),
+    Slot(&OfflineZero<U64, SteamIdAbi>),
+    Slot(&OfflineVoid<SteamIdAbi>),
+    Slot(&OfflineFalse<SteamIdAbi, SteamIdAbi>),
+    Slot(&OfflineZero<I32, SteamIdAbi>),
+    Slot(&OfflineZero<SteamIdAbi, SteamIdAbi, I32>),
+    Slot(&OfflineEmptyString<SteamIdAbi, const char*>),
+    Slot(&OfflineFalse<SteamIdAbi, const char*, const char*>),
+    Slot(&OfflineZero<I32, SteamIdAbi>),
+    Slot(&OfflineLobbyDataByIndex),
+    Slot(&OfflineFalse<SteamIdAbi, const char*>),
+    Slot(&OfflineEmptyString<SteamIdAbi, SteamIdAbi, const char*>),
+    Slot(&OfflineVoid<SteamIdAbi, const char*, const char*>),
+    Slot(&OfflineFalse<SteamIdAbi, const void*, I32>),
+    Slot(&OfflineLobbyChatEntry),
+    Slot(&OfflineFalse<SteamIdAbi>),
+    Slot(&OfflineVoid<SteamIdAbi, U32, U16, SteamIdAbi>),
+    Slot(&OfflineLobbyGameServer),
+    Slot(&OfflineFalse<SteamIdAbi, I32>),
+    Slot(&OfflineZero<I32, SteamIdAbi>),
+    Slot(&OfflineFalse<SteamIdAbi, I32>),
+    Slot(&OfflineFalse<SteamIdAbi, bool>),
+    Slot(&OfflineZero<SteamIdAbi, SteamIdAbi>),
+    Slot(&OfflineFalse<SteamIdAbi, SteamIdAbi>),
+    Slot(&OfflineFalse<SteamIdAbi, SteamIdAbi>),
 };
 
 const std::array<void*, 22> steamNetworking005VTable{
-    Slot(&OfflineFalse<U64, const void*, U32, I32, I32>),
-    Slot(&OfflineFalse<U32*, I32>),
-    Slot(&OfflineFalse<void*, U32, U32*, U64*, I32>),
-    Slot(&OfflineFalse<U64>),
-    Slot(&OfflineFalse<U64>),
-    Slot(&OfflineFalse<U64, I32>),
-    Slot(&OfflineFalse<U64, void*>),
+    Slot(&OfflineFalse<SteamIdAbi, const void*, U32, I32, I32>),
+    Slot(&OfflineP2PPacketAvailable),
+    Slot(&OfflineReadP2PPacket),
+    Slot(&OfflineFalse<SteamIdAbi>),
+    Slot(&OfflineFalse<SteamIdAbi>),
+    Slot(&OfflineFalse<SteamIdAbi, I32>),
+    Slot(&OfflineP2PSessionState),
     Slot(&OfflineFalse<bool>),
     Slot(&OfflineZero<U32, I32, U32, U16, bool>),
-    Slot(&OfflineZero<U32, U64, I32, I32, bool>),
+    Slot(&OfflineZero<U32, SteamIdAbi, I32, I32, bool>),
     Slot(&OfflineZero<U32, U32, U16, I32>),
     Slot(&OfflineFalse<U32, bool>),
     Slot(&OfflineFalse<U32, bool>),
     Slot(&OfflineFalse<U32, void*, U32, bool>),
-    Slot(&OfflineFalse<U32, U32*>),
-    Slot(&OfflineFalse<U32, void*, U32, U32*>),
-    Slot(&OfflineFalse<U32, U32*, U32*>),
-    Slot(&OfflineFalse<U32, void*, U32, U32*, U32*>),
-    Slot(&OfflineFalse<U32, U64*, I32*, U32*, U16*>),
-    Slot(&OfflineFalse<U32, U32*, U16*>),
+    Slot(&OfflineSocketDataAvailable),
+    Slot(&OfflineRetrieveSocketData),
+    Slot(&OfflineListenDataAvailable),
+    Slot(&OfflineRetrieveListenData),
+    Slot(&OfflineSocketInfo),
+    Slot(&OfflineListenSocketInfo),
     Slot(&OfflineZero<I32, U32>),
     Slot(&OfflineZero<I32, U32>),
 };
 
 const std::array<void*, 55> steamRemoteStorage014VTable{
     Slot(&OfflineFalse<const char*, const void*, I32>),
-    Slot(&OfflineZero<I32, const char*, void*, I32>),
+    Slot(&OfflineFileRead),
     Slot(&OfflineZero<U64, const char*, const void*, U32>),
     Slot(&OfflineZero<U64, const char*, U32, U32>),
-    Slot(&OfflineFalse<U64, void*, U32>),
+    Slot(&OfflineFileReadAsyncComplete),
     Slot(&OfflineFalse<const char*>),
     Slot(&OfflineFalse<const char*>),
     Slot(&OfflineZero<U64, const char*>),
@@ -468,25 +820,25 @@ const std::array<void*, 55> steamRemoteStorage014VTable{
     Slot(&OfflineZero<I64, const char*>),
     Slot(&OfflineZero<I32, const char*>),
     Slot(&OfflineZero<I32>),
-    Slot(&OfflineEmptyString<I32, I32*>),
-    Slot(&OfflineFalse<U64*, U64*>),
+    Slot(&OfflineFileNameAndSize),
+    Slot(&OfflineQuota),
     Slot(&OfflineFalse<>),
     Slot(&OfflineFalse<>),
     Slot(&OfflineVoid<bool>),
     Slot(&OfflineZero<U64, U64, U32>),
-    Slot(&OfflineFalse<U64, I32*, I32*>),
-    Slot(&OfflineFalse<U64, U32*, char**, I32*, U64*>),
-    Slot(&OfflineZero<I32, U64, void*, I32, U32, I32>),
+    Slot(&OfflineUgcProgress),
+    Slot(&OfflineUgcDetails),
+    Slot(&OfflineUgcRead),
     Slot(&OfflineZero<I32>),
     Slot(&OfflineInvalid<U64, I32>),
-    Slot(&OfflineZero<U64, const char*, const char*, U32, const char*, const char*, I32, void*, I32>),
+    Slot(&OfflineZero<U64, const char*, const char*, U32, const char*, const char*, I32, SteamParamStringArrayAbi*, I32>),
     Slot(&OfflineInvalid<U64, U64>),
     Slot(&OfflineFalse<U64, const char*>),
     Slot(&OfflineFalse<U64, const char*>),
     Slot(&OfflineFalse<U64, const char*>),
     Slot(&OfflineFalse<U64, const char*>),
     Slot(&OfflineFalse<U64, I32>),
-    Slot(&OfflineFalse<U64, void*>),
+    Slot(&OfflineFalse<U64, SteamParamStringArrayAbi*>),
     Slot(&OfflineZero<U64, U64>),
     Slot(&OfflineZero<U64, U64, U32>),
     Slot(&OfflineZero<U64, U64>),
@@ -498,11 +850,11 @@ const std::array<void*, 55> steamRemoteStorage014VTable{
     Slot(&OfflineZero<U64, U64>),
     Slot(&OfflineZero<U64, U64, bool>),
     Slot(&OfflineZero<U64, U64>),
-    Slot(&OfflineZero<U64, U64, U32, void*, void*>),
-    Slot(&OfflineZero<U64, I32, const char*, const char*, const char*, U32, const char*, const char*, I32, void*>),
+    Slot(&OfflineZero<U64, SteamIdAbi, U32, SteamParamStringArrayAbi*, SteamParamStringArrayAbi*>),
+    Slot(&OfflineZero<U64, I32, const char*, const char*, const char*, U32, const char*, const char*, I32, SteamParamStringArrayAbi*>),
     Slot(&OfflineZero<U64, U64, I32>),
     Slot(&OfflineZero<U64, I32, U32>),
-    Slot(&OfflineZero<U64, I32, U32, U32, U32, void*, void*>),
+    Slot(&OfflineZero<U64, I32, U32, U32, U32, SteamParamStringArrayAbi*, SteamParamStringArrayAbi*>),
     Slot(&OfflineZero<U64, U64, const char*, U32>),
 };
 
