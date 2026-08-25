@@ -524,12 +524,46 @@ DECLARE_SLOT_SIGNATURE(
 #undef DECLARE_SLOT_SIGNATURE
 #undef DECLARE_SLOT_SIGNATURE0
 
+template <typename Interface>
+struct ProductionSlotCoverage;
+
+template <>
+struct ProductionSlotCoverage<SteamClient017Abi> final {
+    inline static std::array<bool, 36> slots{};
+};
+
+template <>
+struct ProductionSlotCoverage<SteamUser019Abi> final {
+    inline static std::array<bool, 29> slots{};
+};
+
+template <>
+struct ProductionSlotCoverage<SteamMatchmaking009Abi> final {
+    inline static std::array<bool, 38> slots{};
+};
+
+template <>
+struct ProductionSlotCoverage<SteamNetworking005Abi> final {
+    inline static std::array<bool, 22> slots{};
+};
+
+template <>
+struct ProductionSlotCoverage<SteamRemoteStorage014Abi> final {
+    inline static std::array<bool, 55> slots{};
+};
+
+constexpr std::size_t kExpectedProductionSlotTotal = 36 + 29 + 38 + 22 + 55;
+static_assert(kExpectedProductionSlotTotal == 180);
+
 template <typename Interface, std::size_t Slot, typename... Arguments>
 decltype(auto) CallProductionSlot(
     void* const interfaceValue,
     Arguments&&... arguments) {
     using Method = typename ProductionSlotSignature<Interface, Slot>::Method;
     static_assert(std::is_invocable_v<Method, void*, Arguments...>);
+    static_assert(Slot < ProductionSlotCoverage<Interface>::slots.size());
+    auto& coverage = ProductionSlotCoverage<Interface>::slots;
+    coverage[Slot] = true;
     auto** const vtable = *reinterpret_cast<void***>(interfaceValue);
     Method method = nullptr;
     static_assert(sizeof(method) == sizeof(vtable[Slot]));
@@ -1177,6 +1211,19 @@ bool VerifyClient017SafeSlots(
     matrix.Equal(
         CallProductionSlot<SteamClient017Abi, 13>(client, I32{}, I32{}, "STEAMUSERSTATS_INTERFACE_VERSION011"),
         raw);
+    // Use a declared raw interface to exercise slot 14's exact getter ABI
+    // without entering fatal state before the dedicated diagnostics below.
+    const auto rawProtectedCallsBeforeSlot14 = productionRawProtectedCalls;
+    const auto clientGetterCallsBeforeSlot14 = productionRawClientGetterCalls;
+    matrix.Equal(
+        CallProductionSlot<SteamClient017Abi, 14>(client, I32{}, I32{}, "SteamFriends015"),
+        raw);
+    matrix.Output(
+        productionRawProtectedCalls,
+        rawProtectedCallsBeforeSlot14);
+    matrix.Output(
+        productionRawClientGetterCalls,
+        clientGetterCallsBeforeSlot14 + 1);
     matrix.Equal(
         CallProductionSlot<SteamClient017Abi, 15>(client, I32{}, I32{}, "STEAMAPPS_INTERFACE_VERSION008"),
         raw);
@@ -1244,7 +1291,7 @@ bool VerifyClient017SafeSlots(
     matrix.Equal(
         CallProductionSlot<SteamClient017Abi, 35>(client, I32{}, I32{}, "STEAMVIDEO_INTERFACE_V002"),
         raw);
-    return matrix.valid && matrix.calls == 34;
+    return matrix.valid && matrix.calls == 35;
 }
 
 const DeferredModuleGateConfiguration* activeBootstrapConfiguration = nullptr;
@@ -1609,6 +1656,12 @@ int VerifyPolicy() {
 }
 
 int VerifyProductionPinnedAbi() {
+    ProductionSlotCoverage<SteamClient017Abi>::slots.fill(false);
+    ProductionSlotCoverage<SteamUser019Abi>::slots.fill(false);
+    ProductionSlotCoverage<SteamMatchmaking009Abi>::slots.fill(false);
+    ProductionSlotCoverage<SteamNetworking005Abi>::slots.fill(false);
+    ProductionSlotCoverage<SteamRemoteStorage014Abi>::slots.fill(false);
+
     productionUserVTable.fill(reinterpret_cast<void*>(&ProductionRawProtected));
     productionClientVTable.fill(reinterpret_cast<void*>(&ProductionRawProtected));
     productionMatchmakingVTable.fill(
@@ -1740,6 +1793,24 @@ int VerifyProductionPinnedAbi() {
             "SteamNetworking005") == nullptr
         && productionRawClientGetterCalls == clientGetterCallsBeforeDeactivated;
 
+    const auto clientCovered = std::ranges::count(
+        ProductionSlotCoverage<SteamClient017Abi>::slots, true);
+    const auto userCovered = std::ranges::count(
+        ProductionSlotCoverage<SteamUser019Abi>::slots, true);
+    const auto matchmakingCovered = std::ranges::count(
+        ProductionSlotCoverage<SteamMatchmaking009Abi>::slots, true);
+    const auto networkingCovered = std::ranges::count(
+        ProductionSlotCoverage<SteamNetworking005Abi>::slots, true);
+    const auto remoteStorageCovered = std::ranges::count(
+        ProductionSlotCoverage<SteamRemoteStorage014Abi>::slots, true);
+    const bool everyProductionSlotCovered = clientCovered == 36
+        && userCovered == 29
+        && matchmakingCovered == 38
+        && networkingCovered == 22
+        && remoteStorageCovered == 55
+        && clientCovered + userCovered + matchmakingCovered + networkingCovered
+            + remoteStorageCovered == kExpectedProductionSlotTotal;
+
     DSRRandomizer::Steam::UnregisterSteamFactorySlot(slot);
     const bool teardownDeny = CallProductionSlot<SteamUser019Abi, 2>(user)
             .Value() == 0
@@ -1776,7 +1847,8 @@ int VerifyProductionPinnedAbi() {
             && exactWindowsSlotCounts
             && protectedRawNeverCalled && genericProtectedClientGatewayDenied
             && unknownClientGatewayDenied
-            && deactivatedClientGatewayDenied && teardownDeny
+            && deactivatedClientGatewayDenied && everyProductionSlotCovered
+            && teardownDeny
             && returningFatalDenied
         ? 0
         : Fail("production version-pinned Steam ABI was not offline-safe");
