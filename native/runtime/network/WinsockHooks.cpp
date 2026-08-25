@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cstring>
 #include <memory>
+#include <limits>
 #include <mutex>
 #include <shared_mutex>
 #include <utility>
@@ -103,10 +104,37 @@ void ReportDenied(const SocketOperation operation) noexcept {
     deniedCounters[CounterIndex(operation)].fetch_add(1, std::memory_order_relaxed);
 }
 
-SocketTransport RequiredTransport(const SocketOperation operation) noexcept {
-    return operation == SocketOperation::SendTo
-        ? SocketTransport::Udp
-        : SocketTransport::Tcp;
+bool ReadSocketIdentity(
+    const SOCKET socketHandle,
+    const SocketOperation operation,
+    SocketTransport& transport,
+    ADDRESS_FAMILY& family) noexcept {
+    WSAPROTOCOL_INFOW protocol{};
+    int protocolLength = sizeof(protocol);
+    if (getsockopt(
+            socketHandle,
+            SOL_SOCKET,
+            SO_PROTOCOL_INFOW,
+            reinterpret_cast<char*>(&protocol),
+            &protocolLength) == SOCKET_ERROR
+        || protocolLength != sizeof(protocol)) {
+        return false;
+    }
+
+    family = static_cast<ADDRESS_FAMILY>(protocol.iAddressFamily);
+    if (protocol.iSocketType == SOCK_STREAM
+        && protocol.iProtocol == IPPROTO_TCP
+        && operation != SocketOperation::SendTo) {
+        transport = SocketTransport::Tcp;
+        return true;
+    }
+    if (protocol.iSocketType == SOCK_DGRAM
+        && protocol.iProtocol == IPPROTO_UDP
+        && operation != SocketOperation::ConnectEx) {
+        transport = SocketTransport::Udp;
+        return true;
+    }
+    return false;
 }
 
 bool ExactEndpointMatch(
@@ -140,6 +168,7 @@ bool ExactEndpointMatch(
 
 bool IsExplicitlyAdmitted(
     const HookContext& context,
+    const SOCKET socketHandle,
     const SocketOperation operation,
     const sockaddr* const address,
     const int length) noexcept {
@@ -149,12 +178,17 @@ bool IsExplicitlyAdmitted(
         return false;
     }
 
-    const auto transport = RequiredTransport(operation);
+    SocketTransport transport{};
+    ADDRESS_FAMILY socketFamily = AF_UNSPEC;
+    if (!ReadSocketIdentity(socketHandle, operation, transport, socketFamily)) {
+        return false;
+    }
     for (std::size_t index = 0;
          index < context.configuration.endpointCount;
          ++index) {
         const auto& allowed = context.configuration.endpoints[index];
         if (allowed.transport == transport
+            && allowed.family == socketFamily
             && ExactEndpointMatch(allowed, address, length)) {
             return true;
         }
@@ -182,7 +216,7 @@ int WSAAPI HookConnect(
     const auto& context = callback.Context();
     if (context == nullptr
         || !IsExplicitlyAdmitted(
-            *context, SocketOperation::Connect, address, length)) {
+            *context, socketHandle, SocketOperation::Connect, address, length)) {
         return DenySocketOperation(SocketOperation::Connect);
     }
     if (context->trampolines.connect == nullptr) {
@@ -203,7 +237,7 @@ int WSAAPI HookWsaConnect(
     const auto& context = callback.Context();
     if (context == nullptr
         || !IsExplicitlyAdmitted(
-            *context, SocketOperation::WsaConnect, address, length)) {
+            *context, socketHandle, SocketOperation::WsaConnect, address, length)) {
         return DenySocketOperation(SocketOperation::WsaConnect);
     }
     if (context->trampolines.wsaConnect == nullptr) {
@@ -230,7 +264,7 @@ int WSAAPI HookSendTo(
     const auto& context = callback.Context();
     if (context == nullptr
         || !IsExplicitlyAdmitted(
-            *context, SocketOperation::SendTo, address, length)) {
+            *context, socketHandle, SocketOperation::SendTo, address, length)) {
         return DenySocketOperation(SocketOperation::SendTo);
     }
     if (context->trampolines.sendTo == nullptr) {
@@ -252,7 +286,7 @@ BOOL PASCAL HookConnectEx(
     const auto& context = callback.Context();
     if (context == nullptr
         || !IsExplicitlyAdmitted(
-            *context, SocketOperation::ConnectEx, address, length)
+            *context, socketHandle, SocketOperation::ConnectEx, address, length)
         || context->trampolines.wsaIoctl == nullptr) {
         return DenyConnectEx();
     }
@@ -286,17 +320,78 @@ BOOL PASCAL HookConnectEx(
         overlapped);
 }
 
-bool IsConnectExRequest(
-    const DWORD controlCode,
-    const LPVOID input,
-    const DWORD inputLength) noexcept {
-    if (controlCode != SIO_GET_EXTENSION_FUNCTION_POINTER
-        || input == nullptr
-        || inputLength != sizeof(GUID)) {
+bool TryReadGuid(const LPVOID input, GUID& value) noexcept {
+    if (input == nullptr) {
         return false;
     }
-    const GUID connectExGuid = WSAID_CONNECTEX;
-    return std::memcmp(input, &connectExGuid, sizeof(connectExGuid)) == 0;
+    __try {
+        std::memcpy(&value, input, sizeof(value));
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool RangesOverlap(
+    const void* const first,
+    const std::size_t firstLength,
+    const void* const second,
+    const std::size_t secondLength) noexcept {
+    const auto firstStart = reinterpret_cast<std::uintptr_t>(first);
+    const auto secondStart = reinterpret_cast<std::uintptr_t>(second);
+    if (firstStart > (std::numeric_limits<std::uintptr_t>::max)() - firstLength
+        || secondStart > (std::numeric_limits<std::uintptr_t>::max)() - secondLength) {
+        return true;
+    }
+    return firstStart < secondStart + secondLength
+        && secondStart < firstStart + firstLength;
+}
+
+bool ClearConnectExCallerOutput(
+    const LPVOID output,
+    const DWORD outputLength,
+    const LPDWORD bytesReturned) noexcept {
+    if (bytesReturned == nullptr) {
+        return false;
+    }
+    __try {
+        *bytesReturned = 0;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    if (output == nullptr
+        || outputLength < sizeof(LPFN_CONNECTEX)
+        || RangesOverlap(
+            output,
+            sizeof(LPFN_CONNECTEX),
+            bytesReturned,
+            sizeof(*bytesReturned))) {
+        return false;
+    }
+    __try {
+        const LPFN_CONNECTEX empty = nullptr;
+        std::memcpy(output, &empty, sizeof(empty));
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool PublishGuardedConnectEx(
+    const LPVOID output,
+    const LPDWORD bytesReturned) noexcept {
+    __try {
+        const LPFN_CONNECTEX guarded = &HookConnectEx;
+        std::memcpy(output, &guarded, sizeof(guarded));
+        *bytesReturned = sizeof(guarded);
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
 }
 
 int WSAAPI HookWsaIoctl(
@@ -316,48 +411,62 @@ int WSAAPI HookWsaIoctl(
         return SOCKET_ERROR;
     }
 
-    if (controlCode == SIO_GET_EXTENSION_FUNCTION_POINTER
-        && (input == nullptr || inputLength != sizeof(GUID))) {
-        WSASetLastError(WSAEACCES);
-        return SOCKET_ERROR;
+    GUID requestedGuid{};
+    bool connectExRequest = false;
+    if (controlCode == SIO_GET_EXTENSION_FUNCTION_POINTER) {
+        if (inputLength != sizeof(requestedGuid)
+            || !TryReadGuid(input, requestedGuid)) {
+            WSASetLastError(WSAEACCES);
+            return SOCKET_ERROR;
+        }
+        const GUID connectExGuid = WSAID_CONNECTEX;
+        connectExRequest = std::memcmp(
+            &requestedGuid, &connectExGuid, sizeof(connectExGuid)) == 0;
     }
-    const bool connectExRequest = IsConnectExRequest(
-        controlCode, input, inputLength);
-    if (connectExRequest
-        && (context->denyOnly.load(std::memory_order_acquire)
-            || overlapped != nullptr
-            || completionRoutine != nullptr)) {
+    if (!connectExRequest) {
+        return context->trampolines.wsaIoctl(
+            socketHandle,
+            controlCode,
+            input,
+            inputLength,
+            output,
+            outputLength,
+            bytesReturned,
+            overlapped,
+            completionRoutine);
+    }
+
+    if (!ClearConnectExCallerOutput(output, outputLength, bytesReturned)
+        || context->denyOnly.load(std::memory_order_acquire)
+        || overlapped != nullptr
+        || completionRoutine != nullptr) {
         WSASetLastError(WSAEACCES);
         return SOCKET_ERROR;
     }
 
+    LPFN_CONNECTEX providerConnectEx = nullptr;
+    DWORD providerBytes = 0;
     const int result = context->trampolines.wsaIoctl(
         socketHandle,
         controlCode,
-        input,
-        inputLength,
-        output,
-        outputLength,
-        bytesReturned,
-        overlapped,
-        completionRoutine);
-    if (result == SOCKET_ERROR || !connectExRequest) {
+        &requestedGuid,
+        sizeof(requestedGuid),
+        &providerConnectEx,
+        sizeof(providerConnectEx),
+        &providerBytes,
+        nullptr,
+        nullptr);
+    if (result == SOCKET_ERROR) {
         return result;
     }
 
-    if (output == nullptr
-        || outputLength < sizeof(LPFN_CONNECTEX)
-        || bytesReturned == nullptr
-        || *bytesReturned != sizeof(LPFN_CONNECTEX)) {
-        if (output != nullptr && outputLength >= sizeof(LPFN_CONNECTEX)) {
-            const LPFN_CONNECTEX empty = nullptr;
-            std::memcpy(output, &empty, sizeof(empty));
-        }
+    if (providerConnectEx == nullptr
+        || providerConnectEx == &HookConnectEx
+        || providerBytes != sizeof(providerConnectEx)
+        || !PublishGuardedConnectEx(output, bytesReturned)) {
         WSASetLastError(WSAEACCES);
         return SOCKET_ERROR;
     }
-    const LPFN_CONNECTEX guarded = &HookConnectEx;
-    std::memcpy(output, &guarded, sizeof(guarded));
     return 0;
 }
 

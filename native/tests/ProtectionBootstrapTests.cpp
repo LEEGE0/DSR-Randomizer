@@ -1,3 +1,6 @@
+#include <winsock2.h>
+
+#include <array>
 #include <cstdint>
 #include <iostream>
 #include <new>
@@ -5,6 +8,7 @@
 
 #include "DSRRandomizer/ProtectionProtocol.h"
 #include "ProtectionBootstrap.h"
+#include "network/WinsockHooks.h"
 
 namespace {
 
@@ -31,9 +35,119 @@ bool ThrowingPathReader(
     throw std::bad_alloc();
 }
 
+DSRRandomizer::ProtectionInitBlock ValidWinsockBlock() {
+    DSRRandomizer::ProtectionInitBlock block{};
+    block.magic = DSRRandomizer::kProtectionMagic;
+    block.version = DSRRandomizer::kProtectionProtocolVersion;
+    block.size = static_cast<std::uint16_t>(sizeof(block));
+    block.requiredFlags = static_cast<std::uint64_t>(
+        DSRRandomizer::ProtectionFlags::Bootstrap)
+        | static_cast<std::uint64_t>(DSRRandomizer::ProtectionFlags::Winsock);
+    block.socketEndpointCount = 1;
+    auto& endpoint = block.socketEndpoints[0];
+    endpoint.transport = static_cast<std::uint16_t>(
+        DSRRandomizer::SocketTransport::Tcp);
+    endpoint.family = AF_INET;
+    endpoint.port = htons(42000);
+    endpoint.address[0] = 127;
+    endpoint.address[1] = 0;
+    endpoint.address[2] = 0;
+    endpoint.address[3] = 1;
+    return block;
+}
+
+void StaleSameVersionSize(DSRRandomizer::ProtectionInitBlock& block) {
+    --block.size;
+}
+void EndpointCountOverflow(DSRRandomizer::ProtectionInitBlock& block) {
+    block.socketEndpointCount =
+        static_cast<std::uint32_t>(DSRRandomizer::kProtectionSocketEndpointCapacity + 1);
+}
+void ReservedBytes(DSRRandomizer::ProtectionInitBlock& block) {
+    block.socketEndpoints[0].reserved = 1;
+}
+void NonzeroUnusedSlot(DSRRandomizer::ProtectionInitBlock& block) {
+    block.socketEndpoints[1].address[0] = 1;
+}
+void UnknownTransport(DSRRandomizer::ProtectionInitBlock& block) {
+    block.socketEndpoints[0].transport = 99;
+}
+void UnknownFamily(DSRRandomizer::ProtectionInitBlock& block) {
+    block.socketEndpoints[0].family = 0x7fff;
+}
+void DuplicateTransport(DSRRandomizer::ProtectionInitBlock& block) {
+    block.socketEndpointCount = 2;
+    block.socketEndpoints[1] = block.socketEndpoints[0];
+    block.socketEndpoints[1].port = htons(42001);
+}
+void ZeroPort(DSRRandomizer::ProtectionInitBlock& block) {
+    block.socketEndpoints[0].port = 0;
+}
+void NonLoopbackAddress(DSRRandomizer::ProtectionInitBlock& block) {
+    block.socketEndpoints[0].address[0] = 8;
+    block.socketEndpoints[0].address[1] = 8;
+    block.socketEndpoints[0].address[2] = 8;
+    block.socketEndpoints[0].address[3] = 8;
+}
+void IPv4Padding(DSRRandomizer::ProtectionInitBlock& block) {
+    block.socketEndpoints[0].address[4] = 1;
+}
+
+int VerifyInvalidWinsockBlocks() {
+    using Mutator = void(*)(DSRRandomizer::ProtectionInitBlock&);
+    struct InvalidCase {
+        const char* name;
+        Mutator mutate;
+        DSRRandomizer::InitStatus expected;
+    };
+    const std::array cases{
+        InvalidCase{"stale same-version size", &StaleSameVersionSize,
+            DSRRandomizer::InitStatus::InvalidArgument},
+        InvalidCase{"endpoint count overflow", &EndpointCountOverflow,
+            DSRRandomizer::InitStatus::WinsockHookInstallFailed},
+        InvalidCase{"reserved bytes", &ReservedBytes,
+            DSRRandomizer::InitStatus::WinsockHookInstallFailed},
+        InvalidCase{"nonzero unused slot", &NonzeroUnusedSlot,
+            DSRRandomizer::InitStatus::WinsockHookInstallFailed},
+        InvalidCase{"unknown transport", &UnknownTransport,
+            DSRRandomizer::InitStatus::WinsockHookInstallFailed},
+        InvalidCase{"unknown family", &UnknownFamily,
+            DSRRandomizer::InitStatus::WinsockHookInstallFailed},
+        InvalidCase{"duplicate transport", &DuplicateTransport,
+            DSRRandomizer::InitStatus::WinsockHookInstallFailed},
+        InvalidCase{"zero port", &ZeroPort,
+            DSRRandomizer::InitStatus::WinsockHookInstallFailed},
+        InvalidCase{"non-loopback address", &NonLoopbackAddress,
+            DSRRandomizer::InitStatus::WinsockHookInstallFailed},
+        InvalidCase{"IPv4 padding", &IPv4Padding,
+            DSRRandomizer::InitStatus::WinsockHookInstallFailed},
+    };
+
+    for (const auto& test : cases) {
+        auto candidate = ValidWinsockBlock();
+        test.mutate(candidate);
+        const auto actual = DSRRandomizer::InitializeForTest(&candidate);
+        if (actual != test.expected
+            || DSRRandomizer::CurrentProtectionFlags()
+                != DSRRandomizer::ProtectionFlags::None
+            || DSRRandomizer::Network::WinsockHooksAreInstalled()) {
+            std::cerr << "invalid Winsock block case failed: " << test.name
+                      << ", expected=" << static_cast<unsigned int>(test.expected)
+                      << ", actual=" << static_cast<unsigned int>(actual) << '\n';
+            return 1;
+        }
+    }
+    return 0;
+}
+
 }  // namespace
 
 int main() {
+    if (const auto invalidWinsockResult = VerifyInvalidWinsockBlocks();
+        invalidWinsockResult != 0) {
+        return invalidWinsockResult;
+    }
+
     DSRRandomizer::ProtectionInitBlock block{};
     block.magic = DSRRandomizer::kProtectionMagic;
     block.version = 99;

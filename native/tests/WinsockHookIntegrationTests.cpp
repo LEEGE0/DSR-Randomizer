@@ -1,9 +1,11 @@
 #include <winsock2.h>
+#include <mswsock.h>
 #include <ws2tcpip.h>
 #include <Windows.h>
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -23,6 +25,10 @@ using DSRRandomizer::Network::HookPlatform;
 using DSRRandomizer::Network::WinsockHookCleanupStatus;
 using DSRRandomizer::Network::WinsockHookConfiguration;
 using DSRRandomizer::Network::WinsockHookInstallStatus;
+using ConnectFunction = decltype(&connect);
+using WsaConnectFunction = decltype(&WSAConnect);
+using SendToFunction = decltype(&sendto);
+using WsaIoctlFunction = decltype(&WSAIoctl);
 
 struct HookFailures {
     std::size_t missingTarget = std::numeric_limits<std::size_t>::max();
@@ -100,6 +106,143 @@ private:
     std::set<void*> enabled_;
 };
 
+struct AdapterSpyState {
+    std::uint64_t connectCalls = 0;
+    std::uint64_t wsaConnectCalls = 0;
+    std::uint64_t sendToCalls = 0;
+    std::uint64_t wsaIoctlCalls = 0;
+    std::uint64_t rawConnectExCalls = 0;
+    void* lastProviderOutput = nullptr;
+};
+
+AdapterSpyState adapterSpy{};
+std::atomic<std::uint64_t> completionRoutineCalls{0};
+
+BOOL PASCAL RawConnectExSpy(
+    SOCKET,
+    const sockaddr*,
+    int,
+    PVOID,
+    DWORD,
+    LPDWORD,
+    LPOVERLAPPED) {
+    ++adapterSpy.rawConnectExCalls;
+    return TRUE;
+}
+
+int WSAAPI OriginalConnectSpy(SOCKET, const sockaddr*, int) {
+    ++adapterSpy.connectCalls;
+    return 0;
+}
+
+int WSAAPI OriginalWsaConnectSpy(
+    SOCKET,
+    const sockaddr*,
+    int,
+    LPWSABUF,
+    LPWSABUF,
+    LPQOS,
+    LPQOS) {
+    ++adapterSpy.wsaConnectCalls;
+    return 0;
+}
+
+int WSAAPI OriginalSendToSpy(
+    SOCKET,
+    const char*,
+    int length,
+    int,
+    const sockaddr*,
+    int) {
+    ++adapterSpy.sendToCalls;
+    return length;
+}
+
+int WSAAPI OriginalWsaIoctlSpy(
+    SOCKET,
+    DWORD controlCode,
+    LPVOID,
+    DWORD,
+    LPVOID output,
+    DWORD outputLength,
+    LPDWORD bytesReturned,
+    LPWSAOVERLAPPED,
+    LPWSAOVERLAPPED_COMPLETION_ROUTINE) {
+    ++adapterSpy.wsaIoctlCalls;
+    adapterSpy.lastProviderOutput = output;
+    if (controlCode != SIO_GET_EXTENSION_FUNCTION_POINTER
+        || output == nullptr
+        || outputLength < sizeof(LPFN_CONNECTEX)
+        || bytesReturned == nullptr) {
+        WSASetLastError(WSAEFAULT);
+        return SOCKET_ERROR;
+    }
+    const LPFN_CONNECTEX raw = &RawConnectExSpy;
+    std::memcpy(output, &raw, sizeof(raw));
+    *bytesReturned = sizeof(raw);
+    return 0;
+}
+
+void CALLBACK CompletionRoutineSpy(
+    DWORD,
+    DWORD,
+    LPWSAOVERLAPPED,
+    DWORD) {
+    completionRoutineCalls.fetch_add(1, std::memory_order_relaxed);
+}
+
+class AdapterHookPlatform final : public HookPlatform {
+public:
+    bool Initialize() noexcept override { return true; }
+
+    void* ResolveTarget(const wchar_t*, const char* procedure) noexcept override {
+        if (std::strcmp(procedure, "connect") == 0) {
+            return reinterpret_cast<void*>(&OriginalConnectSpy);
+        }
+        if (std::strcmp(procedure, "WSAConnect") == 0) {
+            return reinterpret_cast<void*>(&OriginalWsaConnectSpy);
+        }
+        if (std::strcmp(procedure, "sendto") == 0) {
+            return reinterpret_cast<void*>(&OriginalSendToSpy);
+        }
+        if (std::strcmp(procedure, "WSAIoctl") == 0) {
+            return reinterpret_cast<void*>(&OriginalWsaIoctlSpy);
+        }
+        return nullptr;
+    }
+
+    bool CreateHook(void* target, void* detour, void** original) noexcept override {
+        *original = target;
+        if (target == reinterpret_cast<void*>(&OriginalConnectSpy)) {
+            connect = reinterpret_cast<ConnectFunction>(detour);
+        }
+        else if (target == reinterpret_cast<void*>(&OriginalWsaConnectSpy)) {
+            wsaConnect = reinterpret_cast<WsaConnectFunction>(detour);
+        }
+        else if (target == reinterpret_cast<void*>(&OriginalSendToSpy)) {
+            sendTo = reinterpret_cast<SendToFunction>(detour);
+        }
+        else if (target == reinterpret_cast<void*>(&OriginalWsaIoctlSpy)) {
+            wsaIoctl = reinterpret_cast<WsaIoctlFunction>(detour);
+        }
+        else {
+            return false;
+        }
+        return true;
+    }
+
+    bool QueueEnable(void*) noexcept override { return true; }
+    bool ApplyQueued() noexcept override { return true; }
+    bool DisableAll() noexcept override { return true; }
+    bool RemoveHook(void*) noexcept override { return true; }
+    bool Uninitialize() noexcept override { return true; }
+
+    ConnectFunction connect = nullptr;
+    WsaConnectFunction wsaConnect = nullptr;
+    SendToFunction sendTo = nullptr;
+    WsaIoctlFunction wsaIoctl = nullptr;
+};
+
 #pragma pack(push, 1)
 struct AuthenticatedPayload {
     char operation[4];
@@ -171,6 +314,239 @@ int VerifyAtomicHookLifecycle() {
     return 0;
 }
 
+sockaddr_in IPv4(const std::array<unsigned char, 4>& address, unsigned short port) {
+    sockaddr_in endpoint{};
+    endpoint.sin_family = AF_INET;
+    endpoint.sin_port = htons(port);
+    std::memcpy(&endpoint.sin_addr, address.data(), address.size());
+    return endpoint;
+}
+
+int AdapterFailure(const char* message) {
+    static_cast<void>(DSRRandomizer::Network::UninstallWinsockHooks());
+    return Fail(message);
+}
+
+int VerifyAdapterSecurityBranches() {
+    WinsockHookConfiguration configuration{};
+    configuration.endpointCount = 2;
+    auto& allowed = configuration.endpoints[0];
+    allowed.transport = DSRRandomizer::SocketTransport::Tcp;
+    allowed.family = AF_INET;
+    allowed.port = htons(42000);
+    allowed.address[0] = 127;
+    allowed.address[1] = 0;
+    allowed.address[2] = 0;
+    allowed.address[3] = 1;
+    auto& allowedUdp = configuration.endpoints[1];
+    allowedUdp.transport = DSRRandomizer::SocketTransport::Udp;
+    allowedUdp.family = AF_INET;
+    allowedUdp.port = htons(42002);
+    allowedUdp.address[0] = 127;
+    allowedUdp.address[1] = 0;
+    allowedUdp.address[2] = 0;
+    allowedUdp.address[3] = 1;
+
+    AdapterHookPlatform platform;
+    adapterSpy = {};
+    if (DSRRandomizer::Network::InstallWinsockHooks(configuration, platform)
+            != WinsockHookInstallStatus::Success
+        || platform.connect == nullptr
+        || platform.wsaConnect == nullptr
+        || platform.sendTo == nullptr
+        || platform.wsaIoctl == nullptr) {
+        return AdapterFailure("unable to install adapter spy hook group");
+    }
+
+    Socket stream(socket(AF_INET, SOCK_STREAM, IPPROTO_TCP));
+    Socket datagram(socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP));
+    const auto allowedEndpoint = IPv4({127, 0, 0, 1}, 42000);
+    const auto allowedUdpEndpoint = IPv4({127, 0, 0, 1}, 42002);
+    const auto deniedEndpoint = IPv4({127, 0, 0, 1}, 42001);
+    if (stream.Get() == INVALID_SOCKET || datagram.Get() == INVALID_SOCKET) {
+        return AdapterFailure("unable to create adapter spy sockets");
+    }
+
+    if (platform.connect(
+            stream.Get(),
+            reinterpret_cast<const sockaddr*>(&allowedEndpoint),
+            sizeof(allowedEndpoint)) != 0
+        || adapterSpy.connectCalls != 1) {
+        return AdapterFailure("authorized stream connect did not call its original once");
+    }
+    adapterSpy.connectCalls = 0;
+
+    WSASetLastError(0);
+    if (platform.connect(
+            datagram.Get(),
+            reinterpret_cast<const sockaddr*>(&allowedEndpoint),
+            sizeof(allowedEndpoint)) != SOCKET_ERROR
+        || WSAGetLastError() != WSAEACCES
+        || adapterSpy.connectCalls != 0) {
+        return AdapterFailure("UDP connect used a TCP-only endpoint or called its original");
+    }
+    WSASetLastError(0);
+    if (platform.wsaConnect(
+            datagram.Get(),
+            reinterpret_cast<const sockaddr*>(&allowedEndpoint),
+            sizeof(allowedEndpoint),
+            nullptr,
+            nullptr,
+            nullptr,
+            nullptr) != SOCKET_ERROR
+        || WSAGetLastError() != WSAEACCES
+        || adapterSpy.wsaConnectCalls != 0) {
+        return AdapterFailure("UDP WSAConnect used a TCP-only endpoint or called its original");
+    }
+    if (platform.connect(
+            datagram.Get(),
+            reinterpret_cast<const sockaddr*>(&allowedUdpEndpoint),
+            sizeof(allowedUdpEndpoint)) != 0
+        || adapterSpy.connectCalls != 1) {
+        return AdapterFailure("configured UDP connect did not call its original once");
+    }
+    adapterSpy.connectCalls = 0;
+
+    WSASetLastError(0);
+    if (platform.connect(
+            stream.Get(),
+            reinterpret_cast<const sockaddr*>(&deniedEndpoint),
+            sizeof(deniedEndpoint)) != SOCKET_ERROR
+        || WSAGetLastError() != WSAEACCES
+        || adapterSpy.connectCalls != 0) {
+        return AdapterFailure("denied connect called its original trampoline");
+    }
+    WSASetLastError(0);
+    if (platform.wsaConnect(
+            stream.Get(),
+            reinterpret_cast<const sockaddr*>(&deniedEndpoint),
+            sizeof(deniedEndpoint),
+            nullptr,
+            nullptr,
+            nullptr,
+            nullptr) != SOCKET_ERROR
+        || WSAGetLastError() != WSAEACCES
+        || adapterSpy.wsaConnectCalls != 0) {
+        return AdapterFailure("denied WSAConnect called its original trampoline");
+    }
+    constexpr char marker[] = "denied";
+    WSASetLastError(0);
+    if (platform.sendTo(
+            datagram.Get(),
+            marker,
+            sizeof(marker),
+            0,
+            reinterpret_cast<const sockaddr*>(&deniedEndpoint),
+            sizeof(deniedEndpoint)) != SOCKET_ERROR
+        || WSAGetLastError() != WSAEACCES
+        || adapterSpy.sendToCalls != 0) {
+        return AdapterFailure("denied sendto called its original trampoline");
+    }
+
+    GUID connectExGuid = WSAID_CONNECTEX;
+    LPFN_CONNECTEX callerPointer = nullptr;
+    DWORD callerBytes = 0;
+    if (platform.wsaIoctl(
+            stream.Get(),
+            SIO_GET_EXTENSION_FUNCTION_POINTER,
+            &connectExGuid,
+            sizeof(connectExGuid),
+            &callerPointer,
+            sizeof(callerPointer),
+            &callerBytes,
+            nullptr,
+            nullptr) == SOCKET_ERROR
+        || callerPointer == nullptr
+        || callerPointer == &RawConnectExSpy
+        || callerBytes != sizeof(callerPointer)
+        || adapterSpy.wsaIoctlCalls != 1
+        || adapterSpy.lastProviderOutput == &callerPointer) {
+        return AdapterFailure("ConnectEx provider pointer reached caller-owned output");
+    }
+    OVERLAPPED deniedConnectEx{};
+    WSASetLastError(0);
+    if (callerPointer(
+            stream.Get(),
+            reinterpret_cast<const sockaddr*>(&deniedEndpoint),
+            sizeof(deniedEndpoint),
+            nullptr,
+            0,
+            nullptr,
+            &deniedConnectEx)
+        || WSAGetLastError() != WSAEACCES
+        || adapterSpy.rawConnectExCalls != 0
+        || adapterSpy.wsaIoctlCalls != 1) {
+        return AdapterFailure("denied guarded ConnectEx invoked the raw provider pointer");
+    }
+
+    const auto providerCalls = adapterSpy.wsaIoctlCalls;
+    callerPointer = reinterpret_cast<LPFN_CONNECTEX>(1);
+    callerBytes = 99;
+    WSASetLastError(0);
+    if (platform.wsaIoctl(
+            stream.Get(),
+            SIO_GET_EXTENSION_FUNCTION_POINTER,
+            &connectExGuid,
+            sizeof(connectExGuid),
+            &callerPointer,
+            sizeof(callerPointer),
+            &callerBytes,
+            nullptr,
+            &CompletionRoutineSpy) != SOCKET_ERROR
+        || WSAGetLastError() != WSAEACCES
+        || callerPointer != nullptr
+        || callerBytes != 0
+        || adapterSpy.wsaIoctlCalls != providerCalls
+        || completionRoutineCalls.load(std::memory_order_relaxed) != 0) {
+        return AdapterFailure("completion-routine ConnectEx retrieval did not fail closed");
+    }
+
+    OVERLAPPED overlapped{};
+    callerPointer = reinterpret_cast<LPFN_CONNECTEX>(1);
+    callerBytes = 99;
+    WSASetLastError(0);
+    if (platform.wsaIoctl(
+            stream.Get(),
+            SIO_GET_EXTENSION_FUNCTION_POINTER,
+            &connectExGuid,
+            sizeof(connectExGuid),
+            &callerPointer,
+            sizeof(callerPointer),
+            &callerBytes,
+            &overlapped,
+            nullptr) != SOCKET_ERROR
+        || WSAGetLastError() != WSAEACCES
+        || callerPointer != nullptr
+        || callerBytes != 0
+        || adapterSpy.wsaIoctlCalls != providerCalls) {
+        return AdapterFailure("overlapped ConnectEx retrieval did not fail closed");
+    }
+
+    callerBytes = 99;
+    WSASetLastError(0);
+    if (platform.wsaIoctl(
+            stream.Get(),
+            SIO_GET_EXTENSION_FUNCTION_POINTER,
+            &connectExGuid,
+            sizeof(connectExGuid),
+            nullptr,
+            sizeof(LPFN_CONNECTEX),
+            &callerBytes,
+            nullptr,
+            nullptr) != SOCKET_ERROR
+        || WSAGetLastError() != WSAEACCES
+        || callerBytes != 0
+        || adapterSpy.wsaIoctlCalls != providerCalls) {
+        return AdapterFailure("invalid ConnectEx output buffer reached provider trampoline");
+    }
+
+    if (DSRRandomizer::Network::UninstallWinsockHooks()
+            != WinsockHookCleanupStatus::Success) {
+        return Fail("adapter spy hook group did not uninstall");
+    }
+    return 0;
+}
+
 std::wstring Quote(const std::wstring_view value) {
     return L"\"" + std::wstring(value) + L"\"";
 }
@@ -231,6 +607,17 @@ bool BindLoopback(Socket& socketHandle, unsigned short& port) {
     }
     port = ntohs(endpoint.sin_port);
     return port != 0;
+}
+
+bool BindLoopbackPort(Socket& socketHandle, const unsigned short port) {
+    sockaddr_in endpoint{};
+    endpoint.sin_family = AF_INET;
+    endpoint.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    endpoint.sin_port = htons(port);
+    return bind(
+        socketHandle.Get(),
+        reinterpret_cast<const sockaddr*>(&endpoint),
+        sizeof(endpoint)) != SOCKET_ERROR;
 }
 
 bool PayloadMatches(
@@ -329,15 +716,27 @@ int wmain(int argc, wchar_t* argv[]) {
     if (WSAStartup(MAKEWORD(2, 2), &data) != 0) {
         return Fail("WSAStartup failed");
     }
+    if (const auto adapterResult = VerifyAdapterSecurityBranches(); adapterResult != 0) {
+        WSACleanup();
+        return adapterResult;
+    }
     Socket tcpListener(socket(AF_INET, SOCK_STREAM, IPPROTO_TCP));
     Socket udpListener(socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP));
+    Socket deniedTcpListener(socket(AF_INET, SOCK_STREAM, IPPROTO_TCP));
+    Socket wrongTransportUdpListener(socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP));
     unsigned short tcpPort = 0;
     unsigned short udpPort = 0;
+    unsigned short deniedTcpPort = 0;
     if (tcpListener.Get() == INVALID_SOCKET
         || udpListener.Get() == INVALID_SOCKET
+        || deniedTcpListener.Get() == INVALID_SOCKET
+        || wrongTransportUdpListener.Get() == INVALID_SOCKET
         || !BindLoopback(tcpListener, tcpPort)
         || listen(tcpListener.Get(), 1) == SOCKET_ERROR
-        || !BindLoopback(udpListener, udpPort)) {
+        || !BindLoopback(udpListener, udpPort)
+        || !BindLoopback(deniedTcpListener, deniedTcpPort)
+        || listen(deniedTcpListener.Get(), 1) == SOCKET_ERROR
+        || !BindLoopbackPort(wrongTransportUdpListener, tcpPort)) {
         WSACleanup();
         return Fail("unable to create loopback listeners");
     }
@@ -386,6 +785,7 @@ int wmain(int argc, wchar_t* argv[]) {
         + L" " + Quote(pipeName)
         + L" " + std::to_wstring(tcpPort)
         + L" " + std::to_wstring(udpPort)
+        + L" " + std::to_wstring(deniedTcpPort)
         + L" " + HexNonce(nonce);
     std::vector<wchar_t> mutableCommand(commandLine.begin(), commandLine.end());
     mutableCommand.push_back(L'\0');
@@ -435,9 +835,13 @@ int wmain(int argc, wchar_t* argv[]) {
     if (waitResult != WAIT_OBJECT_0) {
         TerminateProcess(process.hProcess, 1);
     }
+    const bool deniedListenersSilent = !WaitReadable(deniedTcpListener.Get(), 100)
+        && !WaitReadable(wrongTransportUdpListener.Get(), 100);
     CloseHandle(process.hProcess);
     tcpListener.Reset();
     udpListener.Reset();
+    deniedTcpListener.Reset();
+    wrongTransportUdpListener.Reset();
     WSACleanup();
 
     if (!handshakeValid) {
@@ -447,6 +851,9 @@ int wmain(int argc, wchar_t* argv[]) {
     }
     if (!tcpAuthenticated || !udpAuthenticated) {
         return Fail("listener received missing or unauthenticated loopback traffic");
+    }
+    if (!deniedListenersSilent) {
+        return Fail("a denied adapter emitted traffic to a controlled listener");
     }
     if (waitResult != WAIT_OBJECT_0 || exitCode != 0) {
         std::cerr << "network fixture exit code: " << exitCode << '\n';

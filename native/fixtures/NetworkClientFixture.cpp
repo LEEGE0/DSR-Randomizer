@@ -14,6 +14,8 @@
 
 namespace {
 
+volatile LONG completionRoutineCalls = 0;
+
 using InitializeProtectionFunction = std::uint32_t(__stdcall*)(
     DSRRandomizer::ProtectionInitBlock*);
 using QueryWinsockAuditCountersFunction = std::uint32_t(__stdcall*)(
@@ -115,6 +117,14 @@ bool ExpectDenied(const int result) noexcept {
     return result == SOCKET_ERROR && WSAGetLastError() == WSAEACCES;
 }
 
+void CALLBACK ConnectExCompletionSpy(
+    DWORD,
+    DWORD,
+    LPWSAOVERLAPPED,
+    DWORD) {
+    InterlockedIncrement(&completionRoutineCalls);
+}
+
 bool SendAuthenticatedTraffic(
     const unsigned short tcpPort,
     const unsigned short udpPort,
@@ -190,6 +200,83 @@ bool VerifyConnectExDenied(const sockaddr_in& externalEndpoint) {
         return false;
     }
 
+    LPFN_CONNECTEX deniedPointer = reinterpret_cast<LPFN_CONNECTEX>(1);
+    DWORD deniedBytes = 99;
+    OVERLAPPED retrieval{};
+    retrieval.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (retrieval.hEvent == nullptr) {
+        return false;
+    }
+    WSASetLastError(0);
+    const int overlappedResult = WSAIoctl(
+        socketHandle.Get(),
+        SIO_GET_EXTENSION_FUNCTION_POINTER,
+        &connectExGuid,
+        sizeof(connectExGuid),
+        &deniedPointer,
+        sizeof(deniedPointer),
+        &deniedBytes,
+        &retrieval,
+        nullptr);
+    const int overlappedError = WSAGetLastError();
+    const bool overlappedDenied = overlappedResult == SOCKET_ERROR
+        && overlappedError == WSAEACCES
+        && deniedPointer == nullptr
+        && deniedBytes == 0
+        && WaitForSingleObject(retrieval.hEvent, 0) == WAIT_TIMEOUT;
+    CloseHandle(retrieval.hEvent);
+    if (!overlappedDenied) {
+        return false;
+    }
+
+    InterlockedExchange(&completionRoutineCalls, 0);
+    deniedPointer = reinterpret_cast<LPFN_CONNECTEX>(1);
+    deniedBytes = 99;
+    OVERLAPPED completion{};
+    completion.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (completion.hEvent == nullptr) {
+        return false;
+    }
+    WSASetLastError(0);
+    const int completionResult = WSAIoctl(
+        socketHandle.Get(),
+        SIO_GET_EXTENSION_FUNCTION_POINTER,
+        &connectExGuid,
+        sizeof(connectExGuid),
+        &deniedPointer,
+        sizeof(deniedPointer),
+        &deniedBytes,
+        &completion,
+        &ConnectExCompletionSpy);
+    const int completionError = WSAGetLastError();
+    SleepEx(10, TRUE);
+    const bool completionDenied = completionResult == SOCKET_ERROR
+        && completionError == WSAEACCES
+        && deniedPointer == nullptr
+        && deniedBytes == 0
+        && InterlockedCompareExchange(&completionRoutineCalls, 0, 0) == 0
+        && WaitForSingleObject(completion.hEvent, 0) == WAIT_TIMEOUT;
+    CloseHandle(completion.hEvent);
+    if (!completionDenied) {
+        return false;
+    }
+
+    deniedBytes = 99;
+    WSASetLastError(0);
+    if (!ExpectDenied(WSAIoctl(
+            socketHandle.Get(),
+            SIO_GET_EXTENSION_FUNCTION_POINTER,
+            &connectExGuid,
+            sizeof(connectExGuid),
+            nullptr,
+            sizeof(LPFN_CONNECTEX),
+            &deniedBytes,
+            nullptr,
+            nullptr))
+        || deniedBytes != 0) {
+        return false;
+    }
+
     OVERLAPPED overlapped{};
     WSASetLastError(0);
     return !connectEx(
@@ -203,10 +290,12 @@ bool VerifyConnectExDenied(const sockaddr_in& externalEndpoint) {
         && WSAGetLastError() == WSAEACCES;
 }
 
-bool VerifyUnauthorizedTrafficDenied(const unsigned short admittedTcpPort) {
+bool VerifyUnauthorizedTrafficDenied(
+    const unsigned short admittedTcpPort,
+    const unsigned short deniedTcpPort) {
     const auto externalEndpoint = IPv4Endpoint({192, 0, 2, 1}, 9);
 
-    const auto unadmittedLoopback = IPv4Endpoint({127, 0, 0, 2}, admittedTcpPort);
+    const auto unadmittedLoopback = IPv4Endpoint({127, 0, 0, 1}, deniedTcpPort);
     Socket loopbackSocket(socket(AF_INET, SOCK_STREAM, IPPROTO_TCP));
     WSASetLastError(0);
     if (loopbackSocket.Get() == INVALID_SOCKET
@@ -214,6 +303,29 @@ bool VerifyUnauthorizedTrafficDenied(const unsigned short admittedTcpPort) {
             loopbackSocket.Get(),
             reinterpret_cast<const sockaddr*>(&unadmittedLoopback),
             sizeof(unadmittedLoopback)))) {
+        return false;
+    }
+
+    const auto wrongTransportEndpoint =
+        IPv4Endpoint({127, 0, 0, 1}, admittedTcpPort);
+    Socket connectedUdp(socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP));
+    WSASetLastError(0);
+    const int wrongTransportResult = connectedUdp.Get() == INVALID_SOCKET
+        ? SOCKET_ERROR
+        : connect(
+            connectedUdp.Get(),
+            reinterpret_cast<const sockaddr*>(&wrongTransportEndpoint),
+            sizeof(wrongTransportEndpoint));
+    if (wrongTransportResult == 0) {
+        constexpr char leakedMarker[] = "wrong-transport";
+        static_cast<void>(send(
+            connectedUdp.Get(),
+            leakedMarker,
+            static_cast<int>(sizeof(leakedMarker)),
+            0));
+        return false;
+    }
+    if (connectedUdp.Get() == INVALID_SOCKET || WSAGetLastError() != WSAEACCES) {
         return false;
     }
 
@@ -261,16 +373,18 @@ bool VerifyUnauthorizedTrafficDenied(const unsigned short admittedTcpPort) {
 }  // namespace
 
 int wmain(int argc, wchar_t* argv[]) {
-    if (argc != 6) {
+    if (argc != 7) {
         return 2;
     }
 
     unsigned short tcpPort = 0;
     unsigned short udpPort = 0;
+    unsigned short deniedTcpPort = 0;
     std::array<std::uint8_t, DSRRandomizer::kProtectionNonceSize> nonce{};
     if (!ParsePort(argv[3], tcpPort)
         || !ParsePort(argv[4], udpPort)
-        || !ParseNonce(argv[5], nonce)) {
+        || !ParsePort(argv[5], deniedTcpPort)
+        || !ParseNonce(argv[6], nonce)) {
         return 3;
     }
 
@@ -315,7 +429,8 @@ int wmain(int argc, wchar_t* argv[]) {
         return 8;
     }
     const bool localSucceeded = SendAuthenticatedTraffic(tcpPort, udpPort, nonce);
-    const bool unauthorizedWasDenied = VerifyUnauthorizedTrafficDenied(tcpPort);
+    const bool unauthorizedWasDenied = VerifyUnauthorizedTrafficDenied(
+        tcpPort, deniedTcpPort);
     DSRRandomizer::Network::WinsockAuditCounters counters{};
     const auto counterStatus = queryCounters(&counters, sizeof(counters));
     WSACleanup();
@@ -327,11 +442,11 @@ int wmain(int argc, wchar_t* argv[]) {
         return 10;
     }
     if (counterStatus != ERROR_SUCCESS
-        || counters.connect != 2
+        || counters.connect != 3
         || counters.wsaConnect != 1
         || counters.sendTo != 1
         || counters.connectEx != 1
-        || counters.total != 5) {
+        || counters.total != 6) {
         return 11;
     }
     return 0;
