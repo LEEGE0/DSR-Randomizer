@@ -8,6 +8,7 @@
 
 #include "DSRRandomizer/ProtectionProtocol.h"
 #include "ProtectionBootstrap.h"
+#include "modules/DeferredModuleGate.h"
 #include "network/WinsockHooks.h"
 
 namespace {
@@ -33,6 +34,11 @@ bool ThrowingPathReader(
     std::size_t,
     std::wstring&) {
     throw std::bad_alloc();
+}
+
+bool MissingSteamConfiguration(
+    DSRRandomizer::Modules::DeferredModuleGateConfiguration&) noexcept {
+    return false;
 }
 
 DSRRandomizer::ProtectionInitBlock ValidWinsockBlock() {
@@ -209,6 +215,37 @@ int main() {
     if (DSRRandomizer::CurrentProtectionFlags()
         != DSRRandomizer::ProtectionFlags::None) {
         return Fail("save configuration exception left protection flags active");
+    }
+
+    block.requiredFlags = static_cast<std::uint64_t>(
+        DSRRandomizer::ProtectionFlags::Bootstrap)
+        | static_cast<std::uint64_t>(
+            DSRRandomizer::ProtectionFlags::SteamInterfaces);
+    const auto partialSteamFlagsStatus = DSRRandomizer::InitializeForTest(&block);
+    if (partialSteamFlagsStatus
+        != DSRRandomizer::InitStatus::RequiredProtectionUnavailable) {
+        return Fail("partial Steam/deferred protection group was not rejected");
+    }
+
+    block.requiredFlags |= static_cast<std::uint64_t>(
+        DSRRandomizer::ProtectionFlags::DeferredModuleGate);
+    const auto productionSteamStatus = DSRRandomizer::InitializeForTest(&block);
+    if (productionSteamStatus
+            != DSRRandomizer::InitStatus::SteamConfigurationUnavailable
+        || DSRRandomizer::Modules::DeferredModuleGateIsInstalled()) {
+        return Fail("Steam flags without an authoritative provider did not fail closed");
+    }
+
+    const auto missingProviderStatus =
+        DSRRandomizer::Testing::InitializeWithSteamConfigurationProvider(
+            &block,
+            &MissingSteamConfiguration);
+    if (missingProviderStatus
+            != DSRRandomizer::InitStatus::SteamConfigurationUnavailable
+        || DSRRandomizer::CurrentProtectionFlags()
+            != DSRRandomizer::ProtectionFlags::None
+        || DSRRandomizer::Modules::DeferredModuleGateIsInstalled()) {
+        return Fail("rejected synthetic Steam provider left partial protection");
     }
 
     block.requiredFlags = static_cast<std::uint64_t>(

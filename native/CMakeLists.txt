@@ -61,6 +61,17 @@ set_target_properties(DSRRandomizer.StalledRuntime PROPERTIES
   CXX_EXTENSIONS OFF
   OUTPUT_NAME "DSRRandomizer.StalledRuntime")
 
+add_library(DSRRandomizer.FakeSteamApi SHARED
+  fixtures/FakeSteamApi.cpp)
+target_compile_features(DSRRandomizer.FakeSteamApi PRIVATE cxx_std_20)
+target_include_directories(DSRRandomizer.FakeSteamApi
+  PRIVATE
+    ${CMAKE_SOURCE_DIR}/native/runtime)
+dsr_configure_target(DSRRandomizer.FakeSteamApi)
+set_target_properties(DSRRandomizer.FakeSteamApi PROPERTIES
+  CXX_EXTENSIONS OFF
+  OUTPUT_NAME "DSRRandomizer.FakeSteamApi")
+
 add_executable(ProtectionBootstrapTests
   tests/ProtectionBootstrapTests.cpp)
 target_compile_features(ProtectionBootstrapTests PRIVATE cxx_std_20)
@@ -138,3 +149,22 @@ add_test(
   COMMAND SaveHookIntegrationTests
     $<TARGET_FILE:DSRRandomizer.SaveClientFixture>
     $<TARGET_FILE:DSRRandomizer.Runtime>)
+
+add_executable(SteamGuardTests
+  tests/SteamGuardTests.cpp)
+target_compile_features(SteamGuardTests PRIVATE cxx_std_20)
+target_link_libraries(SteamGuardTests
+  PRIVATE
+    DSRRandomizer.Runtime.Core
+    BCrypt)
+target_include_directories(SteamGuardTests
+  PRIVATE
+    ${CMAKE_SOURCE_DIR}/native/runtime)
+dsr_configure_target(SteamGuardTests)
+set_target_properties(SteamGuardTests PROPERTIES
+  CXX_EXTENSIONS OFF)
+
+add_test(
+  NAME SteamGuardTests
+  COMMAND SteamGuardTests
+    $<TARGET_FILE:DSRRandomizer.FakeSteamApi>)

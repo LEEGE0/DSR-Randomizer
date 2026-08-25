@@ -6,6 +6,7 @@
 #include <atomic>
 #include <string>
 
+#include "modules/DeferredModuleGate.h"
 #include "network/WinsockHooks.h"
 #include "save/SaveHooks.h"
 
@@ -67,6 +68,10 @@ bool UninstallProtectionGroups() noexcept {
     if (Save::UninstallSaveHooks() != Save::SaveHookCleanupStatus::Success) {
         return false;
     }
+    if (Modules::UninstallDeferredModuleGate()
+        != Modules::DeferredModuleGateCleanupStatus::Success) {
+        return false;
+    }
     return Network::UninstallWinsockHooks()
         == Network::WinsockHookCleanupStatus::Success;
 }
@@ -85,7 +90,8 @@ bool ReadRequiredPath(
 
 InitStatus InitializeCore(
     ProtectionInitBlock* block,
-    const Testing::RequiredPathReader pathReader) noexcept {
+    const Testing::RequiredPathReader pathReader,
+    const Testing::SteamConfigurationProvider steamProvider) noexcept {
     activeFlags.store(0, std::memory_order_release);
     if (block == nullptr || block->size != sizeof(ProtectionInitBlock)) {
         return InitStatus::InvalidArgument;
@@ -104,12 +110,20 @@ InitStatus InitializeCore(
         static_cast<std::uint64_t>(ProtectionFlags::SaveFileIo);
     constexpr auto winsockFlag =
         static_cast<std::uint64_t>(ProtectionFlags::Winsock);
+    constexpr auto steamInterfacesFlag =
+        static_cast<std::uint64_t>(ProtectionFlags::SteamInterfaces);
+    constexpr auto deferredModuleGateFlag =
+        static_cast<std::uint64_t>(ProtectionFlags::DeferredModuleGate);
     constexpr auto saveFlags = saveKnownFolderFlag | saveFileIoFlag;
-    constexpr auto supportedFlags = bootstrapFlag | saveFlags | winsockFlag;
+    constexpr auto steamFlags = steamInterfacesFlag | deferredModuleGateFlag;
+    constexpr auto supportedFlags =
+        bootstrapFlag | saveFlags | winsockFlag | steamFlags;
     if ((block->requiredFlags & bootstrapFlag) == 0
         || (block->requiredFlags & ~supportedFlags) != 0
         || ((block->requiredFlags & saveFlags) != 0
-            && (block->requiredFlags & saveFlags) != saveFlags)) {
+            && (block->requiredFlags & saveFlags) != saveFlags)
+        || ((block->requiredFlags & steamFlags) != 0
+            && (block->requiredFlags & steamFlags) != steamFlags)) {
         return InitStatus::RequiredProtectionUnavailable;
     }
 
@@ -125,6 +139,29 @@ InitStatus InitializeCore(
                 != Network::WinsockHookInstallStatus::Success) {
             static_cast<void>(Network::UninstallWinsockHooks());
             return InitStatus::WinsockHookInstallFailed;
+        }
+    }
+
+    if ((block->requiredFlags & steamFlags) == steamFlags) {
+        if (steamProvider == nullptr) {
+            static_cast<void>(UninstallProtectionGroups());
+            return InitStatus::SteamConfigurationUnavailable;
+        }
+        try {
+            Modules::DeferredModuleGateConfiguration configuration{};
+            if (!steamProvider(configuration)) {
+                static_cast<void>(UninstallProtectionGroups());
+                return InitStatus::SteamConfigurationUnavailable;
+            }
+            if (Modules::InstallDeferredModuleGate(configuration)
+                != Modules::DeferredModuleGateInstallStatus::Success) {
+                static_cast<void>(UninstallProtectionGroups());
+                return InitStatus::DeferredModuleGateInstallFailed;
+            }
+        }
+        catch (...) {
+            static_cast<void>(UninstallProtectionGroups());
+            return InitStatus::DeferredModuleGateInstallFailed;
         }
     }
 
@@ -223,7 +260,7 @@ InitStatus ReportHandshake(const ProtectionInitBlock& block) noexcept {
 }  // namespace
 
 InitStatus InitializeProtection(ProtectionInitBlock* block) noexcept {
-    const auto status = InitializeCore(block, &ReadRequiredPath);
+    const auto status = InitializeCore(block, &ReadRequiredPath, nullptr);
     if (status != InitStatus::Success) {
         return status;
     }
@@ -238,7 +275,7 @@ InitStatus InitializeProtection(ProtectionInitBlock* block) noexcept {
 }
 
 InitStatus InitializeForTest(ProtectionInitBlock* block) noexcept {
-    return InitializeCore(block, &ReadRequiredPath);
+    return InitializeCore(block, &ReadRequiredPath, nullptr);
 }
 
 ProtectionFlags CurrentProtectionFlags() noexcept {
@@ -250,7 +287,13 @@ namespace Testing {
 InitStatus InitializeWithPathReader(
     ProtectionInitBlock* block,
     const RequiredPathReader reader) noexcept {
-    return InitializeCore(block, reader);
+    return InitializeCore(block, reader, nullptr);
+}
+
+InitStatus InitializeWithSteamConfigurationProvider(
+    ProtectionInitBlock* block,
+    const SteamConfigurationProvider provider) noexcept {
+    return InitializeCore(block, &ReadRequiredPath, provider);
 }
 
 }  // namespace Testing

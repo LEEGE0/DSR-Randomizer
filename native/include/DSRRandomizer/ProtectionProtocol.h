@@ -23,6 +23,8 @@ enum class ProtectionFlags : std::uint64_t {
     SaveKnownFolder = 1ULL << 1,
     SaveFileIo = 1ULL << 2,
     Winsock = 1ULL << 3,
+    SteamInterfaces = 1ULL << 4,
+    DeferredModuleGate = 1ULL << 5,
 };
 
 #pragma pack(push, 1)
