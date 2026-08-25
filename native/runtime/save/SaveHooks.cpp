@@ -1624,8 +1624,12 @@ public:
         }
     }
     ~HookPlatformMutation() {
+        Release();
+    }
+    void Release() noexcept {
         if (platform_ != nullptr) {
             platform_->EndMutation();
+            platform_ = nullptr;
         }
     }
 
@@ -1710,7 +1714,6 @@ bool ValidateConfiguration(
 }
 
 SaveHookCleanupStatus CleanupLocked() noexcept {
-    HookPlatformMutation mutation(lifecycle.platform);
     hooksInstalled.store(false, std::memory_order_release);
     if (lifecycle.context != nullptr) {
         lifecycle.context->denyOnly.store(true, std::memory_order_release);
@@ -1723,13 +1726,20 @@ SaveHookCleanupStatus CleanupLocked() noexcept {
     }
 
     if (lifecycle.mayBeEnabled) {
-        if (!lifecycle.platform->DisableAll()) {
-            return SaveHookCleanupStatus::Incomplete;
+        {
+            HookPlatformMutation mutation(lifecycle.platform);
+            if (!lifecycle.platform->DisableAll()) {
+                return SaveHookCleanupStatus::Incomplete;
+            }
         }
         lifecycle.mayBeEnabled = false;
     }
 
     std::unique_lock callbackLock(callbackGate);
+    HookPlatformMutation mutation(lifecycle.platform);
+    if (!lifecycle.platform->DisableAll()) {
+        return SaveHookCleanupStatus::Incomplete;
+    }
     bool allRemoved = true;
     for (std::size_t index = lifecycle.created.size(); index > 0; --index) {
         const auto slot = index - 1;
@@ -1797,6 +1807,7 @@ SaveHookInstallStatus InstallSaveHooks(
                 definitions[index].module,
                 definitions[index].procedure);
             if (lifecycle.targets[index] == nullptr) {
+                mutation.Release();
                 static_cast<void>(CleanupLocked());
                 return SaveHookInstallStatus::InstallFailed;
             }
@@ -1807,6 +1818,7 @@ SaveHookInstallStatus InstallSaveHooks(
                     lifecycle.targets[index],
                     definitions[index].detour,
                     definitions[index].original)) {
+                mutation.Release();
                 static_cast<void>(CleanupLocked());
                 return SaveHookInstallStatus::InstallFailed;
             }
@@ -1815,12 +1827,14 @@ SaveHookInstallStatus InstallSaveHooks(
 
         for (const auto target : lifecycle.targets) {
             if (!platform.QueueEnable(target)) {
+                mutation.Release();
                 static_cast<void>(CleanupLocked());
                 return SaveHookInstallStatus::InstallFailed;
             }
         }
         lifecycle.mayBeEnabled = true;
         if (!platform.ApplyQueued()) {
+            mutation.Release();
             static_cast<void>(CleanupLocked());
             return SaveHookInstallStatus::InstallFailed;
         }
@@ -1829,6 +1843,7 @@ SaveHookInstallStatus InstallSaveHooks(
         return SaveHookInstallStatus::Success;
     }
     catch (...) {
+        mutation.Release();
         static_cast<void>(CleanupLocked());
         return SaveHookInstallStatus::InstallFailed;
     }
@@ -1882,6 +1897,29 @@ void HoldSaveHookCallback(void* enteredEvent, void* releaseEvent) noexcept {
     CallbackLease callback;
     if (enteredEvent != nullptr) {
         SetEvent(static_cast<HANDLE>(enteredEvent));
+    }
+    if (releaseEvent != nullptr) {
+        WaitForSingleObject(static_cast<HANDLE>(releaseEvent), INFINITE);
+    }
+}
+
+void HoldSaveHookCallbackWhileWaitingForMutation(
+    void* const enteredEvent,
+    void* const allowMutationEvent,
+    void* const mutationAcquiredEvent,
+    void* const releaseEvent) noexcept {
+    CallbackLease callback;
+    if (enteredEvent != nullptr) {
+        SetEvent(static_cast<HANDLE>(enteredEvent));
+    }
+    if (allowMutationEvent != nullptr) {
+        WaitForSingleObject(
+            static_cast<HANDLE>(allowMutationEvent),
+            INFINITE);
+    }
+    Hooks::MinHookMutationLease mutation;
+    if (mutationAcquiredEvent != nullptr) {
+        SetEvent(static_cast<HANDLE>(mutationAcquiredEvent));
     }
     if (releaseEvent != nullptr) {
         WaitForSingleObject(static_cast<HANDLE>(releaseEvent), INFINITE);

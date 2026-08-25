@@ -80,6 +80,51 @@ set_target_properties(DSRRandomizer.NestedSteamLoader PROPERTIES
   CXX_EXTENSIONS OFF
   OUTPUT_NAME "DSRRandomizer.NestedSteamLoader")
 
+add_library(DSRRandomizer.NestedSteamBridge SHARED
+  fixtures/NestedSteamBridge.cpp)
+target_compile_features(DSRRandomizer.NestedSteamBridge PRIVATE cxx_std_20)
+dsr_configure_target(DSRRandomizer.NestedSteamBridge)
+set_target_properties(DSRRandomizer.NestedSteamBridge PROPERTIES
+  CXX_EXTENSIONS OFF
+  OUTPUT_NAME "DSRRandomizer.NestedSteamBridge")
+
+add_library(DSRRandomizer.StaticSteamCarrier SHARED
+  fixtures/StaticSteamCarrier.cpp)
+target_compile_features(DSRRandomizer.StaticSteamCarrier PRIVATE cxx_std_20)
+target_link_libraries(DSRRandomizer.StaticSteamCarrier
+  PRIVATE
+    DSRRandomizer.FakeSteamApi)
+dsr_configure_target(DSRRandomizer.StaticSteamCarrier)
+set_target_properties(DSRRandomizer.StaticSteamCarrier PROPERTIES
+  CXX_EXTENSIONS OFF
+  OUTPUT_NAME "DSRRandomizer.StaticSteamCarrier")
+
+add_library(DSRRandomizer.StaticSteamOuter SHARED
+  fixtures/StaticSteamOuter.cpp)
+target_compile_features(DSRRandomizer.StaticSteamOuter PRIVATE cxx_std_20)
+target_link_libraries(DSRRandomizer.StaticSteamOuter
+  PRIVATE
+    DSRRandomizer.StaticSteamCarrier)
+dsr_configure_target(DSRRandomizer.StaticSteamOuter)
+set_target_properties(DSRRandomizer.StaticSteamOuter PROPERTIES
+  CXX_EXTENSIONS OFF
+  OUTPUT_NAME "DSRRandomizer.StaticSteamOuter")
+
+add_library(DSRRandomizer.DelaySteamCarrier SHARED
+  fixtures/DelaySteamCarrier.cpp)
+target_compile_features(DSRRandomizer.DelaySteamCarrier PRIVATE cxx_std_20)
+target_link_libraries(DSRRandomizer.DelaySteamCarrier
+  PRIVATE
+    DSRRandomizer.FakeSteamApi
+    delayimp)
+target_link_options(DSRRandomizer.DelaySteamCarrier
+  PRIVATE
+    "/DELAYLOAD:DSRRandomizer.FakeSteamApi.dll")
+dsr_configure_target(DSRRandomizer.DelaySteamCarrier)
+set_target_properties(DSRRandomizer.DelaySteamCarrier PROPERTIES
+  CXX_EXTENSIONS OFF
+  OUTPUT_NAME "DSRRandomizer.DelaySteamCarrier")
+
 add_executable(ProtectionBootstrapTests
   tests/ProtectionBootstrapTests.cpp)
 target_compile_features(ProtectionBootstrapTests PRIVATE cxx_std_20)
@@ -190,9 +235,14 @@ target_include_directories(SteamGuardHardeningTests
 dsr_configure_target(SteamGuardHardeningTests)
 set_target_properties(SteamGuardHardeningTests PROPERTIES
   CXX_EXTENSIONS OFF)
+add_dependencies(SteamGuardHardeningTests
+  DSRRandomizer.DelaySteamCarrier
+  DSRRandomizer.StaticSteamOuter)
 
 add_test(
   NAME SteamGuardHardeningTests
   COMMAND SteamGuardHardeningTests
     $<TARGET_FILE:DSRRandomizer.FakeSteamApi>
-    $<TARGET_FILE:DSRRandomizer.NestedSteamLoader>)
+    $<TARGET_FILE:DSRRandomizer.NestedSteamLoader>
+    $<TARGET_FILE:DSRRandomizer.NestedSteamBridge>
+    $<TARGET_FILE:DSRRandomizer.StaticSteamCarrier>)

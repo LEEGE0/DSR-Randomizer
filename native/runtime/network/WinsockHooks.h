@@ -72,4 +72,14 @@ public:
 [[nodiscard]] bool WinsockHooksAreInstalled() noexcept;
 [[nodiscard]] WinsockAuditCounters CurrentWinsockAuditCounters() noexcept;
 
+namespace Testing {
+
+void HoldWinsockHookCallbackWhileWaitingForMutation(
+    void* enteredEvent,
+    void* allowMutationEvent,
+    void* mutationAcquiredEvent,
+    void* releaseEvent) noexcept;
+
+}  // namespace Testing
+
 }  // namespace DSRRandomizer::Network

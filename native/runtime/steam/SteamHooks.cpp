@@ -28,9 +28,12 @@ struct Wrapper final {
     std::shared_ptr<FatalState> fatalState;
 };
 
+std::shared_mutex factoryCallbackGate;
+
 bool DenySyntheticMethod(void*) noexcept { return false; }
 
 bool ForwardIdentityMethod(void* const self) noexcept {
+    std::shared_lock callbackLock(factoryCallbackGate);
     auto* const wrapper = static_cast<Wrapper*>(self);
     if (wrapper == nullptr || wrapper->fatalState == nullptr
         || wrapper->fatalState->IsFatal() || wrapper->raw == nullptr) {
@@ -51,7 +54,6 @@ std::array<std::shared_ptr<SlotContext>, kSteamFactorySlotCapacity> slots{};
 std::mutex slotsMutex;
 std::vector<std::unique_ptr<Wrapper>> processLifetimeWrappers;
 std::mutex wrapperMutex;
-std::shared_mutex factoryCallbackGate;
 
 bool IsDeclared(
     const SlotContext& context,

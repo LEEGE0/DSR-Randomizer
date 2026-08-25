@@ -50,6 +50,10 @@ MinHookMutationLease::MinHookMutationLease() noexcept {
 
 MinHookMutationLease::~MinHookMutationLease() = default;
 
+void MinHookMutationLease::Release() noexcept {
+    impl_.reset();
+}
+
 bool AcquireMinHook() noexcept {
     std::scoped_lock lock(mutationMutex);
     if (referenceCount != 0) {

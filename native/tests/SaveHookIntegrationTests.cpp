@@ -7,6 +7,7 @@
 #include <future>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <set>
 #include <string>
 #include <string_view>
@@ -14,6 +15,7 @@
 #include <vector>
 
 #include "DSRRandomizer/ProtectionProtocol.h"
+#include "hooks/MinHookCoordinator.h"
 #include "save/SaveHooks.h"
 
 namespace {
@@ -39,6 +41,18 @@ class FixtureHookPlatform final : public HookPlatform {
 public:
     explicit FixtureHookPlatform(FixtureHookFailures failures = {})
         : failures_(failures) {}
+
+    void BeginMutation() noexcept override {
+        mutationLease_ = std::make_unique<
+            DSRRandomizer::Hooks::MinHookMutationLease>();
+    }
+
+    void EndMutation() noexcept override {
+        mutationLease_.reset();
+        if (mutationReleasedEvent_ != nullptr) {
+            SetEvent(mutationReleasedEvent_);
+        }
+    }
 
     bool Initialize() noexcept override {
         initialized_ = true;
@@ -125,6 +139,9 @@ public:
         failures_.failedRemove = std::numeric_limits<std::size_t>::max();
     }
     void AllowUninitialize() noexcept { failures_.failUninitialize = false; }
+    void SignalMutationRelease(const HANDLE event) noexcept {
+        mutationReleasedEvent_ = event;
+    }
 
 private:
     FixtureHookFailures failures_;
@@ -137,6 +154,8 @@ private:
     std::set<void*> created_;
     std::set<void*> enabled_;
     std::vector<void*> queued_;
+    std::unique_ptr<DSRRandomizer::Hooks::MinHookMutationLease> mutationLease_;
+    HANDLE mutationReleasedEvent_ = nullptr;
 };
 
 int Fail(const char* message) {
@@ -505,6 +524,64 @@ int VerifyHookInstallRollback(const fs::path& root) {
         || finalState.ready
         || !inFlight.WasRolledBack()) {
         return Fail("callback quiescence cleanup freed or retained the wrong state");
+    }
+
+    FixtureHookPlatform mutationBarrier;
+    if (DSRRandomizer::Save::InstallSaveHooks(configuration, mutationBarrier)
+        != SaveHookInstallStatus::Success) {
+        return Fail("save mutation barrier setup did not install hooks");
+    }
+    const HANDLE mutationCallbackEntered =
+        CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    const HANDLE allowMutation = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    const HANDLE mutationAcquired = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    const HANDLE mutationCallbackRelease =
+        CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    const HANDLE cleanupMutationReleased =
+        CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (mutationCallbackEntered == nullptr || allowMutation == nullptr
+        || mutationAcquired == nullptr || mutationCallbackRelease == nullptr
+        || cleanupMutationReleased == nullptr) {
+        ExitProcess(94);
+    }
+    mutationBarrier.SignalMutationRelease(cleanupMutationReleased);
+    std::thread mutationCallback([&]() {
+        DSRRandomizer::Save::Testing::
+            HoldSaveHookCallbackWhileWaitingForMutation(
+                mutationCallbackEntered,
+                allowMutation,
+                mutationAcquired,
+                mutationCallbackRelease);
+    });
+    if (WaitForSingleObject(mutationCallbackEntered, 5000) != WAIT_OBJECT_0) {
+        ExitProcess(95);
+    }
+    SaveHookCleanupStatus mutationCleanupStatus =
+        SaveHookCleanupStatus::Incomplete;
+    std::thread mutationCleanup([&]() {
+        mutationCleanupStatus = DSRRandomizer::Save::UninstallSaveHooks();
+    });
+    if (WaitForSingleObject(cleanupMutationReleased, 5000) != WAIT_OBJECT_0) {
+        ExitProcess(96);
+    }
+    SetEvent(allowMutation);
+    if (WaitForSingleObject(mutationAcquired, 5000) != WAIT_OBJECT_0) {
+        ExitProcess(97);
+    }
+    SetEvent(mutationCallbackRelease);
+    mutationCallback.join();
+    mutationCleanup.join();
+    for (const auto event : {
+             mutationCallbackEntered,
+             allowMutation,
+             mutationAcquired,
+             mutationCallbackRelease,
+             cleanupMutationReleased}) {
+        CloseHandle(event);
+    }
+    if (mutationCleanupStatus != SaveHookCleanupStatus::Success
+        || !mutationBarrier.WasRolledBack()) {
+        return Fail("save cleanup held mutation ownership while draining callbacks");
     }
 
     return 0;

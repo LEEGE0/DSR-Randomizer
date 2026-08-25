@@ -86,6 +86,11 @@ void SetBeforeOriginalApiCallback(
     BeforeOriginalApiCallback callback,
     void* state) noexcept;
 void HoldSaveHookCallback(void* enteredEvent, void* releaseEvent) noexcept;
+void HoldSaveHookCallbackWhileWaitingForMutation(
+    void* enteredEvent,
+    void* allowMutationEvent,
+    void* mutationAcquiredEvent,
+    void* releaseEvent) noexcept;
 
 }  // namespace Testing
 

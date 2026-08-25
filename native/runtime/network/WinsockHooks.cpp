@@ -678,8 +678,12 @@ public:
         }
     }
     ~HookPlatformMutation() {
+        Release();
+    }
+    void Release() noexcept {
         if (platform_ != nullptr) {
             platform_->EndMutation();
+            platform_ = nullptr;
         }
     }
 
@@ -688,7 +692,6 @@ private:
 };
 
 WinsockHookCleanupStatus CleanupLocked() noexcept {
-    HookPlatformMutation mutation(lifecycle.platform);
     hooksInstalled.store(false, std::memory_order_release);
     if (lifecycle.context != nullptr) {
         lifecycle.context->denyOnly.store(true, std::memory_order_release);
@@ -701,13 +704,20 @@ WinsockHookCleanupStatus CleanupLocked() noexcept {
     }
 
     if (lifecycle.mayBeEnabled) {
-        if (!lifecycle.platform->DisableAll()) {
-            return WinsockHookCleanupStatus::Incomplete;
+        {
+            HookPlatformMutation mutation(lifecycle.platform);
+            if (!lifecycle.platform->DisableAll()) {
+                return WinsockHookCleanupStatus::Incomplete;
+            }
         }
         lifecycle.mayBeEnabled = false;
     }
 
     std::unique_lock callbackLock(callbackGate);
+    HookPlatformMutation mutation(lifecycle.platform);
+    if (!lifecycle.platform->DisableAll()) {
+        return WinsockHookCleanupStatus::Incomplete;
+    }
     bool allRemoved = true;
     for (std::size_t index = lifecycle.created.size(); index > 0; --index) {
         const auto slot = index - 1;
@@ -775,6 +785,7 @@ WinsockHookInstallStatus InstallWinsockHooks(
                 definitions[index].module,
                 definitions[index].procedure);
             if (lifecycle.targets[index] == nullptr) {
+                mutation.Release();
                 static_cast<void>(CleanupLocked());
                 return WinsockHookInstallStatus::InstallFailed;
             }
@@ -784,6 +795,7 @@ WinsockHookInstallStatus InstallWinsockHooks(
                     lifecycle.targets[index],
                     definitions[index].detour,
                     definitions[index].original)) {
+                mutation.Release();
                 static_cast<void>(CleanupLocked());
                 return WinsockHookInstallStatus::InstallFailed;
             }
@@ -791,12 +803,14 @@ WinsockHookInstallStatus InstallWinsockHooks(
         }
         for (const auto target : lifecycle.targets) {
             if (!platform.QueueEnable(target)) {
+                mutation.Release();
                 static_cast<void>(CleanupLocked());
                 return WinsockHookInstallStatus::InstallFailed;
             }
         }
         lifecycle.mayBeEnabled = true;
         if (!platform.ApplyQueued()) {
+            mutation.Release();
             static_cast<void>(CleanupLocked());
             return WinsockHookInstallStatus::InstallFailed;
         }
@@ -805,6 +819,7 @@ WinsockHookInstallStatus InstallWinsockHooks(
         return WinsockHookInstallStatus::Success;
     }
     catch (...) {
+        mutation.Release();
         static_cast<void>(CleanupLocked());
         return WinsockHookInstallStatus::InstallFailed;
     }
@@ -832,5 +847,32 @@ WinsockAuditCounters CurrentWinsockAuditCounters() noexcept {
         connectCount + wsaConnectCount + sendToCount + connectExCount,
     };
 }
+
+namespace Testing {
+
+void HoldWinsockHookCallbackWhileWaitingForMutation(
+    void* const enteredEvent,
+    void* const allowMutationEvent,
+    void* const mutationAcquiredEvent,
+    void* const releaseEvent) noexcept {
+    std::shared_lock callbackLock(callbackGate);
+    if (enteredEvent != nullptr) {
+        SetEvent(static_cast<HANDLE>(enteredEvent));
+    }
+    if (allowMutationEvent != nullptr) {
+        WaitForSingleObject(
+            static_cast<HANDLE>(allowMutationEvent),
+            INFINITE);
+    }
+    Hooks::MinHookMutationLease mutation;
+    if (mutationAcquiredEvent != nullptr) {
+        SetEvent(static_cast<HANDLE>(mutationAcquiredEvent));
+    }
+    if (releaseEvent != nullptr) {
+        WaitForSingleObject(static_cast<HANDLE>(releaseEvent), INFINITE);
+    }
+}
+
+}  // namespace Testing
 
 }  // namespace DSRRandomizer::Network

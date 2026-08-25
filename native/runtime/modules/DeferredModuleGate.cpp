@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cwctype>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -30,6 +31,7 @@ using LoadLibraryWFunction = HMODULE(WINAPI*)(LPCWSTR);
 using LoadLibraryExAFunction = HMODULE(WINAPI*)(LPCSTR, HANDLE, DWORD);
 using LoadLibraryExWFunction = HMODULE(WINAPI*)(LPCWSTR, HANDLE, DWORD);
 using GetProcAddressFunction = FARPROC(WINAPI*)(HMODULE, LPCSTR);
+using LoaderCalloutProbeFunction = BOOLEAN(NTAPI*)();
 
 struct UniqueHandle final {
     HANDLE value = INVALID_HANDLE_VALUE;
@@ -118,6 +120,7 @@ struct GateContext {
     std::vector<std::unique_ptr<ModuleRecord>> modules;
     std::shared_ptr<Steam::FatalState> fatalState;
     Trampolines trampolines;
+    LoaderCalloutProbeFunction loaderCalloutProbe = nullptr;
     std::mutex slotMutex;
     std::array<bool, Steam::kSteamFactorySlotCapacity> slots{};
     std::mutex quarantineMutex;
@@ -149,6 +152,9 @@ struct Lifecycle {
 std::atomic<std::shared_ptr<GateContext>> activeContext;
 std::atomic<bool> gateInstalled{false};
 std::atomic<std::uint32_t> failFactoryPublication{};
+std::atomic<std::uint32_t> failFactoryPostCreate{};
+std::atomic<HANDLE> afterInitialDisableEvent{};
+std::atomic<HANDLE> beforeFactoryDrainEvent{};
 Lifecycle lifecycle;
 std::mutex installMutex;
 std::mutex hooksMutex;
@@ -156,6 +162,13 @@ std::recursive_mutex loaderCallbackMutex;
 std::shared_mutex callbackGate;
 thread_local std::uint32_t callbackDepth = 0;
 thread_local std::uint32_t internalBypassDepth = 0;
+
+void SignalTestEvent(const std::atomic<HANDLE>& event) noexcept {
+    const auto handle = event.load(std::memory_order_acquire);
+    if (handle != nullptr) {
+        SetEvent(handle);
+    }
+}
 
 class InternalBypass final {
 public:
@@ -401,6 +414,299 @@ bool HashFileHandle(
     return ok;
 }
 
+bool ReadWholeFile(
+    const HANDLE file,
+    std::vector<std::uint8_t>& bytes) {
+    constexpr std::uint64_t kMaximumPreflightImageSize = 512ULL * 1024ULL * 1024ULL;
+    LARGE_INTEGER size{};
+    LARGE_INTEGER beginning{};
+    if (!GetFileSizeEx(file, &size) || size.QuadPart <= 0
+        || static_cast<std::uint64_t>(size.QuadPart) > kMaximumPreflightImageSize
+        || !SetFilePointerEx(file, beginning, nullptr, FILE_BEGIN)) {
+        return false;
+    }
+    bytes.resize(static_cast<std::size_t>(size.QuadPart));
+    std::size_t total = 0;
+    while (total < bytes.size()) {
+        const auto remaining = bytes.size() - total;
+        const auto request = static_cast<DWORD>((std::min)(
+            remaining,
+            static_cast<std::size_t>((std::numeric_limits<DWORD>::max)())));
+        DWORD read = 0;
+        if (!ReadFile(file, bytes.data() + total, request, &read, nullptr)
+            || read == 0) {
+            return false;
+        }
+        total += read;
+    }
+    return true;
+}
+
+template <typename Value>
+bool ReadImageValue(
+    const std::vector<std::uint8_t>& bytes,
+    const std::size_t offset,
+    Value& value) noexcept {
+    if (offset > bytes.size() || sizeof(Value) > bytes.size() - offset) {
+        return false;
+    }
+    std::memcpy(&value, bytes.data() + offset, sizeof(Value));
+    return true;
+}
+
+struct PeImageView final {
+    const std::vector<std::uint8_t>* bytes = nullptr;
+    std::vector<IMAGE_SECTION_HEADER> sections;
+    std::array<IMAGE_DATA_DIRECTORY, IMAGE_NUMBEROF_DIRECTORY_ENTRIES>
+        directories{};
+    std::uint32_t sizeOfHeaders = 0;
+    std::uint64_t imageBase = 0;
+
+    [[nodiscard]] std::optional<std::size_t> FileOffset(
+        const std::uint32_t rva,
+        const std::size_t length) const noexcept {
+        if (bytes == nullptr) {
+            return std::nullopt;
+        }
+        if (rva < sizeOfHeaders) {
+            const auto offset = static_cast<std::size_t>(rva);
+            return offset <= bytes->size() && length <= bytes->size() - offset
+                ? std::optional<std::size_t>(offset)
+                : std::nullopt;
+        }
+        for (const auto& section : sections) {
+            const std::uint64_t start = section.VirtualAddress;
+            const std::uint64_t span = (std::max)(
+                section.Misc.VirtualSize,
+                section.SizeOfRawData);
+            const std::uint64_t requested = rva;
+            if (requested < start || requested - start > span) {
+                continue;
+            }
+            const auto delta = requested - start;
+            if (delta > section.SizeOfRawData
+                || length > section.SizeOfRawData - delta) {
+                return std::nullopt;
+            }
+            const auto rawOffset = static_cast<std::uint64_t>(
+                    section.PointerToRawData)
+                + delta;
+            if (rawOffset > bytes->size()
+                || length > bytes->size() - rawOffset) {
+                return std::nullopt;
+            }
+            return static_cast<std::size_t>(rawOffset);
+        }
+        return std::nullopt;
+    }
+};
+
+bool BuildPeImageView(
+    const std::vector<std::uint8_t>& bytes,
+    PeImageView& view) {
+    IMAGE_DOS_HEADER dos{};
+    if (!ReadImageValue(bytes, 0, dos) || dos.e_magic != IMAGE_DOS_SIGNATURE
+        || dos.e_lfanew < 0) {
+        return false;
+    }
+    const auto ntOffset = static_cast<std::size_t>(dos.e_lfanew);
+    DWORD signature = 0;
+    IMAGE_FILE_HEADER fileHeader{};
+    if (!ReadImageValue(bytes, ntOffset, signature)
+        || signature != IMAGE_NT_SIGNATURE
+        || ntOffset > bytes.size() - sizeof(signature)
+        || !ReadImageValue(
+            bytes,
+            ntOffset + sizeof(signature),
+            fileHeader)
+        || fileHeader.NumberOfSections == 0
+        || fileHeader.NumberOfSections > 96) {
+        return false;
+    }
+    const auto optionalOffset = ntOffset + sizeof(signature)
+        + sizeof(fileHeader);
+    WORD magic = 0;
+    if (!ReadImageValue(bytes, optionalOffset, magic)) {
+        return false;
+    }
+    DWORD directoryCount = 0;
+    if (magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
+        IMAGE_OPTIONAL_HEADER64 optional{};
+        if (fileHeader.SizeOfOptionalHeader < sizeof(optional)
+            || !ReadImageValue(bytes, optionalOffset, optional)) {
+            return false;
+        }
+        view.sizeOfHeaders = optional.SizeOfHeaders;
+        view.imageBase = optional.ImageBase;
+        directoryCount = optional.NumberOfRvaAndSizes;
+        std::copy(
+            std::begin(optional.DataDirectory),
+            std::end(optional.DataDirectory),
+            view.directories.begin());
+    }
+    else if (magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC) {
+        IMAGE_OPTIONAL_HEADER32 optional{};
+        if (fileHeader.SizeOfOptionalHeader < sizeof(optional)
+            || !ReadImageValue(bytes, optionalOffset, optional)) {
+            return false;
+        }
+        view.sizeOfHeaders = optional.SizeOfHeaders;
+        view.imageBase = optional.ImageBase;
+        directoryCount = optional.NumberOfRvaAndSizes;
+        std::copy(
+            std::begin(optional.DataDirectory),
+            std::end(optional.DataDirectory),
+            view.directories.begin());
+    }
+    else {
+        return false;
+    }
+    if (directoryCount > IMAGE_NUMBEROF_DIRECTORY_ENTRIES) {
+        directoryCount = IMAGE_NUMBEROF_DIRECTORY_ENTRIES;
+    }
+    for (std::size_t index = directoryCount;
+         index < view.directories.size();
+         ++index) {
+        view.directories[index] = {};
+    }
+    const auto sectionsOffset = optionalOffset + fileHeader.SizeOfOptionalHeader;
+    view.sections.reserve(fileHeader.NumberOfSections);
+    for (std::size_t index = 0; index < fileHeader.NumberOfSections; ++index) {
+        IMAGE_SECTION_HEADER section{};
+        const auto offset = sectionsOffset + index * sizeof(section);
+        if (!ReadImageValue(bytes, offset, section)) {
+            return false;
+        }
+        view.sections.push_back(section);
+    }
+    view.bytes = &bytes;
+    return true;
+}
+
+bool ReadImportName(
+    const PeImageView& image,
+    const std::uint32_t nameRva,
+    std::wstring& name) {
+    constexpr std::size_t kMaximumImportNameLength = 4096;
+    name.clear();
+    for (std::size_t index = 0; index < kMaximumImportNameLength; ++index) {
+        if (nameRva > (std::numeric_limits<std::uint32_t>::max)() - index) {
+            return false;
+        }
+        const auto characterRva = nameRva + static_cast<std::uint32_t>(index);
+        const auto offset = image.FileOffset(characterRva, 1);
+        if (!offset.has_value()) {
+            return false;
+        }
+        const auto character = (*image.bytes)[*offset];
+        if (character == 0) {
+            return !name.empty();
+        }
+        if (character > 0x7f) {
+            return false;
+        }
+        name.push_back(static_cast<wchar_t>(character));
+    }
+    return false;
+}
+
+template <typename Descriptor, typename NameRva>
+bool ReadImportDirectory(
+    const PeImageView& image,
+    const IMAGE_DATA_DIRECTORY& directory,
+    NameRva&& nameRva,
+    std::vector<std::wstring>& imports) {
+    if (directory.VirtualAddress == 0 && directory.Size == 0) {
+        return true;
+    }
+    if (directory.VirtualAddress == 0
+        || directory.Size < sizeof(Descriptor)) {
+        return false;
+    }
+    const auto maximum = directory.Size / sizeof(Descriptor);
+    for (std::size_t index = 0; index < maximum; ++index) {
+        const auto descriptorRva = static_cast<std::uint64_t>(
+                directory.VirtualAddress)
+            + index * sizeof(Descriptor);
+        if (descriptorRva > (std::numeric_limits<std::uint32_t>::max)()) {
+            return false;
+        }
+        const auto offset = image.FileOffset(
+            static_cast<std::uint32_t>(descriptorRva),
+            sizeof(Descriptor));
+        Descriptor descriptor{};
+        if (!offset.has_value()
+            || !ReadImageValue(*image.bytes, *offset, descriptor)) {
+            return false;
+        }
+        const auto rva = nameRva(descriptor, image.imageBase);
+        if (!rva.has_value()) {
+            return false;
+        }
+        if (*rva == 0) {
+            return true;
+        }
+        std::wstring import;
+        if (!ReadImportName(image, *rva, import)) {
+            return false;
+        }
+        imports.push_back(BaseName(import));
+    }
+    return false;
+}
+
+struct DelayImportDescriptor final {
+    DWORD attributes;
+    DWORD name;
+    DWORD moduleHandle;
+    DWORD importAddressTable;
+    DWORD importNameTable;
+    DWORD boundImportAddressTable;
+    DWORD unloadInformationTable;
+    DWORD timeStamp;
+};
+
+bool ReadPeImports(
+    const HANDLE file,
+    std::vector<std::wstring>& imports) {
+    std::vector<std::uint8_t> bytes;
+    PeImageView image;
+    if (!ReadWholeFile(file, bytes) || !BuildPeImageView(bytes, image)) {
+        return false;
+    }
+    const bool normal = ReadImportDirectory<IMAGE_IMPORT_DESCRIPTOR>(
+        image,
+        image.directories[IMAGE_DIRECTORY_ENTRY_IMPORT],
+        [](const IMAGE_IMPORT_DESCRIPTOR& descriptor, const std::uint64_t) {
+            return std::optional<std::uint32_t>(descriptor.Name);
+        },
+        imports);
+    if (!normal) {
+        return false;
+    }
+    return ReadImportDirectory<DelayImportDescriptor>(
+        image,
+        image.directories[IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT],
+        [](const DelayImportDescriptor& descriptor, const std::uint64_t imageBase)
+            -> std::optional<std::uint32_t> {
+            constexpr DWORD kRvaAttribute = 1;
+            if ((descriptor.attributes & ~kRvaAttribute) != 0) {
+                return std::nullopt;
+            }
+            if ((descriptor.attributes & kRvaAttribute) != 0
+                || descriptor.name == 0) {
+                return descriptor.name;
+            }
+            if (descriptor.name < imageBase
+                || descriptor.name - imageBase
+                    > (std::numeric_limits<std::uint32_t>::max)()) {
+                return std::nullopt;
+            }
+            return static_cast<std::uint32_t>(descriptor.name - imageBase);
+        },
+        imports);
+}
+
 bool Fatal(
     const std::shared_ptr<GateContext>& context,
     const char* const code) noexcept {
@@ -413,6 +719,15 @@ bool Fatal(
 bool IsFatal(const std::shared_ptr<GateContext>& context) noexcept {
     return context == nullptr || context->fatalState == nullptr
         || context->fatalState->IsFatal();
+}
+
+bool IsWithinLoaderCallout(
+    const std::shared_ptr<GateContext>& context) noexcept {
+    if (context == nullptr || context->loaderCalloutProbe == nullptr) {
+        static_cast<void>(Fatal(context, "STEAM_LOADER_PROVENANCE_UNAVAILABLE"));
+        return true;
+    }
+    return context->loaderCalloutProbe() != FALSE;
 }
 
 void Quarantine(
@@ -465,18 +780,33 @@ bool ConsumeFactoryPublicationFault() noexcept {
     return false;
 }
 
+bool ConsumeFactoryPostCreateFault() noexcept {
+    auto value = failFactoryPostCreate.load(std::memory_order_acquire);
+    while (value != 0) {
+        if (failFactoryPostCreate.compare_exchange_weak(
+                value,
+                value - 1,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool RollBackFactoryHooks(
     GateContext& context,
     std::vector<HookEntry>& created) noexcept {
     Hooks::MinHookMutationLease mutation;
-    std::vector<bool> disabled(created.size(), false);
+    std::array<bool, Steam::kSteamFactorySlotCapacity> disabled{};
     for (std::size_t index = 0; index < created.size(); ++index) {
         const auto status = Hooks::DisableHook(created[index].target);
         disabled[index] = status == MH_OK || status == MH_ERROR_DISABLED
             || status == MH_ERROR_NOT_CREATED;
     }
 
-    std::vector<HookEntry> retained;
+    std::array<HookEntry, Steam::kSteamFactorySlotCapacity> retained{};
+    std::size_t retainedCount = 0;
     for (std::size_t index = created.size(); index > 0; --index) {
         auto& hook = created[index - 1];
         const auto status = Hooks::RemoveHook(hook.target);
@@ -486,10 +816,10 @@ bool RollBackFactoryHooks(
             hook.created = false;
         }
         else {
-            retained.push_back(hook);
+            retained[retainedCount++] = hook;
         }
     }
-    if (!retained.empty()) {
+    if (retainedCount != 0) {
         std::scoped_lock lifecycleLock(hooksMutex);
         lifecycle.mayBeEnabled = lifecycle.mayBeEnabled
             || std::any_of(
@@ -499,10 +829,10 @@ bool RollBackFactoryHooks(
         lifecycle.hooks.insert(
             lifecycle.hooks.end(),
             retained.begin(),
-            retained.end());
+            retained.begin() + static_cast<std::ptrdiff_t>(retainedCount));
     }
     created.clear();
-    return retained.empty();
+    return retainedCount == 0;
 }
 
 bool ProtectFactoryExports(
@@ -512,6 +842,7 @@ bool ProtectFactoryExports(
     std::vector<HookEntry> created;
     bool complete = true;
     try {
+        created.reserve(record.protectedExports.size());
         Hooks::MinHookMutationLease mutation;
         for (auto& exportEntry : record.protectedExports) {
             const auto slot = AllocateFactorySlot(*context);
@@ -534,14 +865,20 @@ bool ProtectFactoryExports(
                     exportEntry.name.c_str()));
             void* const detour = Steam::SteamFactoryDetourAddress(slot);
             void* original = nullptr;
+            created.push_back({target, false, true, slot});
             if (target == nullptr || detour == nullptr
                 || Hooks::CreateHook(target, detour, &original) != MH_OK) {
+                created.pop_back();
                 Steam::UnregisterSteamFactorySlot(slot);
                 ReleaseFactorySlot(*context, slot);
                 complete = false;
                 break;
             }
-            created.push_back({target, true, true, slot});
+            created.back().created = true;
+            if (ConsumeFactoryPostCreateFault()) {
+                complete = false;
+                break;
+            }
             if (!Steam::SetSteamFactoryOriginal(
                     slot,
                     reinterpret_cast<Steam::Synthetic::FactoryFunction>(
@@ -573,6 +910,7 @@ bool ProtectFactoryExports(
     catch (...) {
         complete = false;
     }
+    context->fatalState->EnterDenyOnly();
     static_cast<void>(RollBackFactoryHooks(*context, created));
     return Fatal(context, "STEAM_HOOK_FAILED");
 }
@@ -798,6 +1136,151 @@ bool EnumerateMatchingModules(
     }
 }
 
+bool RequestedPath(const wchar_t* const requested, std::wstring& path) {
+    if (requested == nullptr || *requested == L'\0') {
+        return false;
+    }
+    path = requested;
+    return true;
+}
+
+bool RequestedPath(const std::wstring_view requested, std::wstring& path) {
+    if (requested.empty()) {
+        return false;
+    }
+    path.assign(requested);
+    return true;
+}
+
+bool RequestedPath(const char* const requested, std::wstring& path) {
+    if (requested == nullptr || *requested == '\0') {
+        return false;
+    }
+    const auto required = MultiByteToWideChar(
+        CP_ACP,
+        MB_ERR_INVALID_CHARS,
+        requested,
+        -1,
+        nullptr,
+        0);
+    if (required <= 1) {
+        return false;
+    }
+    path.resize(static_cast<std::size_t>(required));
+    if (MultiByteToWideChar(
+            CP_ACP,
+            MB_ERR_INVALID_CHARS,
+            requested,
+            -1,
+            path.data(),
+            required) != required) {
+        return false;
+    }
+    path.resize(static_cast<std::size_t>(required - 1));
+    return true;
+}
+
+bool VerifyRequestedProtectedFile(
+    const std::shared_ptr<GateContext>& context,
+    const std::wstring& requestedPath,
+    const HANDLE file) {
+    const auto baseName = BaseName(requestedPath);
+    const auto found = std::find_if(
+        context->modules.begin(),
+        context->modules.end(),
+        [&baseName](const std::unique_ptr<ModuleRecord>& record) {
+            return record->baseName == baseName;
+        });
+    if (found == context->modules.end()) {
+        return Fatal(context, "STEAM_MODULE_IDENTITY_UNAVAILABLE");
+    }
+    ModuleRecord& record = **found;
+    std::wstring canonical;
+    FILE_ID_INFO identity{};
+    if (!ReadCanonicalPath(file, canonical)
+        || !ReadFileIdentity(file, identity)
+        || !EqualsPath(canonical, record.canonicalPath)
+        || !SameFileIdentity(identity, record.expectedIdentity)) {
+        return Fatal(context, "STEAM_MODULE_PATH_MISMATCH");
+    }
+    std::array<std::uint8_t, 32> actualHash{};
+    if (!HashFileHandle(file, actualHash)
+        || !std::equal(
+            actualHash.begin(),
+            actualHash.end(),
+            record.expectedSha256.begin())) {
+        return Fatal(context, "STEAM_MODULE_HASH_MISMATCH");
+    }
+    return !IsFatal(context);
+}
+
+bool VerifyUnprotectedImportBoundary(
+    const std::shared_ptr<GateContext>& context,
+    const HANDLE file) {
+    std::vector<std::wstring> imports;
+    if (!ReadPeImports(file, imports)) {
+        return Fatal(context, "STEAM_DEPENDENCY_PREFLIGHT_UNAVAILABLE");
+    }
+    for (const auto& import : imports) {
+        if (std::any_of(
+                context->modules.begin(),
+                context->modules.end(),
+                [&import](const std::unique_ptr<ModuleRecord>& record) {
+                    return record->baseName == import;
+                })) {
+            return Fatal(
+                context,
+                "STEAM_PROTECTED_IMPORT_PREFLIGHT_DENIED");
+        }
+    }
+    // This Task 3 boundary permits an unprotected outer image only when all of
+    // its direct normal/delay dependencies are already loaded. Consequently no
+    // new unprotected intermediate (and no hidden protected descendant) can run
+    // DllMain before the outer LoadLibrary returns. Task 4 may replace this
+    // conservative rule with a profile-pinned recursive closure.
+    for (const auto& import : imports) {
+        std::vector<PinnedModule> matches;
+        if (!EnumerateMatchingModules(import, matches)
+            || matches.size() != 1) {
+            return Fatal(context, "STEAM_DEPENDENCY_CLOSURE_UNAVAILABLE");
+        }
+    }
+    return !IsFatal(context);
+}
+
+template <typename Path>
+bool PreflightLoad(
+    const std::shared_ptr<GateContext>& context,
+    const Path path,
+    const bool requestedTarget,
+    UniqueHandle& pinnedFile) noexcept {
+    try {
+        std::wstring requestedPath;
+        if (!RequestedPath(path, requestedPath)
+            || !IsCanonicalAbsolutePath(requestedPath)) {
+            return Fatal(context, "STEAM_DEPENDENCY_PREFLIGHT_UNAVAILABLE");
+        }
+        auto file = OpenPinnedReadOnly(requestedPath);
+        if (file.value == INVALID_HANDLE_VALUE) {
+            return Fatal(
+                context,
+                requestedTarget
+                    ? "STEAM_MODULE_IDENTITY_UNAVAILABLE"
+                    : "STEAM_DEPENDENCY_PREFLIGHT_UNAVAILABLE");
+        }
+        const bool verified = requestedTarget
+            ? VerifyRequestedProtectedFile(context, requestedPath, file.value)
+            : VerifyUnprotectedImportBoundary(context, file.value);
+        if (verified) {
+            pinnedFile = std::move(file);
+        }
+        return verified;
+    }
+    catch (...) {
+        return Fatal(context, "STEAM_DEPENDENCY_PREFLIGHT_UNAVAILABLE");
+    }
+}
+
 bool ScanAndAdmitExpectedModules(
     const std::shared_ptr<GateContext>& context,
     const bool requireEager) noexcept {
@@ -851,9 +1334,20 @@ HMODULE HookLoader(
         SetLastError(ERROR_ACCESS_DENIED);
         return nullptr;
     }
+    if (IsWithinLoaderCallout(context)) {
+        static_cast<void>(Fatal(context, "STEAM_LOADER_CALLOUT_LOAD_DENIED"));
+        SetLastError(ERROR_ACCESS_DENIED);
+        return nullptr;
+    }
     const bool requestedTarget = RequestedTarget(context, path);
-    if (callback.IsNested() && requestedTarget) {
-        static_cast<void>(Fatal(context, "STEAM_NESTED_PROTECTED_LOAD"));
+    if (callback.IsNested() && internalBypassDepth == 0) {
+        static_cast<void>(Fatal(context, "STEAM_NESTED_LOAD_DENIED"));
+        SetLastError(ERROR_ACCESS_DENIED);
+        return nullptr;
+    }
+    UniqueHandle preflightFile;
+    if (internalBypassDepth == 0
+        && !PreflightLoad(context, path, requestedTarget, preflightFile)) {
         SetLastError(ERROR_ACCESS_DENIED);
         return nullptr;
     }
@@ -1119,7 +1613,6 @@ bool BuildContext(
 }
 
 DeferredModuleGateCleanupStatus CleanupLocked() noexcept {
-    Hooks::MinHookMutationLease mutation;
     gateInstalled.store(false, std::memory_order_release);
     if (lifecycle.context != nullptr && lifecycle.context->fatalState != nullptr) {
         lifecycle.context->fatalState->EnterDenyOnly();
@@ -1138,54 +1631,64 @@ DeferredModuleGateCleanupStatus CleanupLocked() noexcept {
         }
         return disabled;
     };
-    if (!disableKnownHooks()) {
-        return DeferredModuleGateCleanupStatus::Incomplete;
+    {
+        Hooks::MinHookMutationLease mutation;
+        if (!disableKnownHooks()) {
+            return DeferredModuleGateCleanupStatus::Incomplete;
+        }
     }
+    SignalTestEvent(afterInitialDisableEvent);
 
     {
         std::unique_lock callbackDrain(callbackGate);
     }
+    SignalTestEvent(beforeFactoryDrainEvent);
     Steam::SteamFactoryCallbackBlock factoryCallbackBlock;
     std::unique_lock callbackLock(callbackGate);
-    if (!disableKnownHooks()) {
-        return DeferredModuleGateCleanupStatus::Incomplete;
-    }
-    lifecycle.mayBeEnabled = false;
-    bool removed = true;
     {
-        std::scoped_lock hookLock(hooksMutex);
-        for (auto iterator = lifecycle.hooks.rbegin();
-             iterator != lifecycle.hooks.rend();
-             ++iterator) {
-            if (!iterator->created) {
-                continue;
-            }
-            const auto status = Hooks::RemoveHook(iterator->target);
-            if (status == MH_OK || status == MH_ERROR_NOT_CREATED) {
-                iterator->created = false;
-                if (iterator->factorySlot < Steam::kSteamFactorySlotCapacity) {
-                    Steam::UnregisterSteamFactorySlot(iterator->factorySlot);
-                    if (lifecycle.context != nullptr) {
-                        ReleaseFactorySlot(
-                            *lifecycle.context,
+        Hooks::MinHookMutationLease mutation;
+        if (!disableKnownHooks()) {
+            return DeferredModuleGateCleanupStatus::Incomplete;
+        }
+        lifecycle.mayBeEnabled = false;
+        bool removed = true;
+        {
+            std::scoped_lock hookLock(hooksMutex);
+            for (auto iterator = lifecycle.hooks.rbegin();
+                 iterator != lifecycle.hooks.rend();
+                 ++iterator) {
+                if (!iterator->created) {
+                    continue;
+                }
+                const auto status = Hooks::RemoveHook(iterator->target);
+                if (status == MH_OK || status == MH_ERROR_NOT_CREATED) {
+                    iterator->created = false;
+                    if (iterator->factorySlot
+                        < Steam::kSteamFactorySlotCapacity) {
+                        Steam::UnregisterSteamFactorySlot(
                             iterator->factorySlot);
+                        if (lifecycle.context != nullptr) {
+                            ReleaseFactorySlot(
+                                *lifecycle.context,
+                                iterator->factorySlot);
+                        }
                     }
                 }
-            }
-            else {
-                removed = false;
+                else {
+                    removed = false;
+                }
             }
         }
+        if (!removed) {
+            return DeferredModuleGateCleanupStatus::Incomplete;
+        }
+        if (lifecycle.initialized && !Hooks::ReleaseMinHook()) {
+            return DeferredModuleGateCleanupStatus::Incomplete;
+        }
+        lifecycle.initialized = false;
+        activeContext.store({}, std::memory_order_release);
+        lifecycle = {};
     }
-    if (!removed) {
-        return DeferredModuleGateCleanupStatus::Incomplete;
-    }
-    if (lifecycle.initialized && !Hooks::ReleaseMinHook()) {
-        return DeferredModuleGateCleanupStatus::Incomplete;
-    }
-    lifecycle.initialized = false;
-    activeContext.store({}, std::memory_order_release);
-    lifecycle = {};
     return DeferredModuleGateCleanupStatus::Success;
 }
 
@@ -1209,8 +1712,15 @@ DeferredModuleGateInstallStatus InstallWithSuspendedProof(
         lifecycle.context = context;
         bool ready = true;
         const HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
-        if (kernel == nullptr) {
+        const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+        if (kernel == nullptr || ntdll == nullptr) {
             ready = false;
+        }
+        if (ready) {
+            context->loaderCalloutProbe =
+                reinterpret_cast<LoaderCalloutProbeFunction>(
+                    GetProcAddress(ntdll, "RtlIsThreadWithinLoaderCallout"));
+            ready = context->loaderCalloutProbe != nullptr;
         }
         if (ready) {
             const auto definitions = LoaderHooks(*context);
@@ -1243,6 +1753,7 @@ DeferredModuleGateInstallStatus InstallWithSuspendedProof(
             activeContext.store(context, std::memory_order_release);
             ready = Hooks::ApplyQueuedHooks() == MH_OK;
         }
+        mutation.Release();
         if (!ready) {
             static_cast<void>(Fatal(context, "STEAM_HOOK_FAILED"));
             static_cast<void>(CleanupLocked());
@@ -1298,6 +1809,10 @@ void FailNextFactoryPublication() noexcept {
     failFactoryPublication.fetch_add(1, std::memory_order_acq_rel);
 }
 
+void FailNextFactoryPostCreateBookkeeping() noexcept {
+    failFactoryPostCreate.fetch_add(1, std::memory_order_acq_rel);
+}
+
 DeferredModuleGateLifecycleSnapshot CurrentGateLifecycle() noexcept {
     std::scoped_lock installLock(installMutex);
     DeferredModuleGateLifecycleSnapshot snapshot{};
@@ -1316,6 +1831,56 @@ DeferredModuleGateLifecycleSnapshot CurrentGateLifecycle() noexcept {
         }
     }
     return snapshot;
+}
+
+void SetGateCleanupPhaseEvents(
+    void* const afterDisable,
+    void* const beforeFactory) noexcept {
+    afterInitialDisableEvent.store(
+        static_cast<HANDLE>(afterDisable),
+        std::memory_order_release);
+    beforeFactoryDrainEvent.store(
+        static_cast<HANDLE>(beforeFactory),
+        std::memory_order_release);
+}
+
+void HoldGateCallbackWhileWaitingForMutation(
+    void* const entered,
+    void* const allowMutation,
+    void* const mutationAcquired,
+    void* const release) noexcept {
+    CallbackLease callback;
+    if (entered != nullptr) {
+        SetEvent(static_cast<HANDLE>(entered));
+    }
+    if (allowMutation != nullptr) {
+        WaitForSingleObject(static_cast<HANDLE>(allowMutation), INFINITE);
+    }
+    Hooks::MinHookMutationLease mutation;
+    if (mutationAcquired != nullptr) {
+        SetEvent(static_cast<HANDLE>(mutationAcquired));
+    }
+    if (release != nullptr) {
+        WaitForSingleObject(static_cast<HANDLE>(release), INFINITE);
+    }
+}
+
+bool GateIsDenyOnlyForReporter() noexcept {
+    const auto context = activeContext.load(std::memory_order_acquire);
+    return context != nullptr && context->fatalState != nullptr
+        && context->fatalState->IsFatal();
+}
+
+std::size_t GateRetainedFactorySlotCountForReporter() noexcept {
+    const auto context = activeContext.load(std::memory_order_acquire);
+    if (context == nullptr) {
+        return 0;
+    }
+    std::scoped_lock lock(context->slotMutex);
+    return static_cast<std::size_t>(std::count(
+        context->slots.begin(),
+        context->slots.end(),
+        true));
 }
 
 }  // namespace Testing

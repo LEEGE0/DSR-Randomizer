@@ -14,6 +14,7 @@ public:
     ~MinHookMutationLease();
     MinHookMutationLease(const MinHookMutationLease&) = delete;
     MinHookMutationLease& operator=(const MinHookMutationLease&) = delete;
+    void Release() noexcept;
 
 private:
     class Impl;

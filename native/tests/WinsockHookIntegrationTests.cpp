@@ -11,12 +11,15 @@
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <set>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "DSRRandomizer/ProtectionProtocol.h"
+#include "hooks/MinHookCoordinator.h"
 #include "network/WinsockHooks.h"
 
 namespace {
@@ -41,6 +44,18 @@ class FixtureHookPlatform final : public HookPlatform {
 public:
     explicit FixtureHookPlatform(const HookFailures failures = {})
         : failures_(failures) {}
+
+    void BeginMutation() noexcept override {
+        mutationLease_ = std::make_unique<
+            DSRRandomizer::Hooks::MinHookMutationLease>();
+    }
+
+    void EndMutation() noexcept override {
+        mutationLease_.reset();
+        if (mutationReleasedEvent_ != nullptr) {
+            SetEvent(mutationReleasedEvent_);
+        }
+    }
 
     bool Initialize() noexcept override {
         initialized_ = true;
@@ -94,6 +109,9 @@ public:
         return !initialized_ && created_.empty() && enabled_.empty();
     }
     [[nodiscard]] bool WasInitialized() const noexcept { return initialized_; }
+    void SignalMutationRelease(const HANDLE event) noexcept {
+        mutationReleasedEvent_ = event;
+    }
 
 private:
     HookFailures failures_;
@@ -104,6 +122,8 @@ private:
     std::set<void*> created_;
     std::set<void*> queued_;
     std::set<void*> enabled_;
+    std::unique_ptr<DSRRandomizer::Hooks::MinHookMutationLease> mutationLease_;
+    HANDLE mutationReleasedEvent_ = nullptr;
 };
 
 struct AdapterSpyState {
@@ -310,6 +330,63 @@ int VerifyAtomicHookLifecycle() {
         || !success.WasRolledBack()
         || DSRRandomizer::Network::WinsockHooksAreInstalled()) {
         return Fail("successful Winsock hook group did not cleanly uninstall");
+    }
+
+    FixtureHookPlatform mutationBarrier;
+    if (DSRRandomizer::Network::InstallWinsockHooks(empty, mutationBarrier)
+        != WinsockHookInstallStatus::Success) {
+        return Fail("Winsock mutation barrier setup did not install hooks");
+    }
+    const HANDLE callbackEntered = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    const HANDLE allowMutation = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    const HANDLE mutationAcquired = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    const HANDLE callbackRelease = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    const HANDLE cleanupMutationReleased =
+        CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (callbackEntered == nullptr || allowMutation == nullptr
+        || mutationAcquired == nullptr || callbackRelease == nullptr
+        || cleanupMutationReleased == nullptr) {
+        ExitProcess(98);
+    }
+    mutationBarrier.SignalMutationRelease(cleanupMutationReleased);
+    std::thread callback([&]() {
+        DSRRandomizer::Network::Testing::
+            HoldWinsockHookCallbackWhileWaitingForMutation(
+                callbackEntered,
+                allowMutation,
+                mutationAcquired,
+                callbackRelease);
+    });
+    if (WaitForSingleObject(callbackEntered, 5000) != WAIT_OBJECT_0) {
+        ExitProcess(99);
+    }
+    WinsockHookCleanupStatus cleanupStatus =
+        WinsockHookCleanupStatus::Incomplete;
+    std::thread cleanup([&]() {
+        cleanupStatus = DSRRandomizer::Network::UninstallWinsockHooks();
+    });
+    if (WaitForSingleObject(cleanupMutationReleased, 5000)
+        != WAIT_OBJECT_0) {
+        ExitProcess(100);
+    }
+    SetEvent(allowMutation);
+    if (WaitForSingleObject(mutationAcquired, 5000) != WAIT_OBJECT_0) {
+        ExitProcess(101);
+    }
+    SetEvent(callbackRelease);
+    callback.join();
+    cleanup.join();
+    for (const auto event : {
+             callbackEntered,
+             allowMutation,
+             mutationAcquired,
+             callbackRelease,
+             cleanupMutationReleased}) {
+        CloseHandle(event);
+    }
+    if (cleanupStatus != WinsockHookCleanupStatus::Success
+        || !mutationBarrier.WasRolledBack()) {
+        return Fail("Winsock cleanup held mutation ownership while draining callbacks");
     }
     return 0;
 }

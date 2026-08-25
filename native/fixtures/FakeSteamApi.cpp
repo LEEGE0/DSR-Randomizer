@@ -10,6 +10,8 @@ namespace {
 std::atomic<std::uint32_t> protectedCalls{0};
 std::atomic<std::uint32_t> identityCalls{0};
 std::atomic<DWORD> unexpectedFactoryExitCode{0};
+std::atomic<HANDLE> identityEnteredEvent{};
+std::atomic<HANDLE> identityReleaseEvent{};
 
 bool InvokeProtected(void*) noexcept {
     protectedCalls.fetch_add(1, std::memory_order_relaxed);
@@ -18,6 +20,14 @@ bool InvokeProtected(void*) noexcept {
 
 bool InvokeIdentity(void*) noexcept {
     identityCalls.fetch_add(1, std::memory_order_relaxed);
+    const auto entered = identityEnteredEvent.load(std::memory_order_acquire);
+    const auto release = identityReleaseEvent.load(std::memory_order_acquire);
+    if (entered != nullptr) {
+        SetEvent(entered);
+    }
+    if (release != nullptr) {
+        WaitForSingleObject(release, INFINITE);
+    }
     return true;
 }
 
@@ -73,4 +83,12 @@ FakeSteamIdentityCallCount() noexcept {
 extern "C" __declspec(dllexport) void __cdecl
 FakeSteamSetUnexpectedFactoryExitCode(const DWORD value) noexcept {
     unexpectedFactoryExitCode.store(value, std::memory_order_relaxed);
+}
+
+extern "C" __declspec(dllexport) void __cdecl
+FakeSteamSetIdentityBlockEvents(
+    const HANDLE entered,
+    const HANDLE release) noexcept {
+    identityReleaseEvent.store(release, std::memory_order_release);
+    identityEnteredEvent.store(entered, std::memory_order_release);
 }

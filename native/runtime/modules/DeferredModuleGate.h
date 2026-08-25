@@ -56,8 +56,20 @@ struct DeferredModuleGateLifecycleSnapshot {
 InstallDeferredModuleGateForSyntheticSuspendedProcess(
     const DeferredModuleGateConfiguration& configuration) noexcept;
 void FailNextFactoryPublication() noexcept;
+void FailNextFactoryPostCreateBookkeeping() noexcept;
 [[nodiscard]] DeferredModuleGateLifecycleSnapshot
 CurrentGateLifecycle() noexcept;
+void SetGateCleanupPhaseEvents(
+    void* afterInitialDisableEvent,
+    void* beforeFactoryDrainEvent) noexcept;
+void HoldGateCallbackWhileWaitingForMutation(
+    void* enteredEvent,
+    void* allowMutationEvent,
+    void* mutationAcquiredEvent,
+    void* releaseEvent) noexcept;
+[[nodiscard]] bool GateIsDenyOnlyForReporter() noexcept;
+[[nodiscard]] std::size_t
+GateRetainedFactorySlotCountForReporter() noexcept;
 
 }  // namespace Testing
 
