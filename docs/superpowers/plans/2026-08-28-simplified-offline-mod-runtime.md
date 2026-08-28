@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Ship a copied, external-disk Dark Souls Remastered runtime that launches with a dedicated `.rmm` and one pre-resume seven-flag offline protection check while letting the user install or delete mod folders manually.
+**Goal:** Ship a copied, external-disk Dark Souls Remastered runtime that launches with a dedicated `.rmm` and one pre-resume three-flag save protection check while letting the user install or delete mod folders manually; the user places Steam in Offline Mode.
 
-**Architecture:** Preserve the verified copy, save redirection, suspended injection, process-scoped socket block, pinned Steam proxies, and game offline hooks. Add an explicit simplified bitmap path that closes the authenticated pipe after one handshake, relax runtime readiness only for non-core modded files, select the material data root through a small local pointer, and connect the existing coordinator to CLI/WPF launch without requiring continuous heartbeat monitoring.
+**Architecture:** Preserve the verified copy, dedicated save redirection, suspended injection, and pinned core identity. Add an exact three-flag save-only bitmap path that closes the authenticated pipe after one handshake, relax runtime readiness only for non-core modded files, select the material data root through a small local pointer, and connect the coordinator to CLI/WPF launch. Existing network/Steam/game-service guards remain outside the product path because the user controls Steam Offline Mode.
 
 **Tech Stack:** .NET 8, WPF, C++20/MSVC x64, MinHook 1.3.4, CMake/CTest, xUnit, Windows Job Objects and named pipes
 
@@ -14,9 +14,10 @@
 
 - Never write to the Steam Dark Souls Remastered installation, installed Overhaul, normal `.sl2`, Steam settings, Windows Firewall, or network-adapter settings.
 - Never hard-link, junction, symlink, or reparse the copied runtime back to the source installation.
-- The simplified required bitmap is exactly bits 0 through 6: `0x7F`; missing flags and unknown extras fail before resume.
+- The product required bitmap is exactly bits 0 through 2: `0x7`; missing flags and unknown extras fail before resume.
+- The completed exact `0x7F` offline path remains tested historical/experimental code and is not requested by product launch.
 - `ProtectionInitBlock` remains protocol version 2 and exactly 5480 bytes.
-- The simplified path does not start or require `Heartbeat` or `HookIntegrity`; the experimental monitored path may remain independently tested.
+- The product path does not request Winsock, Steam, game-service, heartbeat, or hook-integrity flags. Steam Offline Mode is a user prerequisite the launcher does not enforce or attest.
 - `DarkSoulsRemastered.exe` and adjacent `steam_api64.dll` must match the release-pinned profile exactly.
 - Mod presence is filesystem state only. Do not add enable/disable state, a load-order database, per-mod rollback, or randomizer generation.
 - All material files live under the selected external root. Only `%LOCALAPPDATA%\DSR-Randomizer\external-root.json` may be written locally.
@@ -28,7 +29,7 @@
 - The active content-addressed runtime selected by the existing runtime pointer is the conceptual `Game` directory. Do not create a second copy, junction, or reparse-point alias.
 - `RuntimeReadinessService` remains the strict clean-copy audit. The new `ModRuntimeReadinessService` is the only readiness check used by the modded launch path.
 - `RuntimeBuilder` copies only paths present in the verified stock `GameFileCatalog`; files present in the source but absent from that copy manifest are never copied. It may create an empty top-level `Mods` directory after writing the clean runtime manifest. Once the user adds files, strict audit may fail by design while mod readiness can still succeed.
-- The known experimental heartbeat/monitor implementation is out of the simplified product path. Task reviews only reopen it if the new one-shot path reaches or weakens it.
+- The known `0x7F` offline and heartbeat/monitor implementations are outside the product path. Task reviews only reopen them if the new save-only path reaches or weakens them.
 - Root changes take effect after restart so every material service has one immutable external root for its lifetime.
 - A launch must verify an existing valid `.rmm` without opening or mutating the normal `.sl2`; save bootstrap remains a separate explicit operation.
 
@@ -291,11 +292,18 @@ git add -- src/DSRRandomizer.Launcher/Configuration/ExternalRootSelectionStore.c
 git commit -m "feat: select external mod runtime root"
 ```
 
-### Task 4: Connect the simplified modded launch path
+### Task 4: Connect the manual-offline modded launch path
 
 **Files:**
 - Modify: `src/DSRRandomizer.Launcher/Safety/LaunchContracts.cs`
+- Create: `src/DSRRandomizer.Launcher/Safety/DedicatedSaveProtection.cs`
+- Modify: `src/DSRRandomizer.Launcher/Safety/SafetyLaunchCoordinator.cs`
+- Modify: `src/DSRRandomizer.Launcher/Native/RemoteDllInjector.cs`
+- Modify: `src/DSRRandomizer.Launcher/Native/ProtectionPipeServer.cs`
 - Modify: `src/DSRRandomizer.Launcher/Native/WindowsProtectedProcessPlatform.cs`
+- Modify: `native/include/DSRRandomizer/ProtectionProtocol.h`
+- Modify: `native/runtime/ProtectionBootstrap.cpp`
+- Modify: `native/tests/ProtectionBootstrapTests.cpp`
 - Modify: `src/DSRRandomizer.Launcher/Services/ILauncherService.cs`
 - Modify: `src/DSRRandomizer.Launcher/Services/LauncherService.cs`
 - Modify: `src/DSRRandomizer.Launcher/LauncherApplication.cs`
@@ -313,13 +321,15 @@ git commit -m "feat: select external mod runtime root"
 - Produces: `ILauncherService.LaunchModdedAsync(string steamId, CancellationToken)`.
 - Produces CLI: `--launch <SteamID>` using the selected external root.
 - Produces WPF `LaunchCommand` enabled only after mod-ready runtime and valid existing `.rmm` checks.
-- Consumes: exact `0x7F` contract, pinned profile catalog, `ModRuntimeReadinessService`, existing dedicated save service, and `WindowsProtectedProcessPlatform`.
+- Produces: exact save-only one-shot contract `Bootstrap | SaveKnownFolder | SaveFileIo == 0x7`, with no monitor session.
+- Consumes: pinned profile catalog, `ModRuntimeReadinessService`, existing dedicated save service, and `WindowsProtectedProcessPlatform`.
+- Requires the user to place Steam in Offline Mode; the launcher displays this prerequisite but does not enforce or attest it.
 
 - [ ] **Step 1: Write failing end-to-end fixture tests**
 
 ```csharp
 [Fact]
-public async Task LaunchModdedAsync_UsesCopiedExeDedicatedRmmAndExactBitmap()
+public async Task LaunchModdedAsync_UsesCopiedExeDedicatedRmmAndExactSaveBitmap()
 {
     var fixture = await LauncherFixture.CreateReadyAsync();
     var result = await fixture.Service.LaunchModdedAsync(
@@ -328,12 +338,12 @@ public async Task LaunchModdedAsync_UsesCopiedExeDedicatedRmmAndExactBitmap()
     Assert.True(result.Started);
     Assert.Equal(fixture.RuntimeExe, fixture.Platform.Request.ExecutablePath);
     Assert.Equal(fixture.DedicatedRmm, fixture.Platform.Request.SavePaths!.DedicatedRmm);
-    Assert.Equal(0x7FUL, fixture.Platform.Request.RequiredProtectionFlags);
+    Assert.Equal(0x7UL, fixture.Platform.Request.RequiredProtectionFlags);
     Assert.Equal(1, fixture.Platform.Process.ResumeCalls);
 }
 ```
 
-Add failures for missing `.rmm`, changed core EXE/DLL, runtime/source path equality, reparse escape, unsupported profile, missing guard DLL, incomplete handshake, unexpected session on the simplified path, and attempted normal/Overhaul save path use.
+Add failures for missing `.rmm`, changed core EXE/DLL, runtime/source path equality, reparse escape, unsupported profile, missing guard DLL, incomplete or extra save flags, unexpected session on the product one-shot path, and attempted normal/Overhaul save path use. Add native/managed tests proving exact `0x7` is sessionless, while `0x6`, `0xF`, and unknown extras fail before resume. Preserve the separate exact `0x7F` path tests.
 
 - [ ] **Step 2: Run focused tests and observe RED**
 
@@ -353,10 +363,10 @@ mod-ready runtime validation
 -> existing valid DRAKS0005.rmm verification
 -> packaged guard DLL presence/hash policy
 -> construct virtual Documents and dedicated save paths under external root
--> SafetyLaunchCoordinator.LaunchAsync with RequiredFlags = 0x7F
+-> SafetyLaunchCoordinator.LaunchAsync with RequiredFlags = 0x7
 ```
 
-`WindowsProtectedProcessPlatform` copies the request's exact save paths into `GuardConfiguration`; socket endpoint count is zero, which denies all game TCP/UDP while named-pipe supervision remains available. CLI and WPF call the same service. The WPF warning states “modded copy only; original and Overhaul remain untouched,” and its launch button never targets the source installation.
+`WindowsProtectedProcessPlatform` copies the request's exact save paths into `GuardConfiguration`. Socket configuration remains empty because Winsock protection is not requested. CLI and WPF call the same service. The WPF warning states “Steam Offline Mode required; launcher does not block networking; modded copy only; original and Overhaul remain untouched,” and its launch button never targets the source installation.
 
 - [ ] **Step 4: Add packaging and release-content assertions**
 
@@ -379,6 +389,6 @@ Expected: all pass. No command in this task starts the real game; only harmless 
 - [ ] **Step 6: Commit**
 
 ```powershell
-git add -- src/DSRRandomizer.Launcher/LaunchContracts.cs src/DSRRandomizer.Launcher/WindowsProtectedProcessPlatform.cs src/DSRRandomizer.Launcher/LauncherService.cs src/DSRRandomizer.Launcher/ILauncherService.cs src/DSRRandomizer.Launcher/LauncherApplication.cs src/DSRRandomizer.Launcher/MainWindow.xaml src/DSRRandomizer.Launcher/MainWindow.xaml.cs src/DSRRandomizer.Launcher/ViewModels/MainWindowViewModel.cs src/DSRRandomizer.Launcher/DSRRandomizer.Launcher.csproj tests/DSRRandomizer.Launcher.Tests README.md CHANGELOG.md
-git commit -m "feat: launch isolated offline mod runtime"
+git add -- native/include/DSRRandomizer/ProtectionProtocol.h native/runtime/ProtectionBootstrap.cpp native/tests/ProtectionBootstrapTests.cpp src/DSRRandomizer.Launcher/Safety/DedicatedSaveProtection.cs src/DSRRandomizer.Launcher/Safety/SafetyLaunchCoordinator.cs src/DSRRandomizer.Launcher/Native/RemoteDllInjector.cs src/DSRRandomizer.Launcher/Native/ProtectionPipeServer.cs src/DSRRandomizer.Launcher/Native/WindowsProtectedProcessPlatform.cs src/DSRRandomizer.Launcher/Safety/LaunchContracts.cs src/DSRRandomizer.Launcher/Services/LauncherService.cs src/DSRRandomizer.Launcher/Services/ILauncherService.cs src/DSRRandomizer.Launcher/LauncherApplication.cs src/DSRRandomizer.Launcher/MainWindow.xaml src/DSRRandomizer.Launcher/MainWindow.xaml.cs src/DSRRandomizer.Launcher/ViewModels/MainWindowViewModel.cs src/DSRRandomizer.Launcher/DSRRandomizer.Launcher.csproj tests/DSRRandomizer.Launcher.Tests README.md CHANGELOG.md
+git commit -m "feat: launch isolated manual-offline mod runtime"
 ```

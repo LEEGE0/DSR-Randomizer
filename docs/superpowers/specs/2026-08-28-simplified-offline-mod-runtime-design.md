@@ -2,9 +2,9 @@
 
 ## 1. Purpose
 
-Build a separate, copied Dark Souls Remastered installation for offline mod use. The launcher protects the original installation, Overhaul installation, and normal save while allowing the user to add or remove ordinary mod folders manually.
+Build a separate, copied Dark Souls Remastered installation for mod use. The launcher protects the original installation, Overhaul installation, and normal save while allowing the user to add or remove ordinary mod folders manually.
 
-This design replaces the unfinished continuous heartbeat and anti-tamper requirement with a one-time, pre-resume protection check. It preserves the already completed save, socket, Steam, game-service, profile, and suspended-launch protections.
+The user places Steam in Offline Mode before launch. The product launcher does not enforce or attest network isolation. Its one-time pre-resume native check is limited to bootstrap and dedicated-save redirection; the completed socket, Steam, and game-service protections remain experimental code outside the product path.
 
 ## 2. User-visible model
 
@@ -40,29 +40,26 @@ A mod is active when its folder/files are present in the modded runtime and inac
 - The child process is denied access to the canonical normal DSR save root, Overhaul save suffixes, and any `.sl2` fallback.
 - Deleting mod folders never deletes or resets `.rmm`.
 
-## 5. Simplified offline boundary
+## 5. Manual offline prerequisite and save boundary
 
-The copied game starts suspended. Before its main thread resumes, the launcher injects the project-owned native guard and requires one authenticated protocol-v2 initialization result with exactly these protections active:
+Before using the launcher, the user places Steam in Offline Mode. The launcher displays this prerequisite but does not inspect Steam state, change Steam settings, modify the firewall, disable adapters, or claim that a hostile mod cannot network.
+
+The copied game starts suspended. Before its main thread resumes, the launcher injects the project-owned native guard and requires one authenticated protocol-v2 initialization result with exactly these protections active (`0x7`):
 
 - `Bootstrap`
 - `SaveKnownFolder`
 - `SaveFileIo`
-- `Winsock`
-- `SteamInterfaces`
-- `DeferredModuleGate`
-- `GameServiceOffline`
 
-The native guard must still:
+The product launch path must:
 
-- reject external non-loopback TCP/UDP from the copied process;
-- deny profiled Steam matchmaking, P2P/networking, and Remote Storage calls;
-- force the profiled game offline and deny login, discovery/session, and lobby targets;
-- verify the exact executable, adjacent Steam DLL, target fingerprints, and pinned Steam interface ABI before installing hooks;
-- fail closed on partial hook installation or an unsupported profile.
+- redirect known-folder and file I/O access to the dedicated `.rmm` paths;
+- reject missing or extra protection flags before process resume;
+- verify the copied executable and adjacent Steam DLL against the pinned release profile in the managed launch preparation;
+- fail closed on partial save-hook installation or an unsupported profile.
 
-`Heartbeat` and `HookIntegrity` are not required by the simplified launch bitmap. The launcher does not wait for ongoing heartbeat frames and does not promise to detect a mod that deliberately tampers with protection after resume. The existing experimental monitor code may remain compiled and tested behind explicit flags, but it is not started by the simplified product path.
+`Winsock`, `SteamInterfaces`, `DeferredModuleGate`, `GameServiceOffline`, `Heartbeat`, and `HookIntegrity` are not requested by the product launch bitmap. The existing exact `0x7F` and monitored protection paths may remain compiled and tested, but neither is started by the product path.
 
-This is a deliberate risk trade-off accepted to shorten delivery. It protects against ordinary game/mod networking and configuration mistakes, not a hostile mod intentionally attacking the guard.
+This is a deliberate user-approved simplification. Steam Offline Mode is an operating prerequisite, not a security guarantee supplied by this launcher.
 
 ## 6. Launch lifecycle
 
@@ -74,7 +71,7 @@ Select copied runtime
   -> discover present mod folders for diagnostics only
   -> create copied game suspended in a kill-on-close Job Object
   -> inject guard
-  -> require exact seven-flag authenticated initialization result
+  -> require exact three-flag (`0x7`) authenticated save initialization result
   -> resume once
   -> wait for process exit
   -> close Job/process handles
@@ -84,7 +81,7 @@ There is no automatic mod activation database. Mod discovery records folder name
 
 ## 7. Failure behavior
 
-- A missing/modified protected core file, wrong profile, incomplete bitmap, injection failure, save redirection failure, or online-blocking hook failure terminates the Job before resume.
+- A missing/modified protected core file, wrong profile, incomplete bitmap, injection failure, or save redirection failure terminates the Job before resume.
 - Unknown or extra protection flags are rejected for the simplified launch contract.
 - A user mod may modify ordinary copied data files. Such changes do not invalidate the clean-source manifest, but protected core files remain immutable.
 - If the copied runtime becomes unusable, the user may delete it and rebuild it from the verified original source. The launcher does not attempt per-mod rollback.
@@ -97,7 +94,7 @@ Included:
 - verified copied game runtime on an external root;
 - manual folder-based mod installation;
 - dedicated `.rmm` save;
-- one-time suspended-process offline protection verification;
+- one-time suspended-process dedicated-save protection verification;
 - separate original, Overhaul, and modded launch paths.
 
 Excluded:
@@ -105,13 +102,13 @@ Excluded:
 - item, enemy, boss, or equipment randomization generation;
 - mod enable/disable UI, dependency solver, load-order manager, or per-mod rollback;
 - continuous heartbeat enforcement and anti-tamper guarantees;
-- global Steam Offline Mode, Windows Firewall changes, or adapter changes;
+- automatic Steam Offline Mode changes, Steam-state attestation, launcher network blocking, Windows Firewall changes, or adapter changes;
 - automatic execution of a real game smoke test without a later explicit user approval.
 
 ## 9. Verification and release gates
 
 - Managed and native Debug and Release suites must pass from clean builds.
-- Synthetic suspended fixtures must prove exactly one resume only after the exact seven-flag bitmap.
+- Synthetic suspended fixtures must prove exactly one resume only after the exact three-flag (`0x7`) product bitmap.
 - Tests must reject every missing flag and every unknown extra flag.
 - Integration tests must prove the original installation and normal save remain unchanged while modded runtime files and `.rmm` are writable.
 - Packaging must exclude game binaries, game data, saves, local mod folders, captures, and proprietary byte sequences.
