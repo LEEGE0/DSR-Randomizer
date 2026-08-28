@@ -143,6 +143,9 @@ public sealed class RuntimeBuilder
                     $"runtimes/{manifest.RuntimeId}",
                     manifestSha256),
                 cancellationToken);
+            var modsPath = Path.Combine(finalPath, LocalDataLayout.ModsDirectoryName);
+            _boundary.EnsureAllowed(modsPath);
+            Directory.CreateDirectory(modsPath);
             return manifest;
         }
         catch
