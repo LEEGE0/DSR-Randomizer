@@ -26,6 +26,25 @@
             </Border>
 
             <TextBlock FontWeight="SemiBold"
+                       Text="External material root" />
+            <TextBlock Margin="0,6,0,8"
+                       TextWrapping="Wrap"
+                       Text="All copied game files, mods, saves, manifests, logs, and staging data stay under this existing external root. Only this selection pointer is stored locally." />
+            <TextBox Margin="0,0,0,8"
+                     MinHeight="30"
+                     VerticalContentAlignment="Center"
+                     Text="{Binding ExternalRootPath, UpdateSourceTrigger=PropertyChanged}" />
+            <WrapPanel Margin="0,0,0,16">
+                <Button MinWidth="180"
+                        Padding="12,7"
+                        Content="Save external root"
+                        Command="{Binding SaveExternalRootCommand}" />
+                <TextBlock Margin="12,6,0,0"
+                           TextWrapping="Wrap"
+                           Text="Restart required after changing the external root." />
+            </WrapPanel>
+
+            <TextBlock FontWeight="SemiBold"
                        Text="Dark Souls Remastered installation" />
             <TextBox Margin="0,6,0,12"
                      MinHeight="30"

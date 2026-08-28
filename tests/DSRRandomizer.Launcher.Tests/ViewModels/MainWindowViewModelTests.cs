@@ -2,6 +2,7 @@ using DSRRandomizer.Foundation.Installation;
 using DSRRandomizer.Foundation.Runtime;
 using DSRRandomizer.Foundation.Saves;
 using DSRRandomizer.Launcher.Logging;
+using DSRRandomizer.Launcher.Configuration;
 using DSRRandomizer.Launcher.Services;
 using DSRRandomizer.Launcher.ViewModels;
 
@@ -10,6 +11,27 @@ namespace DSRRandomizer.Launcher.Tests.ViewModels;
 public sealed class MainWindowViewModelTests
 {
     private const string SteamId = "12345678901234567";
+
+    [Fact]
+    public async Task SaveExternalRootCommand_PersistsSelectionAndRequiresRestart()
+    {
+        using var fixture = ExternalRootFixture.Create();
+        var viewModel = new MainWindowViewModel(
+            service: null,
+            new RecordingLogger(),
+            materialRoot: string.Empty,
+            fixture.Store,
+            materialOperationsAvailable: false)
+        {
+            ExternalRootPath = fixture.ExternalRoot
+        };
+
+        await viewModel.SaveExternalRootCommand.ExecuteAsync(null);
+
+        Assert.Equal(fixture.ExternalRoot, await fixture.Store.ReadAsync(CancellationToken.None));
+        Assert.Contains("restart", viewModel.Status, StringComparison.OrdinalIgnoreCase);
+        Assert.False(viewModel.CanInitialize);
+    }
 
     [Fact]
     public async Task InitializeCommand_NativeFoundationStillKeepsPublicLaunchLocked()
@@ -316,5 +338,35 @@ public sealed class MainWindowViewModelTests
             Exceptions.Add(exception);
             return Task.CompletedTask;
         }
+    }
+
+    private sealed class ExternalRootFixture : IDisposable
+    {
+        private ExternalRootFixture(string container)
+        {
+            Container = container;
+            LocalRoot = Path.Combine(container, "local");
+            ExternalRoot = Path.Combine(container, "external");
+            Directory.CreateDirectory(LocalRoot);
+            Directory.CreateDirectory(ExternalRoot);
+            Store = new ExternalRootSelectionStore(LocalRoot);
+        }
+
+        public string Container { get; }
+
+        public string LocalRoot { get; }
+
+        public string ExternalRoot { get; }
+
+        public ExternalRootSelectionStore Store { get; }
+
+        public static ExternalRootFixture Create()
+        {
+            var container = Path.Combine(Path.GetTempPath(), $"dsr-external-root-view-model-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(container);
+            return new ExternalRootFixture(container);
+        }
+
+        public void Dispose() => Directory.Delete(Container, recursive: true);
     }
 }

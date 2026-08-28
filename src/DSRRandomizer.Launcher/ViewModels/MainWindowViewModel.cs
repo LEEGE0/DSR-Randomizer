@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using DSRRandomizer.Foundation.Runtime;
 using DSRRandomizer.Foundation.Saves;
+using DSRRandomizer.Launcher.Configuration;
 using DSRRandomizer.Launcher.Logging;
 using DSRRandomizer.Launcher.Services;
 
@@ -8,11 +9,14 @@ namespace DSRRandomizer.Launcher.ViewModels;
 
 public sealed class MainWindowViewModel : ObservableObject
 {
-    private readonly ILauncherService _service;
+    private readonly ILauncherService? _service;
     private readonly IExternalLogger _logger;
-    private readonly string _localDataRoot;
+    private readonly string _materialRoot;
+    private readonly ExternalRootSelectionStore? _externalRootStore;
+    private readonly bool _materialOperationsAvailable;
     private string _gamePath = string.Empty;
-    private string _status = "Select the Dark Souls Remastered installation to begin.";
+    private string _externalRootPath = string.Empty;
+    private string _status;
     private double _progressPercent;
     private bool _isBusy;
     private bool _saveProfilesDiscovered;
@@ -22,16 +26,25 @@ public sealed class MainWindowViewModel : ObservableObject
     private bool _firstCopyConfirmed;
 
     public MainWindowViewModel(
-        ILauncherService service,
+        ILauncherService? service,
         IExternalLogger logger,
-        string localDataRoot)
+        string materialRoot,
+        ExternalRootSelectionStore? externalRootStore = null,
+        bool materialOperationsAvailable = true)
     {
-        ArgumentNullException.ThrowIfNull(service);
         ArgumentNullException.ThrowIfNull(logger);
-        ArgumentException.ThrowIfNullOrWhiteSpace(localDataRoot);
+        ArgumentNullException.ThrowIfNull(materialRoot);
         _service = service;
         _logger = logger;
-        _localDataRoot = Path.GetFullPath(localDataRoot);
+        _materialRoot = string.IsNullOrWhiteSpace(materialRoot)
+            ? string.Empty
+            : Path.GetFullPath(materialRoot);
+        _externalRootStore = externalRootStore;
+        _materialOperationsAvailable = materialOperationsAvailable;
+        _externalRootPath = _materialRoot;
+        _status = materialOperationsAvailable
+            ? "Select the Dark Souls Remastered installation to begin."
+            : "EXTERNAL_ROOT_NOT_SELECTED: select and save an external material root, then restart the launcher.";
         VerifyCommand = new AsyncRelayCommand(
             _ => VerifyAsync(),
             _ => CanMutate());
@@ -40,7 +53,10 @@ public sealed class MainWindowViewModel : ObservableObject
             _ => CanMutate());
         PrepareSaveCommand = new AsyncRelayCommand(
             _ => PrepareSaveAsync(),
-            _ => !IsBusy);
+            _ => CanPrepareSave());
+        SaveExternalRootCommand = new AsyncRelayCommand(
+            _ => SaveExternalRootAsync(),
+            _ => !IsBusy && _externalRootStore is not null);
     }
 
     public string GamePath
@@ -49,6 +65,18 @@ public sealed class MainWindowViewModel : ObservableObject
         set
         {
             if (SetProperty(ref _gamePath, value))
+            {
+                RaiseCommandStates();
+            }
+        }
+    }
+
+    public string ExternalRootPath
+    {
+        get => _externalRootPath;
+        set
+        {
+            if (SetProperty(ref _externalRootPath, value))
             {
                 RaiseCommandStates();
             }
@@ -82,7 +110,9 @@ public sealed class MainWindowViewModel : ObservableObject
 
     public bool CanLaunch => false;
 
-    public bool AreSaveControlsEnabled => !IsBusy;
+    public bool CanInitialize => CanMutate();
+
+    public bool AreSaveControlsEnabled => CanPrepareSave();
 
     public ObservableCollection<SaveProfileCandidate> SaveProfiles { get; } = [];
 
@@ -98,7 +128,7 @@ public sealed class MainWindowViewModel : ObservableObject
                 DedicatedSavePath = value is null
                     ? string.Empty
                     : Path.Combine(
-                        _localDataRoot,
+                        _materialRoot,
                         "saves",
                         value.SteamId,
                         "DRAKS0005.rmm");
@@ -130,12 +160,14 @@ public sealed class MainWindowViewModel : ObservableObject
 
     public AsyncRelayCommand PrepareSaveCommand { get; }
 
+    public AsyncRelayCommand SaveExternalRootCommand { get; }
+
     private async Task VerifyAsync()
     {
         IsBusy = true;
         try
         {
-            var result = await _service.VerifyAsync(GamePath, CancellationToken.None);
+            var result = await Service.VerifyAsync(GamePath, CancellationToken.None);
             Status = result.IsValid
                 ? "Installation verified. The original game and installed Overhaul remain read-only."
                 : $"Installation verification failed: {string.Join("; ", result.Errors)}";
@@ -157,7 +189,7 @@ public sealed class MainWindowViewModel : ObservableObject
         ProgressPercent = 0;
         try
         {
-            var verification = await _service.VerifyAsync(GamePath, CancellationToken.None);
+            var verification = await Service.VerifyAsync(GamePath, CancellationToken.None);
             if (!verification.IsValid)
             {
                 Status = $"Installation verification failed: {string.Join("; ", verification.Errors)}";
@@ -171,11 +203,11 @@ public sealed class MainWindowViewModel : ObservableObject
                     : Math.Clamp(update.CopiedBytes * 100d / update.TotalBytes, 0, 100);
                 Status = $"Creating external runtime: {update.RelativePath}";
             });
-            await _service.InitializeRuntimeAsync(
+            await Service.InitializeRuntimeAsync(
                 GamePath,
                 progress,
                 CancellationToken.None);
-            var readiness = await _service.GetReadinessAsync(CancellationToken.None);
+            var readiness = await Service.GetReadinessAsync(CancellationToken.None);
             if (!readiness.IsReady)
             {
                 throw new IOException(string.Join("; ", readiness.Errors));
@@ -202,7 +234,7 @@ public sealed class MainWindowViewModel : ObservableObject
         {
             if (!_saveProfilesDiscovered)
             {
-                var profiles = await _service.DiscoverSaveProfilesAsync(CancellationToken.None);
+                var profiles = await Service.DiscoverSaveProfilesAsync(CancellationToken.None);
                 foreach (var profile in profiles)
                 {
                     SaveProfiles.Add(profile);
@@ -231,7 +263,7 @@ public sealed class MainWindowViewModel : ObservableObject
             var firstCopyConfirmed = FirstCopyConfirmed;
             var selectedSaveSourcePath = SelectedSaveSourcePath;
             var dedicatedSavePath = DedicatedSavePath;
-            var result = await _service.PrepareDedicatedSaveAsync(
+            var result = await Service.PrepareDedicatedSaveAsync(
                 selection.SteamId,
                 firstCopyConfirmed,
                 CancellationToken.None);
@@ -259,13 +291,40 @@ public sealed class MainWindowViewModel : ObservableObject
         }
     }
 
-    private bool CanMutate() => !IsBusy && !string.IsNullOrWhiteSpace(GamePath);
+    private async Task SaveExternalRootAsync()
+    {
+        IsBusy = true;
+        try
+        {
+            var store = _externalRootStore ?? throw new InvalidOperationException(
+                "External-root selection is unavailable.");
+            await store.WriteAsync(ExternalRootPath, GamePath, CancellationToken.None);
+            Status = "External root saved. Restart the launcher before material operations use the new root.";
+        }
+        catch (Exception exception)
+        {
+            await LogWithoutMaskingAsync(exception);
+            Status = $"External-root selection failed: {exception.Message}";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private bool CanMutate() => CanPrepareSave()
+        && !string.IsNullOrWhiteSpace(GamePath);
+
+    private bool CanPrepareSave() => _materialOperationsAvailable
+        && !IsBusy
+        && _service is not null;
 
     private void RaiseCommandStates()
     {
         VerifyCommand.RaiseCanExecuteChanged();
         InitializeCommand.RaiseCanExecuteChanged();
         PrepareSaveCommand.RaiseCanExecuteChanged();
+        SaveExternalRootCommand.RaiseCanExecuteChanged();
     }
 
     private async Task LogWithoutMaskingAsync(Exception exception)
@@ -279,6 +338,9 @@ public sealed class MainWindowViewModel : ObservableObject
             // A logging failure must not hide the operation's original error.
         }
     }
+
+    private ILauncherService Service => _service ?? throw new InvalidOperationException(
+        "EXTERNAL_ROOT_NOT_SELECTED");
 
     private sealed class InlineProgress<T>(Action<T> report) : IProgress<T>
     {

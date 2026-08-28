@@ -8,52 +8,41 @@ namespace DSRRandomizer.Launcher.Services;
 
 public sealed class LauncherService : ILauncherService
 {
-    private readonly string _localDataRoot;
+    private readonly string _externalRoot;
     private readonly IPathCanonicalizer _canonicalizer;
     private readonly ISaveProfileLocator _saveProfileLocator;
     private readonly IFileAccess _fileAccess;
 
-    public LauncherService(string localDataRoot)
-        : this(localDataRoot, new WindowsKnownFolderProvider())
+    public LauncherService(string externalRoot)
+        : this(externalRoot, new WindowsKnownFolderProvider())
     {
     }
 
     public LauncherService(
-        string localDataRoot,
+        string externalRoot,
         IKnownFolderProvider knownFolderProvider)
-        : this(localDataRoot, knownFolderProvider, new SystemFileAccess())
+        : this(externalRoot, knownFolderProvider, new SystemFileAccess())
     {
     }
 
     public LauncherService(
-        string localDataRoot,
+        string externalRoot,
         IKnownFolderProvider knownFolderProvider,
         IFileAccess fileAccess)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(localDataRoot);
+        ArgumentException.ThrowIfNullOrWhiteSpace(externalRoot);
         ArgumentNullException.ThrowIfNull(knownFolderProvider);
         ArgumentNullException.ThrowIfNull(fileAccess);
-        _localDataRoot = Path.GetFullPath(localDataRoot);
+        _externalRoot = Path.GetFullPath(externalRoot);
         _canonicalizer = new WindowsPathCanonicalizer();
         _saveProfileLocator = new WindowsSaveProfileLocator(knownFolderProvider);
         _fileAccess = fileAccess;
     }
 
-    public static LauncherService CreateDefault()
-    {
-        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        if (string.IsNullOrWhiteSpace(localAppData))
-        {
-            throw new InvalidOperationException("The Windows local application-data path is unavailable.");
-        }
-
-        return new LauncherService(Path.Combine(localAppData, "DSR-Randomizer"));
-    }
-
     public Task<VerificationResult> VerifyAsync(
         string gamePath,
         CancellationToken cancellationToken) =>
-        new GameInstallationVerifier(_canonicalizer, _localDataRoot)
+        new GameInstallationVerifier(_canonicalizer, _externalRoot)
             .VerifyAsync(gamePath, cancellationToken);
 
     public async Task<RuntimeManifest> InitializeRuntimeAsync(
@@ -70,9 +59,9 @@ public sealed class LauncherService : ILauncherService
 
         var boundary = WriteBoundary.Create(
             verification.CanonicalInstallationPath,
-            _localDataRoot,
+            _externalRoot,
             _canonicalizer);
-        var layout = LocalDataLayout.Create(_localDataRoot, boundary);
+        var layout = LocalDataLayout.Create(_externalRoot, boundary);
         var pointerStore = new RuntimePointerStore(layout, boundary);
         var hashes = new FileHashService();
         var builder = new RuntimeBuilder(
@@ -97,7 +86,7 @@ public sealed class LauncherService : ILauncherService
         CancellationToken cancellationToken)
     {
         var selectedInstallation = await InstallationSelectionStore
-            .CreateReadOnly(_localDataRoot, _canonicalizer)
+            .CreateReadOnly(_externalRoot, _canonicalizer)
             .ReadAsync(cancellationToken);
         if (selectedInstallation is null)
         {
@@ -109,9 +98,9 @@ public sealed class LauncherService : ILauncherService
 
         var boundary = WriteBoundary.Create(
             selectedInstallation,
-            _localDataRoot,
+            _externalRoot,
             _canonicalizer);
-        var layout = LocalDataLayout.Create(_localDataRoot, boundary);
+        var layout = LocalDataLayout.Create(_externalRoot, boundary);
         var pointerStore = new RuntimePointerStore(layout, boundary);
         return await new RuntimeReadinessService(
                 layout,
@@ -176,7 +165,7 @@ public sealed class LauncherService : ILauncherService
         try
         {
             destination = SavePaths.GetDedicatedSave(
-                _localDataRoot,
+                _externalRoot,
                 steamId,
                 components.Boundary);
         }
@@ -226,16 +215,16 @@ public sealed class LauncherService : ILauncherService
         CancellationToken cancellationToken)
     {
         var selectedInstallation = await InstallationSelectionStore
-            .CreateReadOnly(_localDataRoot, _canonicalizer)
+            .CreateReadOnly(_externalRoot, _canonicalizer)
             .ReadAsync(cancellationToken);
         var protectedSource = selectedInstallation ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
             "DSR-Randomizer-Protected-Source");
         var boundary = WriteBoundary.Create(
             protectedSource,
-            _localDataRoot,
+            _externalRoot,
             _canonicalizer);
-        var layout = LocalDataLayout.Create(_localDataRoot, boundary);
+        var layout = LocalDataLayout.Create(_externalRoot, boundary);
         return new SaveComponents(
             boundary,
             layout,

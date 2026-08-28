@@ -9,6 +9,25 @@ namespace DSRRandomizer.Launcher.Tests;
 public sealed class LauncherApplicationTests
 {
     [Fact]
+    public async Task RunAsync_MaterialOperationWithoutExternalRootReturnsStableSelectionError()
+    {
+        var output = new StringWriter();
+        var application = new LauncherApplication(
+            service: null,
+            output,
+            new StringWriter(),
+            externalRootSelected: false);
+
+        var exitCode = await application.RunAsync(new[] { "--status" }, CancellationToken.None);
+
+        Assert.Equal(8, exitCode);
+        using var document = JsonDocument.Parse(output.ToString());
+        Assert.Equal(
+            "EXTERNAL_ROOT_NOT_SELECTED",
+            document.RootElement.GetProperty("errorCode").GetString());
+    }
+
+    [Fact]
     public async Task RunAsync_LaunchArgumentIsRejected()
     {
         var output = new StringWriter();
