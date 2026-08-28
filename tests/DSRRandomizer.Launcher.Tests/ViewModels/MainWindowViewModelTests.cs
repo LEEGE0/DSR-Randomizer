@@ -34,6 +34,33 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
+    public async Task SaveExternalRootCommand_ChangedRootDisablesAllMaterialCommandsUntilRestart()
+    {
+        using var fixture = ExternalRootFixture.Create();
+        var newRoot = Path.Combine(fixture.Container, "different-external");
+        Directory.CreateDirectory(newRoot);
+        var viewModel = new MainWindowViewModel(
+            new FakeLauncherService(),
+            new RecordingLogger(),
+            fixture.ExternalRoot,
+            fixture.Store)
+        {
+            GamePath = @"C:\NotTheSource",
+            ExternalRootPath = newRoot
+        };
+
+        Assert.True(viewModel.VerifyCommand.CanExecute(null));
+        Assert.True(viewModel.InitializeCommand.CanExecute(null));
+        Assert.True(viewModel.PrepareSaveCommand.CanExecute(null));
+        await viewModel.SaveExternalRootCommand.ExecuteAsync(null);
+
+        Assert.False(viewModel.VerifyCommand.CanExecute(null));
+        Assert.False(viewModel.InitializeCommand.CanExecute(null));
+        Assert.False(viewModel.PrepareSaveCommand.CanExecute(null));
+        Assert.Contains("restart", viewModel.Status, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task InitializeCommand_NativeFoundationStillKeepsPublicLaunchLocked()
     {
         var service = new FakeLauncherService();

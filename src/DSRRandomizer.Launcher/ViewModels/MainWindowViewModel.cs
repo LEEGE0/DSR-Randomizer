@@ -14,6 +14,7 @@ public sealed class MainWindowViewModel : ObservableObject
     private readonly string _materialRoot;
     private readonly ExternalRootSelectionStore? _externalRootStore;
     private readonly bool _materialOperationsAvailable;
+    private bool _restartRequired;
     private string _gamePath = string.Empty;
     private string _externalRootPath = string.Empty;
     private string _status;
@@ -299,7 +300,14 @@ public sealed class MainWindowViewModel : ObservableObject
             var store = _externalRootStore ?? throw new InvalidOperationException(
                 "External-root selection is unavailable.");
             await store.WriteAsync(ExternalRootPath, GamePath, CancellationToken.None);
-            Status = "External root saved. Restart the launcher before material operations use the new root.";
+            var savedRoot = await store.ReadAsync(CancellationToken.None);
+            _restartRequired = !string.Equals(
+                _materialRoot,
+                savedRoot,
+                StringComparison.OrdinalIgnoreCase);
+            Status = _restartRequired
+                ? "External root saved. Restart the launcher before material operations use the new root."
+                : "External root is already selected for this launcher session.";
         }
         catch (Exception exception)
         {
@@ -317,6 +325,7 @@ public sealed class MainWindowViewModel : ObservableObject
 
     private bool CanPrepareSave() => _materialOperationsAvailable
         && !IsBusy
+        && !_restartRequired
         && _service is not null;
 
     private void RaiseCommandStates()

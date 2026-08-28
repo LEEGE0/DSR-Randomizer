@@ -39,6 +39,18 @@ public sealed class ExternalRootSelectionStoreTests
     }
 
     [Fact]
+    public async Task WriteAsync_RejectsExternalRootContainingSelectedSourceInstallation()
+    {
+        using var fixture = SelectionFixture.Create();
+        var source = Path.Combine(fixture.ExternalRoot, "steam-source");
+        Directory.CreateDirectory(source);
+        var store = new ExternalRootSelectionStore(fixture.LocalRoot, source);
+
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+            store.WriteAsync(fixture.ExternalRoot, CancellationToken.None));
+    }
+
+    [Fact]
     public async Task WriteAsync_RejectsSourceInstallationDescendantWithoutPriorSelection()
     {
         using var fixture = SelectionFixture.Create();
@@ -72,6 +84,26 @@ public sealed class ExternalRootSelectionStoreTests
         {
             await Assert.ThrowsAsync<IOException>(() =>
                 fixture.Store.WriteAsync(link, CancellationToken.None));
+        }
+        finally
+        {
+            DeleteJunction(link);
+        }
+    }
+
+    [Fact]
+    public async Task WriteAsync_RejectsIntermediateReparseSegment()
+    {
+        using var fixture = SelectionFixture.Create();
+        var target = Path.Combine(fixture.Container, "target-parent");
+        var link = Path.Combine(fixture.Container, "linked-parent");
+        var leaf = Path.Combine(link, "leaf");
+        Directory.CreateDirectory(Path.Combine(target, "leaf"));
+        CreateJunction(link, target);
+        try
+        {
+            await Assert.ThrowsAsync<IOException>(() =>
+                fixture.Store.WriteAsync(leaf, CancellationToken.None));
         }
         finally
         {

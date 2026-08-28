@@ -51,16 +51,6 @@ public sealed class LauncherApplication
             return prohibited.Count == 0 ? 0 : 6;
         }
 
-        if (args is ["--launch"])
-        {
-            await WriteJsonAsync(new
-            {
-                success = false,
-                error = "Game launch is unsupported until dedicated-save and online-blocking safety is installed."
-            });
-            return 2;
-        }
-
         if (!_externalRootSelected)
         {
             await WriteJsonAsync(new
@@ -70,6 +60,16 @@ public sealed class LauncherApplication
                 error = "Select an external material root with --set-root before running this command."
             });
             return 8;
+        }
+
+        if (args is ["--launch"])
+        {
+            await WriteJsonAsync(new
+            {
+                success = false,
+                error = "Game launch is unsupported until dedicated-save and online-blocking safety is installed."
+            });
+            return 2;
         }
 
         if (args is ["--prepare-save", var steamId])

@@ -28,6 +28,47 @@ public sealed class LauncherApplicationTests
     }
 
     [Fact]
+    public async Task RunAsync_LaunchWithoutExternalRootReturnsStableSelectionError()
+    {
+        var output = new StringWriter();
+        var application = new LauncherApplication(
+            service: null,
+            output,
+            new StringWriter(),
+            externalRootSelected: false);
+
+        var exitCode = await application.RunAsync(new[] { "--launch" }, CancellationToken.None);
+
+        Assert.Equal(8, exitCode);
+        using var document = JsonDocument.Parse(output.ToString());
+        Assert.Equal(
+            "EXTERNAL_ROOT_NOT_SELECTED",
+            document.RootElement.GetProperty("errorCode").GetString());
+    }
+
+    [Theory]
+    [InlineData("{malformed")]
+    [InlineData("{\"schemaVersion\":1,\"root\":\"C:\\\\missing-external-root\"}")]
+    public async Task RunWithLocalDataRoot_SetRootRepairsBrokenPreviousPointer(string previousPointer)
+    {
+        using var fixture = ProgramFixture.Create();
+        await File.WriteAllTextAsync(Path.Combine(fixture.LocalRoot, "external-root.json"), previousPointer);
+        var output = new StringWriter();
+
+        var exitCode = Program.RunWithLocalDataRoot(
+            new[] { "--set-root", fixture.ValidExternalRoot },
+            fixture.LocalRoot,
+            output,
+            new StringWriter());
+
+        Assert.Equal(0, exitCode);
+        Assert.Equal(
+            fixture.ValidExternalRoot,
+            await new DSRRandomizer.Launcher.Configuration.ExternalRootSelectionStore(fixture.LocalRoot)
+                .ReadAsync(CancellationToken.None));
+    }
+
+    [Fact]
     public async Task RunAsync_LaunchArgumentIsRejected()
     {
         var output = new StringWriter();
@@ -163,11 +204,19 @@ public sealed class LauncherApplicationTests
     }
 
     [Fact]
-    public void ProductLaunch_RemainsLockedAfterNativeFoundation()
+    public void ProductLaunch_WithoutSelectedExternalRootReturnsSelectionError()
     {
-        var exitCode = Program.Main(new[] { "--launch" });
+        using var fixture = ProgramFixture.Create();
+        var output = new StringWriter();
 
-        Assert.Equal(2, exitCode);
+        var exitCode = Program.RunWithLocalDataRoot(
+            new[] { "--launch" },
+            fixture.LocalRoot,
+            output,
+            new StringWriter());
+
+        Assert.Equal(8, exitCode);
+        Assert.Contains("EXTERNAL_ROOT_NOT_SELECTED", output.ToString(), StringComparison.Ordinal);
     }
 
     private sealed class FakeLauncherService : ILauncherService
@@ -218,5 +267,32 @@ public sealed class LauncherApplicationTests
 
             return Task.FromResult(PrepareResult);
         }
+    }
+
+    private sealed class ProgramFixture : IDisposable
+    {
+        private ProgramFixture(string container)
+        {
+            Container = container;
+            LocalRoot = Path.Combine(container, "local");
+            ValidExternalRoot = Path.Combine(container, "external");
+            Directory.CreateDirectory(LocalRoot);
+            Directory.CreateDirectory(ValidExternalRoot);
+        }
+
+        public string Container { get; }
+
+        public string LocalRoot { get; }
+
+        public string ValidExternalRoot { get; }
+
+        public static ProgramFixture Create()
+        {
+            var container = Path.Combine(Path.GetTempPath(), $"dsr-program-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(container);
+            return new ProgramFixture(container);
+        }
+
+        public void Dispose() => Directory.Delete(Container, recursive: true);
     }
 }

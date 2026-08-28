@@ -145,6 +145,7 @@ public sealed class ExternalRootSelectionStore
             throw new ArgumentException("The external root cannot be a filesystem root.", nameof(suppliedRoot));
         }
 
+        EnsureNoReparsePathSegments(fullPath);
         if ((File.GetAttributes(fullPath) & FileAttributes.ReparsePoint) != 0)
         {
             throw new IOException($"The external root cannot be a reparse point: {fullPath}");
@@ -155,13 +156,33 @@ public sealed class ExternalRootSelectionStore
         var protectedSource = string.IsNullOrWhiteSpace(sourceInstallationRoot)
             ? _sourceInstallationRoot
             : _canonicalizer.Canonicalize(sourceInstallationRoot);
-        if (protectedSource is not null && IsAtOrBelow(canonicalRoot, protectedSource))
+        if (protectedSource is not null
+            && (IsAtOrBelow(canonicalRoot, protectedSource)
+                || IsAtOrBelow(protectedSource, canonicalRoot)))
         {
             throw new UnauthorizedAccessException(
                 "The external root cannot be the source installation or one of its descendants.");
         }
 
         return canonicalRoot;
+    }
+
+    private static void EnsureNoReparsePathSegments(string path)
+    {
+        var root = Path.GetPathRoot(path)
+            ?? throw new ArgumentException("The external root must have a filesystem root.", nameof(path));
+        var current = root;
+        var relative = Path.GetRelativePath(root, path);
+        foreach (var segment in relative.Split(
+                     [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, segment);
+            if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new IOException($"The external root cannot contain a reparse point: {current}");
+            }
+        }
     }
 
     private static void EnsureNotSourceInstallationDescendant(string externalRoot)
