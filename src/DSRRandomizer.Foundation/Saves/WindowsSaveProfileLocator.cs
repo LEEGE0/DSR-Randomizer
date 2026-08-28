@@ -54,6 +54,6 @@ public sealed partial class WindowsSaveProfileLocator(IKnownFolderProvider known
         return Task.FromResult<IReadOnlyList<SaveProfileCandidate>>(sortedCandidates);
     }
 
-    [GeneratedRegex("^[0-9]{16,20}$", RegexOptions.CultureInvariant)]
+    [GeneratedRegex("^[0-9]{1,20}$", RegexOptions.CultureInvariant)]
     private static partial Regex SteamIdPattern();
 }

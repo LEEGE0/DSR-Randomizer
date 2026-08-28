@@ -4,7 +4,7 @@ public sealed class ReleaseContentGuard
 {
     private static readonly string[] RequiredPaths =
     [
-        "DSRRandomizer.Launcher.exe",
+        "DSRForMod.Launcher.exe",
         "README.md",
         "LICENSE",
         "CHANGELOG.md",
@@ -17,8 +17,8 @@ public sealed class ReleaseContentGuard
     private static readonly HashSet<string> AllowedPaths = new(
         new[]
         {
-            "DSRRandomizer.Launcher.exe",
-            "DSRRandomizer.Launcher.pdb",
+            "DSRForMod.Launcher.exe",
+            "DSRForMod.Launcher.pdb",
             "README.md",
             "LICENSE",
             "THIRD_PARTY_NOTICES.md",

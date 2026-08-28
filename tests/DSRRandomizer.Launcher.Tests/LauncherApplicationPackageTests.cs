@@ -18,7 +18,7 @@ public sealed class LauncherApplicationPackageTests : IDisposable
     {
         Directory.CreateDirectory(_packageRoot);
         await File.WriteAllTextAsync(
-            Path.Combine(_packageRoot, "DSRRandomizer.Launcher.exe"),
+            Path.Combine(_packageRoot, "DSRForMod.Launcher.exe"),
             "launcher");
         await File.WriteAllTextAsync(
             Path.Combine(_packageRoot, "DarkSoulsRemastered.exe"),
@@ -53,7 +53,7 @@ public sealed class LauncherApplicationPackageTests : IDisposable
     }
 
     [Theory]
-    [InlineData("DSRRandomizer.Launcher.exe")]
+    [InlineData("DSRForMod.Launcher.exe")]
     [InlineData("README.md")]
     [InlineData("LICENSE")]
     [InlineData("CHANGELOG.md")]
@@ -186,7 +186,7 @@ public sealed class LauncherApplicationPackageTests : IDisposable
         Directory.CreateDirectory(_packageRoot);
         foreach (var path in new[]
                  {
-                     "DSRRandomizer.Launcher.exe",
+                     "DSRForMod.Launcher.exe",
                      "README.md",
                      "LICENSE",
                      "THIRD_PARTY_NOTICES.md",

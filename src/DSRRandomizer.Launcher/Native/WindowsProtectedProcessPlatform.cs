@@ -96,7 +96,7 @@ public sealed class WindowsProtectedProcessPlatform : IProtectedProcessPlatform
         return job;
     }
 
-    private static string CreateMinimalEnvironmentBlock()
+    internal static string CreateMinimalEnvironmentBlock()
     {
         var allowedNames = new[]
         {
@@ -117,8 +117,13 @@ public sealed class WindowsProtectedProcessPlatform : IProtectedProcessPlatform
         var entries = allowedNames
             .Select(name => (Name: name, Value: Environment.GetEnvironmentVariable(name)))
             .Where(entry => !string.IsNullOrEmpty(entry.Value))
-            .OrderBy(entry => entry.Name, StringComparer.OrdinalIgnoreCase)
-            .Select(entry => $"{entry.Name}={entry.Value}");
+            .Select(entry => $"{entry.Name}={entry.Value}")
+            .Concat(
+            [
+                "SteamAppId=570940",
+                "SteamGameId=570940"
+            ])
+            .OrderBy(entry => entry, StringComparer.OrdinalIgnoreCase);
         return string.Join('\0', entries) + "\0";
     }
 

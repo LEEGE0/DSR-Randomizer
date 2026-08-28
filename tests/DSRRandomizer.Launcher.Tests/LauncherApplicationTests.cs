@@ -93,6 +93,26 @@ public sealed class LauncherApplicationTests
     }
 
     [Fact]
+    public async Task RunAsync_LaunchAcceptsNineDigitNumericSaveFolder()
+    {
+        var service = new FakeLauncherService
+        {
+            LaunchResult = new SafetyLaunchResult(true, string.Empty, 0)
+        };
+        var application = new LauncherApplication(
+            service,
+            new StringWriter(),
+            new StringWriter());
+
+        var exitCode = await application.RunAsync(
+            new[] { "--launch", "123456789" },
+            CancellationToken.None);
+
+        Assert.Equal(0, exitCode);
+        Assert.Equal("123456789", Assert.Single(service.LaunchCalls));
+    }
+
+    [Fact]
     public async Task RunAsync_StatusReturnsReadinessFailureCode()
     {
         var application = new LauncherApplication(

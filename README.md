@@ -1,6 +1,6 @@
-# DSR Randomizer
+# DSR for MOD
 
-DSR Randomizer provides an isolated Dark Souls Remastered mod runtime. Mods are installed or removed manually as folders in the copied runtime; this release does not generate randomizer content or maintain a mod enable/disable database.
+DSR for MOD provides an isolated Dark Souls Remastered mod runtime. Mods are installed or removed manually as folders in the copied runtime; this release does not generate randomizer content or maintain a mod enable/disable database.
 
 The current design is documented in [`docs/superpowers/specs/2026-08-28-simplified-offline-mod-runtime-design.md`](docs/superpowers/specs/2026-08-28-simplified-offline-mod-runtime-design.md).
 
@@ -21,13 +21,13 @@ The modded copy uses only `<external-root>\saves\<SteamID>\DRAKS0005.rmm`. A val
 Commands:
 
 ```text
-DSRRandomizer.Launcher.exe --set-root <external-root>
-DSRRandomizer.Launcher.exe --verify <game-path>
-DSRRandomizer.Launcher.exe --initialize-runtime <game-path>
-DSRRandomizer.Launcher.exe --prepare-save <SteamID>
-DSRRandomizer.Launcher.exe --launch <SteamID>
-DSRRandomizer.Launcher.exe --status
-DSRRandomizer.Launcher.exe --validate-package <directory>
+DSRForMod.Launcher.exe --set-root <external-root>
+DSRForMod.Launcher.exe --verify <game-path>
+DSRForMod.Launcher.exe --initialize-runtime <game-path>
+DSRForMod.Launcher.exe --prepare-save <SteamID>
+DSRForMod.Launcher.exe --launch <SteamID>
+DSRForMod.Launcher.exe --status
+DSRForMod.Launcher.exe --validate-package <directory>
 ```
 
 The graphical launcher exposes only the copied mod runtime launch path; it never launches the source installation or Overhaul. Steam Offline Mode is a user-managed prerequisite, not a network-isolation guarantee supplied by the launcher.
@@ -36,6 +36,6 @@ The graphical launcher exposes only the copied mod runtime launch path; it never
 
 SPDX-License-Identifier: GPL-3.0-only
 
-Copyright (C) 2026 DSR Randomizer contributors.
+Copyright (C) 2026 DSR for MOD contributors.
 
 Dark Souls and Dark Souls Remastered are trademarks of their respective owners. This project does not include or redistribute game executables, assets, saves, credentials, or locally extracted game data. See [`LICENSE`](LICENSE) and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

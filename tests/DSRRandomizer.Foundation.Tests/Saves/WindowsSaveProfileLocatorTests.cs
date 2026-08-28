@@ -29,6 +29,17 @@ public sealed class WindowsSaveProfileLocatorTests : IDisposable
     }
 
     [Fact]
+    public async Task DiscoverAsync_ReturnsNineDigitNumericSaveFolder()
+    {
+        File("123456789/DRAKS0005.sl2");
+
+        var result = await Locator.DiscoverAsync(default);
+
+        var candidate = Assert.Single(result);
+        Assert.Equal("123456789", candidate.SteamId);
+    }
+
+    [Fact]
     public async Task DiscoverAsync_ReturnsEmptyListWhenNoExactNormalSaveExists()
     {
         File("12345678901234567/DRAKS0005.sl2.overhaul.sl2");

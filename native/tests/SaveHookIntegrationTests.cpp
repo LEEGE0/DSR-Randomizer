@@ -308,6 +308,7 @@ SaveHookConfiguration HookConfigurationFor(const fs::path& root) {
         (root / L"real-normal").native(),
         (root / L"external").native(),
         (root / L"external" / L"DRAKS0005.rmm").native(),
+        true,
         false,
     };
 }
@@ -373,7 +374,7 @@ int VerifyHookInstallRollback(const fs::path& root) {
             != SaveHookInstallStatus::InstallFailed
         || DSRRandomizer::Save::SaveHooksAreInstalled()
         || failedDisable.EnabledCount() != 3
-        || failedDisable.CreatedCount() != 8) {
+        || failedDisable.CreatedCount() != 14) {
         return Fail("partial enable plus disable failure was not retained fail-closed");
     }
     const auto disableFailureState =
@@ -443,8 +444,8 @@ int VerifyHookInstallRollback(const fs::path& root) {
         || DSRRandomizer::Save::UninstallSaveHooks()
             != SaveHookCleanupStatus::Incomplete
         || DSRRandomizer::Save::SaveHooksAreInstalled()
-        || teardownDisable.EnabledCount() != 8
-        || teardownDisable.CreatedCount() != 8) {
+        || teardownDisable.EnabledCount() != 14
+        || teardownDisable.CreatedCount() != 14) {
         return Fail("ready hook cleanup did not retain state after disable failure");
     }
     const auto teardownDisableState =
@@ -670,6 +671,7 @@ int VerifyInspectUseSwapIsPinned(const fs::path& root) {
         realRoot.native(),
         externalRoot.native(),
         dedicatedRmm.native(),
+        true,
         false,
     };
     if (DSRRandomizer::Save::InstallSaveHooks(configuration)

@@ -36,6 +36,7 @@ struct SaveHookConfiguration {
     std::wstring realSaveRoot;
     std::wstring externalSaveRoot;
     std::wstring dedicatedRmm;
+    bool protectFileIo;
     bool diagnosticMode;
 };
 

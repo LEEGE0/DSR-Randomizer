@@ -28,8 +28,8 @@ public sealed class ReleaseContentGuardTests
     {
         var paths = new[]
         {
-            "DSRRandomizer.Launcher.exe",
-            "DSRRandomizer.Launcher.pdb",
+            "DSRForMod.Launcher.exe",
+            "DSRForMod.Launcher.pdb",
             "README.md",
             "LICENSE",
             "THIRD_PARTY_NOTICES.md",

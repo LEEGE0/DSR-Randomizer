@@ -44,15 +44,15 @@ public sealed class RemoteDllInjectorIntegrationTests
     }
 
     [Theory]
-    [InlineData(0x7UL, true)]
-    [InlineData(0x6UL, false)]
-    [InlineData(0xFUL, false)]
-    [InlineData(0x10000000007UL, false)]
-    public void DedicatedSaveProtection_RequiresExactThreeBitBitmap(
+    [InlineData(0x3UL, true)]
+    [InlineData(0x2UL, false)]
+    [InlineData(0x7UL, false)]
+    [InlineData(0x10000000003UL, false)]
+    public void DedicatedSaveProtection_RequiresExactKnownFolderBitmap(
         ulong flags,
         bool expected)
     {
-        Assert.Equal(0x7UL, DedicatedSaveProtection.RequiredFlags);
+        Assert.Equal(0x3UL, DedicatedSaveProtection.RequiredFlags);
         Assert.Equal(expected, DedicatedSaveProtection.IsExact(flags));
     }
 
@@ -80,9 +80,9 @@ public sealed class RemoteDllInjectorIntegrationTests
     }
 
     [Theory]
-    [InlineData(0x6UL)]
-    [InlineData(0xFUL)]
-    [InlineData(0x10000000007UL)]
+    [InlineData(0x2UL)]
+    [InlineData(0x7UL)]
+    [InlineData(0x10000000003UL)]
     public async Task CompleteOneShotAsync_RejectsNonExactDedicatedSaveFlags(
         ulong activeFlags)
     {
@@ -142,6 +142,35 @@ public sealed class RemoteDllInjectorIntegrationTests
     }
 
     [Fact]
+    public void CreateInitBlock_KnownFolderOnlyMarshalsOnlyVirtualDocuments()
+    {
+        var configuration = GuardConfiguration.Create(
+            @"C:\fixture\DSRRandomizer.Runtime.dll",
+            ProtocolVersion: 2,
+            RequiredFlags: DedicatedSaveProtection.RequiredFlags,
+            DiagnosticMode: false) with
+        {
+            SavePaths = new GuardSavePathConfiguration(
+                @"C:\fixture\virtual-documents",
+                @"C:\fixture\virtual-documents\NBGI\DARK SOULS REMASTERED\12345678901234567\DRAKS0005.sl2",
+                @"C:\fixture\real-normal",
+                @"C:\fixture\external",
+                @"C:\fixture\external\DRAKS0005.rmm")
+        };
+
+        var block = RemoteDllInjector.CreateInitBlock(
+            configuration,
+            @"\\.\pipe\fixture");
+
+        Assert.Equal(3UL, BinaryPrimitives.ReadUInt64LittleEndian(block.AsSpan(8)));
+        Assert.Equal(configuration.SavePaths.VirtualDocuments, ReadFixedWide(block, 308));
+        Assert.Equal(string.Empty, ReadFixedWide(block, 1332));
+        Assert.Equal(string.Empty, ReadFixedWide(block, 2356));
+        Assert.Equal(string.Empty, ReadFixedWide(block, 3380));
+        Assert.Equal(string.Empty, ReadFixedWide(block, 4404));
+    }
+
+    [Fact]
     public void CreateInitBlock_MarshalsExactWinsockEndpointsInProtocolV2Tail()
     {
         var configuration = GuardConfiguration.Create(
@@ -182,7 +211,7 @@ public sealed class RemoteDllInjectorIntegrationTests
     }
 
     [Fact]
-    public void CreateInitBlock_RequiresBothSaveFlagsAndCanonicalConfiguration()
+    public void CreateInitBlock_RequiresPathsForKnownFolderAndRejectsFileIoWithoutKnownFolder()
     {
         var missingPaths = GuardConfiguration.Create(
             @"C:\fixture\DSRRandomizer.Runtime.dll",

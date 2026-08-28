@@ -74,7 +74,7 @@ Assert-StrictDescendant -Candidate $stagingRoot -Root $outputRoot
 Assert-StrictDescendant -Candidate $zipPath -Root $outputRoot
 Assert-StrictDescendant -Candidate $checksumPath -Root $outputRoot
 
-$publishedLauncher = Join-Path $publishRoot 'DSRRandomizer.Launcher.exe'
+$publishedLauncher = Join-Path $publishRoot 'DSRForMod.Launcher.exe'
 if (-not (Test-Path -LiteralPath $publishedLauncher -PathType Leaf)) {
     throw "Published launcher is missing: $publishedLauncher"
 }
@@ -86,7 +86,7 @@ if (Test-Path -LiteralPath $stagingRoot) {
 
 try {
     Copy-Item -LiteralPath $publishedLauncher -Destination $stagingRoot
-    $publishedPdb = Join-Path $publishRoot 'DSRRandomizer.Launcher.pdb'
+    $publishedPdb = Join-Path $publishRoot 'DSRForMod.Launcher.pdb'
     if (Test-Path -LiteralPath $publishedPdb -PathType Leaf) {
         Copy-Item -LiteralPath $publishedPdb -Destination $stagingRoot
     }
@@ -116,7 +116,7 @@ try {
 
     $dependencyManifest = Get-ChildItem `
         -LiteralPath (Join-Path $repositoryRoot 'src/DSRRandomizer.Launcher/obj/Release') `
-        -Filter 'DSRRandomizer.Launcher.deps.json' `
+        -Filter 'DSRForMod.Launcher.deps.json' `
         -File `
         -Recurse |
         Sort-Object LastWriteTimeUtc -Descending |
@@ -148,7 +148,7 @@ try {
         ($noticeParts -join "`n"),
         [Text.UTF8Encoding]::new($false))
 
-    $stagedLauncher = Join-Path $stagingRoot 'DSRRandomizer.Launcher.exe'
+    $stagedLauncher = Join-Path $stagingRoot 'DSRForMod.Launcher.exe'
     Invoke-PackageValidator -Launcher $stagedLauncher -Directory $stagingRoot
 
     if (Test-Path -LiteralPath $zipPath) {

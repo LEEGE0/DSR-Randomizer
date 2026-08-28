@@ -28,6 +28,29 @@ public sealed class SaveSelectionStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task WriteAsync_PersistsNineDigitNumericSaveFolder()
+    {
+        const string steamId = "123456789";
+        var source = Path.Combine(
+            _container,
+            "documents",
+            "NBGI",
+            "DARK SOULS REMASTERED",
+            steamId,
+            "DRAKS0005.sl2");
+        var (layout, boundary, canonicalizer) = CreateExternalLayout();
+        Directory.CreateDirectory(Path.GetDirectoryName(source)!);
+        System.IO.File.WriteAllText(source, "fixture");
+        var store = new SaveSelectionStore(layout, boundary);
+
+        await store.WriteAsync(new SaveProfileCandidate(steamId, source), default);
+
+        Assert.Equal(
+            new SaveProfileCandidate(steamId, canonicalizer.Canonicalize(source)),
+            await store.ReadAsync(default));
+    }
+
+    [Fact]
     public async Task WriteAsync_DeniesPersistenceOutsideExternalDataRoot()
     {
         var source = Path.Combine(_container, "documents", "NBGI", "DARK SOULS REMASTERED", "12345678901234567", "DRAKS0005.sl2");

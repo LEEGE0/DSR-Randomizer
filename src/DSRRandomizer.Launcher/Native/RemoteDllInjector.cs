@@ -258,13 +258,14 @@ public sealed class RemoteDllInjector
         const ProtectionFlags saveMask =
             ProtectionFlags.SaveKnownFolder | ProtectionFlags.SaveFileIo;
         var requestedSaveFlags = (ProtectionFlags)configuration.RequiredFlags & saveMask;
-        if (requestedSaveFlags != ProtectionFlags.None && requestedSaveFlags != saveMask)
+        if ((requestedSaveFlags & ProtectionFlags.SaveFileIo) != 0
+            && (requestedSaveFlags & ProtectionFlags.SaveKnownFolder) == 0)
         {
             throw new ArgumentException(
-                "Known Folder and file-I/O save protections must be requested together.",
+                "Save file-I/O protection requires Known Folder protection.",
                 nameof(configuration));
         }
-        if (requestedSaveFlags == saveMask)
+        if ((requestedSaveFlags & ProtectionFlags.SaveKnownFolder) != 0)
         {
             if (configuration.SavePaths is null)
             {
@@ -278,10 +279,13 @@ public sealed class RemoteDllInjector
                 VirtualDocumentsOffset,
                 configuration.SavePaths.VirtualDocuments,
                 configuration);
+        }
+        if ((requestedSaveFlags & ProtectionFlags.SaveFileIo) != 0)
+        {
             WriteCanonicalPath(
                 block,
                 VirtualLogicalSaveOffset,
-                configuration.SavePaths.VirtualLogicalSave,
+                configuration.SavePaths!.VirtualLogicalSave,
                 configuration);
             WriteCanonicalPath(
                 block,
@@ -299,10 +303,11 @@ public sealed class RemoteDllInjector
                 configuration.SavePaths.DedicatedRmm,
                 configuration);
         }
-        else if (configuration.SavePaths is not null)
+        if (requestedSaveFlags == ProtectionFlags.None
+            && configuration.SavePaths is not null)
         {
             throw new ArgumentException(
-                "Save paths cannot be marshalled unless both save protections are requested.",
+                "Save paths cannot be marshalled unless save protection is requested.",
                 nameof(configuration));
         }
         WriteSocketEndpoints(block, configuration);

@@ -48,9 +48,10 @@ public sealed class InstallationSelectionStore
 
         await using var stream = File.OpenRead(path);
         var selection = await JsonSerializer.DeserializeAsync<InstallationSelection>(
-            stream,
-            JsonOptions,
-            cancellationToken);
+                stream,
+                JsonOptions,
+                cancellationToken)
+            .ConfigureAwait(false);
         return selection is null
             ? null
             : _canonicalizer.Canonicalize(selection.CanonicalInstallationPath);

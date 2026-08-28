@@ -2,6 +2,7 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
+    <AssemblyName>DSRForMod.Launcher</AssemblyName>
     <StartupObject>DSRRandomizer.Launcher.Program</StartupObject>
     <UseWPF>true</UseWPF>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>

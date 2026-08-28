@@ -26,21 +26,33 @@ namespace {
 using KnownFolderFunction = decltype(&SHGetKnownFolderPath);
 using LegacyFolderFunction = decltype(&SHGetFolderPathW);
 using CreateFileFunction = decltype(&CreateFileW);
+using CreateFileAnsiFunction = decltype(&CreateFileA);
 using DeleteFileFunction = decltype(&DeleteFileW);
+using DeleteFileAnsiFunction = decltype(&DeleteFileA);
 using MoveFileFunction = decltype(&MoveFileExW);
+using MoveFileSimpleFunction = decltype(&MoveFileW);
+using MoveFileAnsiFunction = decltype(&MoveFileA);
 using ReplaceFileFunction = decltype(&ReplaceFileW);
 using AttributesFunction = decltype(&GetFileAttributesExW);
+using AttributesSimpleFunction = decltype(&GetFileAttributesW);
 using FindFirstFunction = decltype(&FindFirstFileExW);
+using FindFirstSimpleFunction = decltype(&FindFirstFileW);
 
 struct HookTrampolines {
     KnownFolderFunction knownFolder = nullptr;
     LegacyFolderFunction legacyFolder = nullptr;
     CreateFileFunction createFile = nullptr;
+    CreateFileAnsiFunction createFileAnsi = nullptr;
     DeleteFileFunction deleteFile = nullptr;
+    DeleteFileAnsiFunction deleteFileAnsi = nullptr;
     MoveFileFunction moveFile = nullptr;
+    MoveFileSimpleFunction moveFileSimple = nullptr;
+    MoveFileAnsiFunction moveFileAnsi = nullptr;
     ReplaceFileFunction replaceFile = nullptr;
     AttributesFunction attributes = nullptr;
+    AttributesSimpleFunction attributesSimple = nullptr;
     FindFirstFunction findFirst = nullptr;
+    FindFirstSimpleFunction findFirstSimple = nullptr;
 };
 
 struct StableIdentity {
@@ -71,8 +83,8 @@ struct HookContext {
 struct HookLifecycle {
     HookPlatform* platform = nullptr;
     std::shared_ptr<HookContext> context;
-    std::array<void*, 8> targets{};
-    std::array<bool, 8> created{};
+    std::array<void*, 14> targets{};
+    std::array<bool, 14> created{};
     bool initialized = false;
     bool mayBeEnabled = false;
 };
@@ -132,6 +144,36 @@ bool StartsWithOrdinalIgnoreCase(
     const std::wstring_view prefix) noexcept {
     return value.size() >= prefix.size()
         && EqualsOrdinalIgnoreCase(value.substr(0, prefix.size()), prefix);
+}
+
+bool AnsiPathToWide(const char* path, std::wstring& wide) {
+    if (path == nullptr) {
+        return false;
+    }
+    const auto required = MultiByteToWideChar(
+        CP_ACP,
+        0,
+        path,
+        -1,
+        nullptr,
+        0);
+    if (required <= 1) {
+        return false;
+    }
+    wide.resize(static_cast<std::size_t>(required));
+    const auto converted = MultiByteToWideChar(
+        CP_ACP,
+        0,
+        path,
+        -1,
+        wide.data(),
+        required);
+    if (converted != required) {
+        wide.clear();
+        return false;
+    }
+    wide.resize(static_cast<std::size_t>(required - 1));
+    return true;
 }
 
 bool IsBelow(
@@ -1273,6 +1315,29 @@ HANDLE WINAPI HookCreateFile(
     }
 }
 
+HANDLE WINAPI HookCreateFileAnsi(
+    const LPCSTR fileName,
+    const DWORD desiredAccess,
+    const DWORD shareMode,
+    const LPSECURITY_ATTRIBUTES security,
+    const DWORD creation,
+    const DWORD flags,
+    const HANDLE templateFile) {
+    std::wstring wide;
+    if (!AnsiPathToWide(fileName, wide)) {
+        SetLastError(ERROR_ACCESS_DENIED);
+        return INVALID_HANDLE_VALUE;
+    }
+    return HookCreateFile(
+        wide.c_str(),
+        desiredAccess,
+        shareMode,
+        security,
+        creation,
+        flags,
+        templateFile);
+}
+
 BOOL WINAPI HookDeleteFile(const LPCWSTR fileName) {
     try {
         CallbackLease callback;
@@ -1293,6 +1358,15 @@ BOOL WINAPI HookDeleteFile(const LPCWSTR fileName) {
         SetLastError(ERROR_ACCESS_DENIED);
         return FALSE;
     }
+}
+
+BOOL WINAPI HookDeleteFileAnsi(const LPCSTR fileName) {
+    std::wstring wide;
+    if (!AnsiPathToWide(fileName, wide)) {
+        SetLastError(ERROR_ACCESS_DENIED);
+        return FALSE;
+    }
+    return HookDeleteFile(wide.c_str());
 }
 
 BOOL WINAPI HookMoveFile(
@@ -1330,6 +1404,54 @@ BOOL WINAPI HookMoveFile(
         SetLastError(ERROR_ACCESS_DENIED);
         return FALSE;
     }
+}
+
+BOOL WINAPI HookMoveFileSimple(
+    const LPCWSTR existingName,
+    const LPCWSTR newName) {
+    try {
+        CallbackLease callback;
+        const auto& context = callback.Context();
+        if (context == nullptr || context->trampolines.moveFileSimple == nullptr
+            || newName == nullptr) {
+            SetLastError(ERROR_ACCESS_DENIED);
+            return FALSE;
+        }
+        const auto source = EvaluatePath(
+            *context,
+            existingName,
+            PathOperation::RenameSource);
+        if (!source.allowed) {
+            return FALSE;
+        }
+        const auto destination = EvaluatePath(
+            *context,
+            newName,
+            PathOperation::RenameDestination);
+        return destination.allowed
+                && MutationOperandsAreContained({&source, &destination})
+            ? context->trampolines.moveFileSimple(
+                source.effective.c_str(),
+                destination.effective.c_str())
+            : (SetLastError(ERROR_ACCESS_DENIED), FALSE);
+    }
+    catch (...) {
+        SetLastError(ERROR_ACCESS_DENIED);
+        return FALSE;
+    }
+}
+
+BOOL WINAPI HookMoveFileAnsi(
+    const LPCSTR existingName,
+    const LPCSTR newName) {
+    std::wstring wideExisting;
+    std::wstring wideNew;
+    if (!AnsiPathToWide(existingName, wideExisting)
+        || !AnsiPathToWide(newName, wideNew)) {
+        SetLastError(ERROR_ACCESS_DENIED);
+        return FALSE;
+    }
+    return HookMoveFileSimple(wideExisting.c_str(), wideNew.c_str());
 }
 
 BOOL WINAPI HookReplaceFile(
@@ -1425,6 +1547,29 @@ BOOL WINAPI HookAttributes(
     }
 }
 
+DWORD WINAPI HookAttributesSimple(const LPCWSTR fileName) {
+    try {
+        CallbackLease callback;
+        const auto& context = callback.Context();
+        if (context == nullptr || context->trampolines.attributesSimple == nullptr) {
+            SetLastError(ERROR_ACCESS_DENIED);
+            return INVALID_FILE_ATTRIBUTES;
+        }
+        const auto evaluated = EvaluatePath(
+            *context,
+            fileName,
+            PathOperation::Attributes,
+            true);
+        return evaluated.allowed
+            ? context->trampolines.attributesSimple(evaluated.effective.c_str())
+            : INVALID_FILE_ATTRIBUTES;
+    }
+    catch (...) {
+        SetLastError(ERROR_ACCESS_DENIED);
+        return INVALID_FILE_ATTRIBUTES;
+    }
+}
+
 HANDLE WINAPI HookFindFirst(
     const LPCWSTR fileName,
     const FINDEX_INFO_LEVELS infoLevel,
@@ -1469,6 +1614,39 @@ HANDLE WINAPI HookFindFirst(
     }
 }
 
+HANDLE WINAPI HookFindFirstSimple(
+    const LPCWSTR fileName,
+    const LPWIN32_FIND_DATAW findData) {
+    try {
+        CallbackLease callback;
+        const auto& context = callback.Context();
+        if (context == nullptr || context->trampolines.findFirstSimple == nullptr) {
+            SetLastError(ERROR_ACCESS_DENIED);
+            return INVALID_HANDLE_VALUE;
+        }
+        const auto evaluated = EvaluateEnumerationPath(*context, fileName);
+        if (!evaluated.allowed) {
+            return INVALID_HANDLE_VALUE;
+        }
+        const auto result = context->trampolines.findFirstSimple(
+            evaluated.effective.c_str(),
+            findData);
+        if (result != INVALID_HANDLE_VALUE && evaluated.redirected && findData != nullptr) {
+            if (wcscpy_s(findData->cFileName, MAX_PATH, L"DRAKS0005.sl2") != 0) {
+                FindClose(result);
+                SetLastError(ERROR_INSUFFICIENT_BUFFER);
+                return INVALID_HANDLE_VALUE;
+            }
+            findData->cAlternateFileName[0] = L'\0';
+        }
+        return result;
+    }
+    catch (...) {
+        SetLastError(ERROR_ACCESS_DENIED);
+        return INVALID_HANDLE_VALUE;
+    }
+}
+
 struct HookDefinition {
     const wchar_t* module;
     const char* procedure;
@@ -1476,7 +1654,7 @@ struct HookDefinition {
     void** original;
 };
 
-std::array<HookDefinition, 8> HookDefinitions(HookContext& context) {
+std::array<HookDefinition, 14> HookDefinitions(HookContext& context) {
     return {{
         {L"shell32.dll", "SHGetKnownFolderPath",
          reinterpret_cast<void*>(&HookKnownFolder),
@@ -1487,21 +1665,39 @@ std::array<HookDefinition, 8> HookDefinitions(HookContext& context) {
         {L"kernel32.dll", "CreateFileW",
          reinterpret_cast<void*>(&HookCreateFile),
          reinterpret_cast<void**>(&context.trampolines.createFile)},
+        {L"kernel32.dll", "CreateFileA",
+         reinterpret_cast<void*>(&HookCreateFileAnsi),
+         reinterpret_cast<void**>(&context.trampolines.createFileAnsi)},
         {L"kernel32.dll", "DeleteFileW",
          reinterpret_cast<void*>(&HookDeleteFile),
          reinterpret_cast<void**>(&context.trampolines.deleteFile)},
+        {L"kernel32.dll", "DeleteFileA",
+         reinterpret_cast<void*>(&HookDeleteFileAnsi),
+         reinterpret_cast<void**>(&context.trampolines.deleteFileAnsi)},
         {L"kernel32.dll", "MoveFileExW",
          reinterpret_cast<void*>(&HookMoveFile),
          reinterpret_cast<void**>(&context.trampolines.moveFile)},
+        {L"kernel32.dll", "MoveFileW",
+         reinterpret_cast<void*>(&HookMoveFileSimple),
+         reinterpret_cast<void**>(&context.trampolines.moveFileSimple)},
+        {L"kernel32.dll", "MoveFileA",
+         reinterpret_cast<void*>(&HookMoveFileAnsi),
+         reinterpret_cast<void**>(&context.trampolines.moveFileAnsi)},
         {L"kernel32.dll", "ReplaceFileW",
          reinterpret_cast<void*>(&HookReplaceFile),
          reinterpret_cast<void**>(&context.trampolines.replaceFile)},
         {L"kernel32.dll", "GetFileAttributesExW",
          reinterpret_cast<void*>(&HookAttributes),
          reinterpret_cast<void**>(&context.trampolines.attributes)},
+        {L"kernel32.dll", "GetFileAttributesW",
+         reinterpret_cast<void*>(&HookAttributesSimple),
+         reinterpret_cast<void**>(&context.trampolines.attributesSimple)},
         {L"kernel32.dll", "FindFirstFileExW",
          reinterpret_cast<void*>(&HookFindFirst),
          reinterpret_cast<void**>(&context.trampolines.findFirst)},
+        {L"kernel32.dll", "FindFirstFileW",
+         reinterpret_cast<void*>(&HookFindFirstSimple),
+         reinterpret_cast<void**>(&context.trampolines.findFirstSimple)},
     }};
 }
 
@@ -1607,7 +1803,7 @@ public:
 
 private:
     bool initialized_ = false;
-    std::array<void*, 8> targets_{};
+    std::array<void*, 14> targets_{};
     std::size_t targetCount_ = 0;
     std::size_t mutationDepth_ = 0;
     std::unique_ptr<Hooks::MinHookMutationLease> mutationLease_;
@@ -1645,23 +1841,54 @@ bool ValidateConfiguration(
     }
 
     SaveHookConfiguration canonical{};
+    canonical.protectFileIo = configuration.protectFileIo;
     canonical.diagnosticMode = configuration.diagnosticMode;
     if (!CanonicalizeLexical(configuration.virtualDocuments, canonical.virtualDocuments)
-        || !CanonicalizeLexical(configuration.virtualLogicalSave, canonical.virtualLogicalSave)
+        || !EqualsOrdinalIgnoreCase(
+            configuration.virtualDocuments,
+            canonical.virtualDocuments)
+        || !InspectExistingComponents(canonical.virtualDocuments, &CreateFileW)) {
+        return false;
+    }
+
+    if (!configuration.protectFileIo) {
+        if (!configuration.virtualLogicalSave.empty()
+            || !configuration.realSaveRoot.empty()
+            || !configuration.externalSaveRoot.empty()
+            || !configuration.dedicatedRmm.empty()) {
+            return false;
+        }
+        auto candidate = std::make_shared<HookContext>(std::move(canonical));
+        std::vector<EvaluatedPath::PinnedHandle> validationPins;
+        if (!ResolvePhysicalPath(
+                candidate->configuration.virtualDocuments,
+                &CreateFileW,
+                candidate->physicalVirtualDocuments,
+                validationPins,
+                false)
+            || !AddStableIdentity(
+                *candidate,
+                candidate->configuration.virtualDocuments,
+                true)) {
+            return false;
+        }
+        context = std::move(candidate);
+        return true;
+    }
+
+    if (!CanonicalizeLexical(configuration.virtualLogicalSave, canonical.virtualLogicalSave)
         || !CanonicalizeLexical(configuration.realSaveRoot, canonical.realSaveRoot)
         || !CanonicalizeLexical(configuration.externalSaveRoot, canonical.externalSaveRoot)
         || !CanonicalizeLexical(configuration.dedicatedRmm, canonical.dedicatedRmm)) {
         return false;
     }
 
-    if (!EqualsOrdinalIgnoreCase(configuration.virtualDocuments, canonical.virtualDocuments)
-        || !EqualsOrdinalIgnoreCase(configuration.virtualLogicalSave, canonical.virtualLogicalSave)
+    if (!EqualsOrdinalIgnoreCase(configuration.virtualLogicalSave, canonical.virtualLogicalSave)
         || !EqualsOrdinalIgnoreCase(configuration.realSaveRoot, canonical.realSaveRoot)
         || !EqualsOrdinalIgnoreCase(configuration.externalSaveRoot, canonical.externalSaveRoot)
         || !EqualsOrdinalIgnoreCase(configuration.dedicatedRmm, canonical.dedicatedRmm)
         || !IsBelow(canonical.virtualLogicalSave, canonical.virtualDocuments)
         || !IsBelow(canonical.dedicatedRmm, canonical.externalSaveRoot)
-        || !InspectExistingComponents(canonical.virtualDocuments, &CreateFileW)
         || !InspectExistingComponents(canonical.virtualLogicalSave, &CreateFileW)
         || !InspectExistingComponents(canonical.realSaveRoot, &CreateFileW)
         || !InspectExistingComponents(canonical.externalSaveRoot, &CreateFileW)
@@ -1802,7 +2029,10 @@ SaveHookInstallStatus InstallSaveHooks(
         activeContext.store(context, std::memory_order_release);
 
         const auto definitions = HookDefinitions(*context);
-        for (std::size_t index = 0; index < definitions.size(); ++index) {
+        const auto definitionCount = context->configuration.protectFileIo
+            ? definitions.size()
+            : std::size_t{2};
+        for (std::size_t index = 0; index < definitionCount; ++index) {
             lifecycle.targets[index] = platform.ResolveTarget(
                 definitions[index].module,
                 definitions[index].procedure);
@@ -1813,7 +2043,7 @@ SaveHookInstallStatus InstallSaveHooks(
             }
         }
 
-        for (std::size_t index = 0; index < definitions.size(); ++index) {
+        for (std::size_t index = 0; index < definitionCount; ++index) {
             if (!platform.CreateHook(
                     lifecycle.targets[index],
                     definitions[index].detour,
@@ -1825,8 +2055,8 @@ SaveHookInstallStatus InstallSaveHooks(
             lifecycle.created[index] = true;
         }
 
-        for (const auto target : lifecycle.targets) {
-            if (!platform.QueueEnable(target)) {
+        for (std::size_t index = 0; index < definitionCount; ++index) {
+            if (!platform.QueueEnable(lifecycle.targets[index])) {
                 mutation.Release();
                 static_cast<void>(CleanupLocked());
                 return SaveHookInstallStatus::InstallFailed;

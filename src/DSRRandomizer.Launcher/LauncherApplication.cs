@@ -74,7 +74,7 @@ public sealed class LauncherApplication
                 await WriteJsonAsync(new
                 {
                     success = false,
-                    error = "SteamID must contain exactly 16 to 20 decimal digits."
+                    error = "SteamID must contain 1 to 20 decimal digits."
                 });
                 return 2;
             }
@@ -98,7 +98,7 @@ public sealed class LauncherApplication
                 await WriteJsonAsync(new
                 {
                     success = false,
-                    error = "SteamID must contain exactly 16 to 20 decimal digits."
+                    error = "SteamID must contain 1 to 20 decimal digits."
                 });
                 return 2;
             }
@@ -200,7 +200,7 @@ public sealed class LauncherApplication
         "EXTERNAL_ROOT_NOT_SELECTED");
 
     private static bool IsSteamId(string value) =>
-        value.Length is >= 16 and <= 20 && value.All(char.IsAsciiDigit);
+        value.Length is >= 1 and <= 20 && value.All(char.IsAsciiDigit);
 
     private static IReadOnlyList<string> EnumeratePackagePaths(string packageRoot)
     {

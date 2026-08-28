@@ -152,33 +152,37 @@ public sealed class LauncherService : ILauncherService
             .ValidateAsync(cancellationToken);
     }
 
-    public async Task<RuntimeReadinessResult> GetModdedLaunchReadinessAsync(
-        CancellationToken cancellationToken)
-    {
-        var selectedInstallation = await InstallationSelectionStore
-            .CreateReadOnly(_externalRoot, _canonicalizer)
-            .ReadAsync(cancellationToken);
-        if (selectedInstallation is null)
+    public Task<RuntimeReadinessResult> GetModdedLaunchReadinessAsync(
+        CancellationToken cancellationToken) => Task.Run(
+        async () =>
         {
-            return new RuntimeReadinessResult(
-                false,
-                null,
-                new[] { "The verified source-installation selection does not exist." });
-        }
+            var selectedInstallation = await InstallationSelectionStore
+                .CreateReadOnly(_externalRoot, _canonicalizer)
+                .ReadAsync(cancellationToken)
+                .ConfigureAwait(false);
+            if (selectedInstallation is null)
+            {
+                return new RuntimeReadinessResult(
+                    false,
+                    null,
+                    new[] { "The verified source-installation selection does not exist." });
+            }
 
-        var boundary = WriteBoundary.Create(
-            selectedInstallation,
-            _externalRoot,
-            _canonicalizer);
-        var layout = LocalDataLayout.Create(_externalRoot, boundary);
-        return await new ModRuntimeReadinessService(
-                layout,
-                boundary,
-                _canonicalizer,
-                new FileHashService(),
-                new RuntimePointerStore(layout, boundary))
-            .ValidateAsync(cancellationToken);
-    }
+            var boundary = WriteBoundary.Create(
+                selectedInstallation,
+                _externalRoot,
+                _canonicalizer);
+            var layout = LocalDataLayout.Create(_externalRoot, boundary);
+            return await new ModRuntimeReadinessService(
+                    layout,
+                    boundary,
+                    _canonicalizer,
+                    new FileHashService(),
+                    new RuntimePointerStore(layout, boundary))
+                .ValidateAsync(cancellationToken)
+                .ConfigureAwait(false);
+        },
+        cancellationToken);
 
     public async Task<IReadOnlyList<SaveProfileCandidate>> DiscoverSaveProfilesAsync(
         CancellationToken cancellationToken)
@@ -378,6 +382,31 @@ public sealed class LauncherService : ILauncherService
                 _externalRoot,
                 steamId,
                 boundary);
+            var virtualDocuments = layout.VirtualProfile;
+            var virtualProfile = Path.Combine(
+                virtualDocuments,
+                "NBGI",
+                "DARK SOULS REMASTERED",
+                steamId);
+            var virtualLogicalSave = Path.Combine(
+                virtualProfile,
+                "DRAKS0005.sl2");
+            boundary.EnsureAllowed(virtualDocuments);
+            boundary.EnsureAllowed(virtualProfile);
+            boundary.EnsureAllowed(virtualLogicalSave);
+            try
+            {
+                VirtualSaveLinkBinding.RemoveStaleAlias(
+                    layout,
+                    boundary,
+                    _fileAccess,
+                    virtualLogicalSave,
+                    expectedDedicatedPath);
+            }
+            catch (VirtualSaveAliasConflictException)
+            {
+                return SafetyLaunchResult.Failed("DEDICATED_SAVE_ALIAS_CONFLICT");
+            }
             if (!_fileAccess.Exists(expectedDedicatedPath))
             {
                 var selection = await selectionStore.ReadAsync(cancellationToken);
@@ -416,14 +445,6 @@ public sealed class LauncherService : ILauncherService
                 selectionStore,
                 new NormalSaveBlockingFileAccess(_fileAccess));
 
-            var virtualDocuments = layout.VirtualProfile;
-            var virtualProfile = Path.Combine(
-                virtualDocuments,
-                "NBGI",
-                "DARK SOULS REMASTERED",
-                steamId);
-            boundary.EnsureAllowed(virtualDocuments);
-            boundary.EnsureAllowed(virtualProfile);
             Directory.CreateDirectory(virtualProfile);
             var dedicatedPath = Path.GetFullPath(dedicatedSave.SavePath);
             var externalSaveRoot = Path.GetDirectoryName(dedicatedPath)
@@ -436,7 +457,7 @@ public sealed class LauncherService : ILauncherService
                 "DARK SOULS REMASTERED"));
             var savePaths = new GuardSavePathConfiguration(
                 virtualDocuments,
-                Path.Combine(virtualProfile, "DRAKS0005.sl2"),
+                virtualLogicalSave,
                 realSaveRoot,
                 externalSaveRoot,
                 dedicatedPath);
@@ -458,11 +479,37 @@ public sealed class LauncherService : ILauncherService
                 DiagnosticMode: false,
                 Arguments: Array.Empty<string>(),
                 SavePaths: savePaths);
-            SafetyLaunchResult launchResult;
+            VirtualSaveLinkBinding saveBinding;
             try
             {
-                launchResult = await new SafetyLaunchCoordinator(_platform)
-                    .LaunchAsync(request, cancellationToken);
+                saveBinding = VirtualSaveLinkBinding.Create(
+                    layout,
+                    boundary,
+                    _fileAccess,
+                    virtualLogicalSave,
+                    dedicatedPath);
+            }
+            catch (VirtualSaveAliasConflictException)
+            {
+                await CompleteAbnormalSessionWithoutMaskingAsync(
+                    sessionSaveService,
+                    steamId,
+                    saveSession.SessionToken);
+                return SafetyLaunchResult.Failed("DEDICATED_SAVE_ALIAS_CONFLICT");
+            }
+            SafetyLaunchResult launchResult;
+            var saveBindingReleased = false;
+            try
+            {
+                try
+                {
+                    launchResult = await new SafetyLaunchCoordinator(_platform)
+                        .LaunchAsync(request, cancellationToken);
+                }
+                finally
+                {
+                    saveBindingReleased = saveBinding.TryRelease();
+                }
             }
             catch
             {
@@ -472,7 +519,6 @@ public sealed class LauncherService : ILauncherService
                     saveSession.SessionToken);
                 throw;
             }
-
             var normalGuardedExit = launchResult.Started && launchResult.ExitCode == 0;
             if (!normalGuardedExit)
             {
@@ -481,6 +527,14 @@ public sealed class LauncherService : ILauncherService
                     steamId,
                     saveSession.SessionToken);
                 return launchResult;
+            }
+            if (!saveBindingReleased)
+            {
+                await CompleteAbnormalSessionWithoutMaskingAsync(
+                    sessionSaveService,
+                    steamId,
+                    saveSession.SessionToken);
+                return SafetyLaunchResult.Failed("DEDICATED_SAVE_ALIAS_CONFLICT");
             }
             var saveCompletion = await sessionSaveService.CompleteSessionAsync(
                 steamId,
@@ -546,7 +600,7 @@ public sealed class LauncherService : ILauncherService
     }
 
     private static bool IsSteamId(string value) =>
-        value.Length is >= 16 and <= 20
+        value.Length is >= 1 and <= 20
         && value.All(character => character is >= '0' and <= '9');
 
     private sealed record SaveComponents(

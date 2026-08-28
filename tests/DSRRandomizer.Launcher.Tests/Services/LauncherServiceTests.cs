@@ -69,9 +69,10 @@ public sealed class LauncherServiceTests : IDisposable
     [Fact]
     public async Task DiscoverSaveProfilesAsync_ExternalOnlyRmmIsReusableWithoutNormalRoot()
     {
+        const string shortSteamId = "146808034";
         var documents = Path.Combine(_container, "missing-documents");
         var local = Path.Combine(_container, "local");
-        var destination = CreateValidDedicatedSave(local, SteamId, 0x52);
+        var destination = CreateValidDedicatedSave(local, shortSteamId, 0x52);
         var service = new LauncherService(local, new FixedKnownFolderProvider(documents));
 
         var profiles = await service.DiscoverSaveProfilesAsync(CancellationToken.None);
@@ -81,7 +82,7 @@ public sealed class LauncherServiceTests : IDisposable
             firstCopyConfirmed: false,
             CancellationToken.None);
 
-        Assert.Equal(SteamId, profile.SteamId);
+        Assert.Equal(shortSteamId, profile.SteamId);
         Assert.Equal(string.Empty, profile.SourcePath);
         Assert.True(result.Ready, result.Message);
         Assert.True(result.ReusedExisting);
@@ -235,9 +236,100 @@ public sealed class LauncherServiceTests : IDisposable
                 fixture.Platform.Request.SavePaths.DedicatedRmm
             },
             StringComparer.OrdinalIgnoreCase);
-        Assert.Equal(0x7UL, fixture.Platform.Request?.RequiredProtectionFlags);
+        Assert.Equal(0x3UL, fixture.Platform.Request?.RequiredProtectionFlags);
         Assert.Empty(fixture.Platform.Request?.Arguments ?? []);
         Assert.Equal(1, fixture.Platform.Process.ResumeCalls);
+    }
+
+    [Fact]
+    public async Task LaunchModdedAsync_BindsRmmAsTemporarySl2HardLinkDuringGameOnly()
+    {
+        using var fixture = await LaunchFixture.CreateAsync(existingRmm: true);
+        var alias = Path.Combine(
+            fixture.ExternalRoot,
+            "profile",
+            "NBGI",
+            "DARK SOULS REMASTERED",
+            SteamId,
+            "DRAKS0005.sl2");
+        var aliasWasPresentDuringGame = false;
+        var rmmWasLinkedDuringGame = false;
+        fixture.Platform.Process.OnWaitForExit = () =>
+        {
+            aliasWasPresentDuringGame = File.Exists(alias);
+            rmmWasLinkedDuringGame = !new SystemFileAccess()
+                .IsSingleLinkFile(fixture.DedicatedRmm);
+            using var stream = new FileStream(
+                alias,
+                FileMode.Open,
+                FileAccess.Write,
+                FileShare.ReadWrite);
+            stream.Position = 0;
+            stream.WriteByte(0x7b);
+            stream.Flush(flushToDisk: true);
+        };
+
+        var result = await fixture.Service.LaunchModdedAsync(
+            SteamId,
+            CancellationToken.None);
+
+        Assert.True(result.Started, result.ErrorCode);
+        Assert.True(aliasWasPresentDuringGame);
+        Assert.True(rmmWasLinkedDuringGame);
+        Assert.Equal(0x7b, File.ReadAllBytes(fixture.DedicatedRmm)[0]);
+        Assert.False(File.Exists(alias));
+        Assert.True(new SystemFileAccess().IsSingleLinkFile(fixture.DedicatedRmm));
+        Assert.True(fixture.ReadMetadata().CleanExit);
+    }
+
+    [Fact]
+    public async Task LaunchModdedAsync_RemovesMatchingStaleAliasBeforeRmmValidation()
+    {
+        using var fixture = await LaunchFixture.CreateAsync(existingRmm: true);
+        var alias = Path.Combine(
+            fixture.ExternalRoot,
+            "profile",
+            "NBGI",
+            "DARK SOULS REMASTERED",
+            SteamId,
+            "DRAKS0005.sl2");
+        Directory.CreateDirectory(Path.GetDirectoryName(alias)!);
+        Assert.True(CreateHardLink(alias, fixture.DedicatedRmm, IntPtr.Zero));
+
+        var result = await fixture.Service.LaunchModdedAsync(
+            SteamId,
+            CancellationToken.None);
+
+        Assert.True(result.Started, result.ErrorCode);
+        Assert.False(File.Exists(alias));
+        Assert.True(new SystemFileAccess().IsSingleLinkFile(fixture.DedicatedRmm));
+    }
+
+    [Fact]
+    public async Task LaunchModdedAsync_ForeignVirtualSl2FailsWithoutChangingEitherSave()
+    {
+        using var fixture = await LaunchFixture.CreateAsync(existingRmm: true);
+        var alias = Path.Combine(
+            fixture.ExternalRoot,
+            "profile",
+            "NBGI",
+            "DARK SOULS REMASTERED",
+            SteamId,
+            "DRAKS0005.sl2");
+        Directory.CreateDirectory(Path.GetDirectoryName(alias)!);
+        await File.WriteAllBytesAsync(alias, [0x11, 0x22, 0x33]);
+        var aliasBefore = await File.ReadAllBytesAsync(alias);
+        var rmmBefore = await File.ReadAllBytesAsync(fixture.DedicatedRmm);
+
+        var result = await fixture.Service.LaunchModdedAsync(
+            SteamId,
+            CancellationToken.None);
+
+        Assert.False(result.Started);
+        Assert.Equal("DEDICATED_SAVE_ALIAS_CONFLICT", result.ErrorCode);
+        Assert.Equal(0, fixture.Platform.CreateCalls);
+        Assert.Equal(aliasBefore, await File.ReadAllBytesAsync(alias));
+        Assert.Equal(rmmBefore, await File.ReadAllBytesAsync(fixture.DedicatedRmm));
     }
 
     [Fact]

@@ -144,8 +144,8 @@ InitStatus InitializeCore(
         | gameServiceOfflineFlag | monitorFlags;
     if ((block->requiredFlags & bootstrapFlag) == 0
         || (block->requiredFlags & ~supportedFlags) != 0
-        || ((block->requiredFlags & saveFlags) != 0
-            && (block->requiredFlags & saveFlags) != saveFlags)
+        || ((block->requiredFlags & saveFileIoFlag) != 0
+            && (block->requiredFlags & saveKnownFolderFlag) == 0)
         || ((block->requiredFlags & steamFlags) != 0
             && (block->requiredFlags & steamFlags) != steamFlags)
         || ((block->requiredFlags & monitorFlags) != 0
@@ -222,35 +222,42 @@ InitStatus InitializeCore(
         }
     }
 
-    if ((block->requiredFlags & saveFlags) == saveFlags) {
+    if ((block->requiredFlags & saveKnownFolderFlag) != 0) {
         try {
             if (pathReader == nullptr) {
                 return CleanupOr(InitStatus::SaveHookInstallFailed);
             }
             Save::SaveHookConfiguration configuration{};
+            configuration.protectFileIo =
+                (block->requiredFlags & saveFileIoFlag) != 0;
             configuration.diagnosticMode = block->diagnosticMode != 0;
             if (!pathReader(
                     block->virtualDocuments,
                     kProtectionSavePathCharacters,
-                    configuration.virtualDocuments)
-                || !pathReader(
-                    block->virtualLogicalSave,
-                    kProtectionSavePathCharacters,
-                    configuration.virtualLogicalSave)
-                || !pathReader(
-                    block->realSaveRoot,
-                    kProtectionSavePathCharacters,
-                    configuration.realSaveRoot)
-                || !pathReader(
-                    block->externalSaveRoot,
-                    kProtectionSavePathCharacters,
-                    configuration.externalSaveRoot)
-                || !pathReader(
-                    block->dedicatedRmm,
-                    kProtectionSavePathCharacters,
-                    configuration.dedicatedRmm)
-                || Save::InstallSaveHooks(configuration)
-                    != Save::SaveHookInstallStatus::Success) {
+                    configuration.virtualDocuments)) {
+                return CleanupOr(InitStatus::SaveHookInstallFailed);
+            }
+            if (configuration.protectFileIo
+                && (!pathReader(
+                        block->virtualLogicalSave,
+                        kProtectionSavePathCharacters,
+                        configuration.virtualLogicalSave)
+                    || !pathReader(
+                        block->realSaveRoot,
+                        kProtectionSavePathCharacters,
+                        configuration.realSaveRoot)
+                    || !pathReader(
+                        block->externalSaveRoot,
+                        kProtectionSavePathCharacters,
+                        configuration.externalSaveRoot)
+                    || !pathReader(
+                        block->dedicatedRmm,
+                        kProtectionSavePathCharacters,
+                        configuration.dedicatedRmm))) {
+                return CleanupOr(InitStatus::SaveHookInstallFailed);
+            }
+            if (Save::InstallSaveHooks(configuration)
+                != Save::SaveHookInstallStatus::Success) {
                 return CleanupOr(InitStatus::SaveHookInstallFailed);
             }
         }

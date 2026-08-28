@@ -45,7 +45,10 @@ public sealed class ExternalRootSelectionStore
         try
         {
             await using var stream = File.OpenRead(path);
-            using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+            using var document = await JsonDocument.ParseAsync(
+                    stream,
+                    cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
             var root = ReadSchemaOneRoot(document.RootElement);
             return ValidateExternalRoot(root);
         }
