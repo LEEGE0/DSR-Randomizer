@@ -19,13 +19,15 @@ The external disk contains one modded game root:
   State\                copy manifest and launch diagnostics
 ```
 
+The WPF launcher exposes an external-root path and the CLI accepts the same absolute path. A single small `%LOCALAPPDATA%\DSR-Randomizer\external-root.json` pointer may remember that selection; game files, mods, saves, manifests, logs, and staging data remain on the external root.
+
 A mod is active when its folder/files are present in the modded runtime and inactive when the user removes them. The project does not maintain an enable/disable database, checkbox list, mod load-order editor, or uninstall history. A mod that needs its own loader or configuration remains the user's responsibility and must be installed only in the copied runtime.
 
 ## 3. Isolation guarantees
 
 - The Steam installation is a read-only source. Runtime construction copies files; it never hard-links, junctions, symlinks, or reparses files back to the source.
 - The existing Overhaul installation and settings are outside every permitted write root.
-- All launcher writes remain beneath the selected external root.
+- All material launcher writes remain beneath the selected external root. The only permitted local write is the bounded external-root pointer described above.
 - The copied runtime has a manifest containing relative path, length, source timestamp, and SHA-256 for the clean source snapshot.
 - `DarkSoulsRemastered.exe` and `steam_api64.dll` must retain the exact supported profile identities. A mod that replaces either file is unsupported and launch is denied.
 - The project guard DLL, launcher binaries, compatibility profile, and dedicated `.rmm` are verified independently of user mod folders.
