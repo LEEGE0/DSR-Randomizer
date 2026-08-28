@@ -44,6 +44,55 @@ public sealed class SafetyLaunchCoordinatorTests
     }
 
     [Fact]
+    public async Task LaunchAsync_ExactSimplifiedBitmap_ResumesWithoutMonitorSession()
+    {
+        var platform = new RecordingPlatform(
+            new ProtectionHandshake(true, 0x7F, string.Empty, Session: null));
+
+        var result = await new SafetyLaunchCoordinator(platform)
+            .LaunchAsync(CreateRequest(requiredFlags: 0x7F), CancellationToken.None);
+
+        Assert.True(result.Started);
+        Assert.Equal(1, platform.Process.ResumeCalls);
+        Assert.Equal(0, platform.Process.TerminateCalls);
+    }
+
+    [Theory]
+    [InlineData(0x7EUL)]
+    [InlineData(0xFFUL)]
+    [InlineData(0x17FUL)]
+    public async Task LaunchAsync_NonExactSimplifiedBitmap_NeverResumes(ulong flags)
+    {
+        var platform = new RecordingPlatform(
+            new ProtectionHandshake(true, flags, string.Empty, Session: null));
+
+        var result = await new SafetyLaunchCoordinator(platform)
+            .LaunchAsync(CreateRequest(requiredFlags: 0x7F), CancellationToken.None);
+
+        Assert.False(result.Started);
+        Assert.Equal(0, platform.Process.ResumeCalls);
+        Assert.Equal(1, platform.Process.TerminateCalls);
+    }
+
+    [Fact]
+    public async Task LaunchAsync_ExactSimplifiedBitmapWithMonitorSession_NeverResumes()
+    {
+        var platform = new RecordingPlatform(
+            new ProtectionHandshake(
+                true,
+                0x7F,
+                string.Empty,
+                new BlockingProtectionSession()));
+
+        var result = await new SafetyLaunchCoordinator(platform)
+            .LaunchAsync(CreateRequest(requiredFlags: 0x7F), CancellationToken.None);
+
+        Assert.False(result.Started);
+        Assert.Equal(0, platform.Process.ResumeCalls);
+        Assert.Equal(1, platform.Process.TerminateCalls);
+    }
+
+    [Fact]
     public async Task LaunchAsync_UnexpectedPreviousSuspendCountTerminatesWithoutWaiting()
     {
         var platform = new RecordingPlatform(FailurePoint.ResumeCount);
@@ -102,7 +151,7 @@ public sealed class SafetyLaunchCoordinatorTests
         Assert.Equal(1, platform.Process.TerminateCalls);
     }
 
-    private static SafetyLaunchRequest CreateRequest() => new(
+    private static SafetyLaunchRequest CreateRequest(ulong requiredFlags = 0b11) => new(
         @"C:\Local\runtime\DSRRandomizer.SuspendedFixture.exe",
         @"C:\Local\runtime",
         @"C:\Local\components\DSRRandomizer.Runtime.dll",
@@ -112,7 +161,7 @@ public sealed class SafetyLaunchCoordinatorTests
             0x8664,
             0x6344ca56,
             52015104)),
-        RequiredProtectionFlags: 0b11,
+        RequiredProtectionFlags: requiredFlags,
         DiagnosticMode: true);
 
     public enum FailurePoint
@@ -140,6 +189,15 @@ public sealed class SafetyLaunchCoordinatorTests
             Process = new RecordingProcess(failurePoint, cancellation);
         }
 
+        public RecordingPlatform(ProtectionHandshake handshake)
+        {
+            _failurePoint = FailurePoint.None;
+            Process = new RecordingProcess(
+                FailurePoint.None,
+                cancellation: null,
+                handshake);
+        }
+
         public RecordingProcess Process { get; }
 
         public Task<IProtectedProcess> CreateSuspendedAsync(
@@ -157,7 +215,8 @@ public sealed class SafetyLaunchCoordinatorTests
 
     private sealed class RecordingProcess(
         FailurePoint failurePoint,
-        CancellationTokenSource? cancellation) : IProtectedProcess
+        CancellationTokenSource? cancellation,
+        ProtectionHandshake? handshake = null) : IProtectedProcess
     {
         public int ProcessId => 42;
 
@@ -191,6 +250,11 @@ public sealed class SafetyLaunchCoordinatorTests
             if (failurePoint == FailurePoint.UnexpectedInject)
             {
                 throw new IOException("Simulated unexpected platform failure.");
+            }
+
+            if (handshake is not null)
+            {
+                return Task.FromResult(handshake);
             }
 
             return Task.FromResult(failurePoint == FailurePoint.Handshake

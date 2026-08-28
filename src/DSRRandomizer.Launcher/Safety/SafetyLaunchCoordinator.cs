@@ -45,7 +45,15 @@ public sealed class SafetyLaunchCoordinator
                 return SafetyLaunchResult.Failed("SAFETY_FLAGS_INCOMPLETE");
             }
 
-            if (session is null)
+            var simplifiedOneShot =
+                SimplifiedOfflineProtection.IsExact(request.RequiredProtectionFlags) &&
+                SimplifiedOfflineProtection.IsExact(handshake.ActiveFlags);
+            if (simplifiedOneShot && session is not null)
+            {
+                TerminateOnce();
+                return SafetyLaunchResult.Failed("SAFETY_MONITOR_UNEXPECTED");
+            }
+            if (!simplifiedOneShot && session is null)
             {
                 TerminateOnce();
                 return SafetyLaunchResult.Failed("SAFETY_MONITOR_UNAVAILABLE");
@@ -59,7 +67,15 @@ public sealed class SafetyLaunchCoordinator
             }
 
             var exitTask = process.WaitForExitAsync(cancellationToken);
-            var monitorTask = session.MonitorAsync(
+            if (simplifiedOneShot)
+            {
+                return new SafetyLaunchResult(
+                    true,
+                    string.Empty,
+                    await exitTask);
+            }
+
+            var monitorTask = session!.MonitorAsync(
                 request.RequiredProtectionFlags,
                 stopMonitor.Token);
             _ = await Task.WhenAny(exitTask, monitorTask);

@@ -30,6 +30,40 @@ public sealed class RemoteDllInjectorIntegrationTests
         Assert.Equal(expected, RemoteDllInjector.InitializerErrorCode(nativeStatus));
     }
 
+    [Theory]
+    [InlineData(0x7FUL, true)]
+    [InlineData(0x7EUL, false)]
+    [InlineData(0xFFUL, false)]
+    [InlineData(0x17FUL, false)]
+    public void SimplifiedOfflineProtection_RequiresExactSevenBitBitmap(
+        ulong flags,
+        bool expected)
+    {
+        Assert.Equal(0x7FUL, SimplifiedOfflineProtection.RequiredFlags);
+        Assert.Equal(expected, SimplifiedOfflineProtection.IsExact(flags));
+    }
+
+    [Fact]
+    public async Task CompleteOneShotAsync_DisposesPipeAndReturnsNoSession()
+    {
+        await using var pipe = new ProtectionPipeServer(
+            RandomNumberGenerator.GetBytes(32),
+            TimeSpan.FromSeconds(1));
+        var handshake = new ProtectionHandshake(
+            true,
+            SimplifiedOfflineProtection.RequiredFlags,
+            string.Empty,
+            Session: pipe);
+
+        var result = await pipe.CompleteOneShotAsync(handshake);
+
+        Assert.True(result.Success);
+        Assert.Equal(SimplifiedOfflineProtection.RequiredFlags, result.ActiveFlags);
+        Assert.Null(result.Session);
+        await Assert.ThrowsAsync<ObjectDisposedException>(
+            () => pipe.WaitForHandshakeAsync(CancellationToken.None));
+    }
+
     [Fact]
     public void CreateInitBlock_MarshalsVersionedCanonicalSavePathsAtExactOffsets()
     {

@@ -247,6 +247,13 @@ public sealed class ProtectionPipeServer :
                 cancellationToken);
     }
 
+    internal async ValueTask<ProtectionHandshake> CompleteOneShotAsync(
+        ProtectionHandshake handshake)
+    {
+        await DisposeAsync();
+        return handshake with { Session = null };
+    }
+
     async ValueTask<ProtectionChannelMessage> IProtectionMessageSource.ReadAsync(
         CancellationToken cancellationToken)
     {

@@ -15,6 +15,7 @@ namespace {
 
 static_assert(sizeof(DSRRandomizer::ProtectionSocketEndpoint) == 24);
 static_assert(sizeof(DSRRandomizer::ProtectionInitBlock) == 5480);
+static_assert(DSRRandomizer::kSimplifiedOfflineRequiredFlags == 0x7FULL);
 static_assert(offsetof(DSRRandomizer::ProtectionInitBlock, pipeName) == 52);
 static_assert(offsetof(DSRRandomizer::ProtectionInitBlock, virtualDocuments) == 308);
 static_assert(offsetof(DSRRandomizer::ProtectionInitBlock, virtualLogicalSave) == 1332);
@@ -27,6 +28,105 @@ static_assert(offsetof(DSRRandomizer::ProtectionInitBlock, socketEndpoints) == 5
 int Fail(const char* message) {
     std::cerr << message << '\n';
     return 1;
+}
+
+class HarmlessPipeFixture final {
+public:
+    HarmlessPipeFixture() {
+        pipeName_ = L"\\\\.\\pipe\\DSRRandomizer-ProtectionBootstrapTests-"
+            + std::to_wstring(GetCurrentProcessId());
+        pipe_ = CreateNamedPipeW(
+            pipeName_.c_str(),
+            PIPE_ACCESS_INBOUND,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+            1,
+            0,
+            sizeof(DSRRandomizer::ProtectionHandshakeMessage),
+            0,
+            nullptr);
+    }
+
+    ~HarmlessPipeFixture() {
+        if (pipe_ != INVALID_HANDLE_VALUE) {
+            CloseHandle(pipe_);
+        }
+    }
+
+    HarmlessPipeFixture(const HarmlessPipeFixture&) = delete;
+    HarmlessPipeFixture& operator=(const HarmlessPipeFixture&) = delete;
+
+    [[nodiscard]] bool IsValid() const noexcept {
+        return pipe_ != INVALID_HANDLE_VALUE;
+    }
+
+    [[nodiscard]] const std::wstring& Name() const noexcept {
+        return pipeName_;
+    }
+
+private:
+    std::wstring pipeName_;
+    HANDLE pipe_ = INVALID_HANDLE_VALUE;
+};
+
+DSRRandomizer::ProtectionInitBlock ProductionBlock(
+    const std::wstring& pipeName,
+    const std::uint64_t requiredFlags) {
+    DSRRandomizer::ProtectionInitBlock block{};
+    block.magic = DSRRandomizer::kProtectionMagic;
+    block.version = DSRRandomizer::kProtectionProtocolVersion;
+    block.size = static_cast<std::uint16_t>(sizeof(block));
+    block.requiredFlags = requiredFlags;
+    wcsncpy_s(block.pipeName, pipeName.c_str(), _TRUNCATE);
+    constexpr wchar_t path[] = L"C:\\fixture";
+    wcsncpy_s(block.virtualDocuments, path, _TRUNCATE);
+    wcsncpy_s(block.virtualLogicalSave, path, _TRUNCATE);
+    wcsncpy_s(block.realSaveRoot, path, _TRUNCATE);
+    wcsncpy_s(block.externalSaveRoot, path, _TRUNCATE);
+    wcsncpy_s(block.dedicatedRmm, path, _TRUNCATE);
+    return block;
+}
+
+int VerifySimplifiedProductionBitmap() {
+    HarmlessPipeFixture pipe;
+    if (!pipe.IsValid()) {
+        return Fail("harmless supervisor pipe fixture could not be created");
+    }
+
+    constexpr auto simplified = 0x7FULL;
+    struct RejectedCase {
+        const char* name;
+        std::uint64_t flags;
+    };
+    std::array<RejectedCase, 10> rejected{};
+    for (std::size_t bit = 0; bit < 7; ++bit) {
+        rejected[bit] = {
+            "missing simplified protection bit",
+            simplified & ~(1ULL << bit),
+        };
+    }
+    rejected[7] = {"unexpected heartbeat bit", simplified | (1ULL << 7)};
+    rejected[8] = {"unexpected hook-integrity bit", simplified | (1ULL << 8)};
+    rejected[9] = {"unexpected unknown high bit", simplified | (1ULL << 40)};
+
+    for (const auto& test : rejected) {
+        auto candidate = ProductionBlock(pipe.Name(), test.flags);
+        const auto actual = DSRRandomizer::InitializeProtection(&candidate);
+        if (actual != DSRRandomizer::InitStatus::RequiredProtectionUnavailable
+            || DSRRandomizer::CurrentProtectionFlags()
+                != DSRRandomizer::ProtectionFlags::None) {
+            std::cerr << "production bitmap rejection failed: " << test.name
+                      << ", flags=" << test.flags
+                      << ", actual=" << static_cast<unsigned int>(actual) << '\n';
+            return 1;
+        }
+    }
+
+    auto exact = ProductionBlock(pipe.Name(), simplified);
+    const auto exactStatus = DSRRandomizer::InitializeProtection(&exact);
+    if (exactStatus != DSRRandomizer::InitStatus::GameServiceProfileMismatch) {
+        return Fail("exact simplified bitmap did not enter production core initialization");
+    }
+    return 0;
 }
 
 bool ThrowingPathReader(
@@ -149,6 +249,11 @@ int VerifyInvalidWinsockBlocks() {
 }  // namespace
 
 int main() {
+    if (const auto simplifiedResult = VerifySimplifiedProductionBitmap();
+        simplifiedResult != 0) {
+        return simplifiedResult;
+    }
+
     if (const auto invalidWinsockResult = VerifyInvalidWinsockBlocks();
         invalidWinsockResult != 0) {
         return invalidWinsockResult;

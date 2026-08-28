@@ -324,6 +324,21 @@ std::uint64_t ReadCurrentProtectionFlags() noexcept {
 }  // namespace
 
 InitStatus InitializeProtection(ProtectionInitBlock* block) noexcept {
+    if (block != nullptr
+        && block->requiredFlags == kSimplifiedOfflineRequiredFlags) {
+        const auto status = InitializeCore(block, &ReadRequiredPath, nullptr);
+        if (status != InitStatus::Success) {
+            return status;
+        }
+
+        HANDLE pipe = INVALID_HANDLE_VALUE;
+        const auto reportStatus = OpenSupervisorSession(*block, pipe);
+        if (pipe != INVALID_HANDLE_VALUE) {
+            CloseHandle(pipe);
+        }
+        return reportStatus;
+    }
+
     constexpr auto monitorFlags =
         static_cast<std::uint64_t>(ProtectionFlags::Heartbeat)
         | static_cast<std::uint64_t>(ProtectionFlags::HookIntegrity);

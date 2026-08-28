@@ -7,6 +7,8 @@ namespace DSRRandomizer {
 
 inline constexpr std::uint32_t kProtectionMagic = 0x44535252;
 inline constexpr std::uint16_t kProtectionProtocolVersion = 2;
+inline constexpr std::uint64_t kSimplifiedOfflineRequiredFlags =
+    (1ULL << 7) - 1ULL;
 inline constexpr std::size_t kProtectionNonceSize = 32;
 inline constexpr std::size_t kProtectionPipeNameCharacters = 128;
 inline constexpr std::size_t kProtectionSavePathCharacters = 512;

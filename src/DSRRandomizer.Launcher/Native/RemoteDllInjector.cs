@@ -162,6 +162,22 @@ public sealed class RemoteDllInjector
                 return handshake;
             }
 
+            if (SimplifiedOfflineProtection.IsExact(configuration.RequiredFlags))
+            {
+                var oneShot = await pipe.CompleteOneShotAsync(handshake);
+                pipe = null;
+                return oneShot;
+            }
+
+            const ProtectionFlags monitorFlags =
+                ProtectionFlags.Heartbeat | ProtectionFlags.HookIntegrity;
+            if (((ProtectionFlags)configuration.RequiredFlags & monitorFlags) != monitorFlags)
+            {
+                await pipe.DisposeAsync();
+                pipe = null;
+                return ProtectionHandshake.Failed("SAFETY_MONITOR_UNAVAILABLE");
+            }
+
             pipeOwnershipTransferred = true;
             return handshake with { Session = pipe };
         }
