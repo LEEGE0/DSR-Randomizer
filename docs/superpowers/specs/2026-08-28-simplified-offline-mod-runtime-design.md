@@ -35,7 +35,7 @@ A mod is active when its folder/files are present in the modded runtime and inac
 ## 4. Save behavior
 
 - The modded game uses only `<external-root>\DSR-Modded\Saves\DRAKS0005.rmm`.
-- If `.rmm` is absent, the launcher performs the already implemented confirmed, read-only bootstrap from the selected normal `DRAKS0005.sl2`.
+- If `.rmm` is absent when modded launch is requested, the launcher automatically performs the already implemented read-only bootstrap from the selected normal `DRAKS0005.sl2`, publishes `.rmm` atomically, and then launches.
 - If a valid `.rmm` exists, it is reused and the normal save is not reopened.
 - The child process is denied access to the canonical normal DSR save root, Overhaul save suffixes, and any `.sl2` fallback.
 - Deleting mod folders never deletes or resets `.rmm`.
@@ -67,7 +67,7 @@ This is a deliberate user-approved simplification. Steam Offline Mode is an oper
 Select copied runtime
   -> verify source/runtime separation
   -> verify protected core identities
-  -> prepare or reuse DRAKS0005.rmm
+  -> reuse DRAKS0005.rmm, or create it once from DRAKS0005.sl2 when absent
   -> discover present mod folders for diagnostics only
   -> create copied game suspended in a kill-on-close Job Object
   -> inject guard
@@ -81,7 +81,7 @@ There is no automatic mod activation database. Mod discovery records folder name
 
 ## 7. Failure behavior
 
-- A missing/modified protected core file, wrong profile, incomplete bitmap, injection failure, or save redirection failure terminates the Job before resume.
+- A missing/modified protected core file, wrong profile, incomplete bitmap, injection failure, save redirection failure, or a missing/invalid `.sl2` when `.rmm` also does not exist terminates before resume.
 - Unknown or extra protection flags are rejected for the simplified launch contract.
 - A user mod may modify ordinary copied data files. Such changes do not invalidate the clean-source manifest, but protected core files remain immutable.
 - If the copied runtime becomes unusable, the user may delete it and rebuild it from the verified original source. The launcher does not attempt per-mod rollback.

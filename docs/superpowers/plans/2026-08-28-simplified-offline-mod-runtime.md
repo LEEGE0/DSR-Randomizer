@@ -31,7 +31,7 @@
 - `RuntimeBuilder` copies only paths present in the verified stock `GameFileCatalog`; files present in the source but absent from that copy manifest are never copied. It may create an empty top-level `Mods` directory after writing the clean runtime manifest. Once the user adds files, strict audit may fail by design while mod readiness can still succeed.
 - The known `0x7F` offline and heartbeat/monitor implementations are outside the product path. Task reviews only reopen them if the new save-only path reaches or weakens them.
 - Root changes take effect after restart so every material service has one immutable external root for its lifetime.
-- A launch must verify an existing valid `.rmm` without opening or mutating the normal `.sl2`; save bootstrap remains a separate explicit operation.
+- A launch reuses a valid existing `.rmm` without opening or mutating the normal `.sl2`. Only when `.rmm` is absent, launch reads the selected `.sl2` and atomically creates `.rmm` before any game process is created; it never writes the normal save.
 
 ---
 
@@ -320,7 +320,7 @@ git commit -m "feat: select external mod runtime root"
 **Interfaces:**
 - Produces: `ILauncherService.LaunchModdedAsync(string steamId, CancellationToken)`.
 - Produces CLI: `--launch <SteamID>` using the selected external root.
-- Produces WPF `LaunchCommand` enabled only after mod-ready runtime and valid existing `.rmm` checks.
+- Produces WPF `LaunchCommand` enabled when the mod-ready runtime can reuse a valid `.rmm` or perform the one-time read-only `.sl2` bootstrap.
 - Produces: exact save-only one-shot contract `Bootstrap | SaveKnownFolder | SaveFileIo == 0x7`, with no monitor session.
 - Consumes: pinned profile catalog, `ModRuntimeReadinessService`, existing dedicated save service, and `WindowsProtectedProcessPlatform`.
 - Requires the user to place Steam in Offline Mode; the launcher displays this prerequisite but does not enforce or attest it.
@@ -343,7 +343,7 @@ public async Task LaunchModdedAsync_UsesCopiedExeDedicatedRmmAndExactSaveBitmap(
 }
 ```
 
-Add failures for missing `.rmm`, changed core EXE/DLL, runtime/source path equality, reparse escape, unsupported profile, missing guard DLL, incomplete or extra save flags, unexpected session on the product one-shot path, and attempted normal/Overhaul save path use. Add native/managed tests proving exact `0x7` is sessionless, while `0x6`, `0xF`, and unknown extras fail before resume. Preserve the separate exact `0x7F` path tests.
+Add a launch fixture with no `.rmm` and a valid `.sl2`; assert exactly one read-only bootstrap creates the byte-identical `.rmm` before process creation. Add a second launch with an existing valid `.rmm`; assert the normal save is never opened and the existing `.rmm` is reused byte-for-byte. Add failures for both saves missing, invalid source save when bootstrap is needed, changed core EXE/DLL, runtime/source path equality, reparse escape, unsupported profile, missing guard DLL, incomplete or extra save flags, unexpected session on the product one-shot path, and attempted normal/Overhaul save path use. Add native/managed tests proving exact `0x7` is sessionless, while `0x6`, `0xF`, and unknown extras fail before resume. Preserve the separate exact `0x7F` path tests.
 
 - [ ] **Step 2: Run focused tests and observe RED**
 
@@ -355,12 +355,12 @@ Expected: compile/test failure because the service and product commands remain l
 
 - [ ] **Step 3: Implement launch request construction**
 
-`LauncherService` performs this order without opening the normal save:
+`LauncherService` performs this order; the normal save is opened read-only only on the one-time branch where `.rmm` is absent:
 
 ```text
 mod-ready runtime validation
 -> exact runtime EXE identity and compatibility profile selection
--> existing valid DRAKS0005.rmm verification
+-> reuse valid DRAKS0005.rmm without normal-save access, or atomically bootstrap it from DRAKS0005.sl2 only when absent
 -> packaged guard DLL presence/hash policy
 -> construct virtual Documents and dedicated save paths under external root
 -> SafetyLaunchCoordinator.LaunchAsync with RequiredFlags = 0x7
