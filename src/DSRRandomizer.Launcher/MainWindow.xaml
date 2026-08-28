@@ -66,7 +66,7 @@
             <ProgressBar Height="18"
                          Minimum="0"
                          Maximum="100"
-                         Value="{Binding ProgressPercent}" />
+                         Value="{Binding ProgressPercent, Mode=OneWay}" />
 
             <TextBlock Margin="0,20,0,0"
                        FontWeight="SemiBold"
