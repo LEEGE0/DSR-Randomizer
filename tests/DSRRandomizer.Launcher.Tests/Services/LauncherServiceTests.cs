@@ -98,7 +98,10 @@ public sealed class LauncherServiceTests : IDisposable
         var access = new NormalSaveBlockingFileAccess(new SystemFileAccess());
 
         Assert.False(access.Exists(normalSave));
-        Assert.Throws<UnauthorizedAccessException>(() => access.GetAttributes(normalSave));
+        var attributesFailure = Assert.Throws<UnauthorizedAccessException>(
+            () => access.GetAttributes(normalSave));
+        Assert.DoesNotContain("confirmation", attributesFailure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("session", attributesFailure.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Throws<UnauthorizedAccessException>(() =>
             access.Open(normalSave, FileMode.Open, FileAccess.Read, FileShare.Read));
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
@@ -288,6 +291,79 @@ public sealed class LauncherServiceTests : IDisposable
         Assert.True(result.Started, result.ErrorCode);
         Assert.Equal(0, fixture.FileAccess.NormalSaveOpenCount);
         Assert.Equal(rmmBefore, await File.ReadAllBytesAsync(fixture.DedicatedRmm));
+    }
+
+    [Fact]
+    public async Task LaunchModdedAsync_ExistingRmmDisappearsBeforeSessionNeverFallsBackToNormalSave()
+    {
+        using var fixture = await LaunchFixture.CreateAsync(existingRmm: true);
+        fixture.FileAccess.OnAcquireMutationLease = () =>
+        {
+            File.Delete(fixture.DedicatedRmm);
+            File.Delete(Path.Combine(
+                Path.GetDirectoryName(fixture.DedicatedRmm)!,
+                "save-metadata.json"));
+        };
+
+        var result = await fixture.Service.LaunchModdedAsync(
+            SteamId,
+            CancellationToken.None);
+
+        Assert.False(result.Started);
+        Assert.Equal(0, fixture.FileAccess.NormalSaveOpenCount);
+        Assert.Equal(0, fixture.Platform.CreateCalls);
+        fixture.AssertSessionLockReleased();
+    }
+
+    [Fact]
+    public async Task LaunchModdedAsync_ByteIdenticalRmmReplacementBeforeSessionFailsAndReleasesLock()
+    {
+        using var fixture = await LaunchFixture.CreateAsync(existingRmm: true);
+        var originalBytes = await File.ReadAllBytesAsync(fixture.DedicatedRmm);
+        fixture.FileAccess.OnAcquireMutationLease = () =>
+        {
+            var replacement = fixture.DedicatedRmm + ".replacement";
+            File.WriteAllBytes(replacement, originalBytes);
+            File.Move(replacement, fixture.DedicatedRmm, overwrite: true);
+        };
+
+        var result = await fixture.Service.LaunchModdedAsync(
+            SteamId,
+            CancellationToken.None);
+
+        Assert.False(result.Started);
+        Assert.Equal(0, fixture.FileAccess.NormalSaveOpenCount);
+        Assert.Equal(0, fixture.Platform.CreateCalls);
+        fixture.AssertSessionLockReleased();
+    }
+
+    [Fact]
+    public async Task LaunchModdedAsync_MatchingSaveAndMetadataReplacementBeforeSessionFails()
+    {
+        using var fixture = await LaunchFixture.CreateAsync(existingRmm: true);
+        var metadataPath = Path.Combine(
+            Path.GetDirectoryName(fixture.DedicatedRmm)!,
+            "save-metadata.json");
+        var saveBytes = await File.ReadAllBytesAsync(fixture.DedicatedRmm);
+        var metadataBytes = await File.ReadAllBytesAsync(metadataPath);
+        fixture.FileAccess.OnAcquireMutationLease = () =>
+        {
+            var saveReplacement = fixture.DedicatedRmm + ".replacement";
+            var metadataReplacement = metadataPath + ".replacement";
+            File.WriteAllBytes(saveReplacement, saveBytes);
+            File.WriteAllBytes(metadataReplacement, metadataBytes);
+            File.Move(saveReplacement, fixture.DedicatedRmm, overwrite: true);
+            File.Move(metadataReplacement, metadataPath, overwrite: true);
+        };
+
+        var result = await fixture.Service.LaunchModdedAsync(
+            SteamId,
+            CancellationToken.None);
+
+        Assert.False(result.Started);
+        Assert.Equal(0, fixture.FileAccess.NormalSaveOpenCount);
+        Assert.Equal(0, fixture.Platform.CreateCalls);
+        fixture.AssertSessionLockReleased();
     }
 
     [Fact]
@@ -814,6 +890,14 @@ public sealed class LauncherServiceTests : IDisposable
             lease.Verify();
         }
 
+        public void AssertSessionLockReleased()
+        {
+            using var lease = new SystemFileAccess().AcquireSessionLock(
+                ExternalRoot,
+                Path.Combine(ExternalRoot, "saves", SteamId, ".session.lock"));
+            lease.Verify();
+        }
+
         public Task PointSourceAtRuntimeAsync() => File.WriteAllTextAsync(
             Path.Combine(ExternalRoot, "config", "source-installation.json"),
             JsonSerializer.Serialize(new { canonicalInstallationPath = RuntimeRoot }));
@@ -1084,10 +1168,18 @@ public sealed class LauncherServiceTests : IDisposable
     {
         private readonly IFileAccess _inner = new SystemFileAccess();
         public bool FailNextLeaseVerification { get; set; }
+        public Action? OnAcquireMutationLease { get; set; }
         public int NormalSaveOpenCount { get; private set; }
         public bool Exists(string path) => _inner.Exists(path);
-        public IFileMutationLease AcquireMutationLease(string rootPath, IReadOnlyCollection<string> directoryPaths) =>
-            new TrackingLease(_inner.AcquireMutationLease(rootPath, directoryPaths), this);
+        public IFileMutationLease AcquireMutationLease(
+            string rootPath,
+            IReadOnlyCollection<string> directoryPaths)
+        {
+            var action = OnAcquireMutationLease;
+            OnAcquireMutationLease = null;
+            action?.Invoke();
+            return new TrackingLease(_inner.AcquireMutationLease(rootPath, directoryPaths), this);
+        }
         public IFileMutationLease AcquireSessionLock(string rootPath, string lockPath) =>
             _inner.AcquireSessionLock(rootPath, lockPath);
         public FileAttributes GetAttributes(string path) => _inner.GetAttributes(path);

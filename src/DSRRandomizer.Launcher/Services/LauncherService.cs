@@ -402,11 +402,19 @@ public sealed class LauncherService : ILauncherService
             var dedicatedSave = await dedicatedSaveService.PrepareAsync(
                 steamId,
                 cancellationToken);
-            if (!dedicatedSave.Ready || string.IsNullOrWhiteSpace(dedicatedSave.SavePath))
+            if (!dedicatedSave.Ready
+                || string.IsNullOrWhiteSpace(dedicatedSave.SavePath)
+                || string.IsNullOrWhiteSpace(dedicatedSave.SaveIdentity)
+                || string.IsNullOrWhiteSpace(dedicatedSave.MetadataIdentity))
             {
                 return SafetyLaunchResult.Failed(
                     $"DEDICATED_SAVE_{dedicatedSave.ErrorCode.ToString().ToUpperInvariant()}");
             }
+            var sessionSaveService = new DedicatedSaveService(
+                layout,
+                boundary,
+                selectionStore,
+                new NormalSaveBlockingFileAccess(_fileAccess));
 
             var virtualDocuments = layout.VirtualProfile;
             var virtualProfile = Path.Combine(
@@ -432,8 +440,10 @@ public sealed class LauncherService : ILauncherService
                 realSaveRoot,
                 externalSaveRoot,
                 dedicatedPath);
-            var saveSession = await dedicatedSaveService.BeginSessionAsync(
+            var saveSession = await sessionSaveService.BeginSessionAsync(
                 steamId,
+                dedicatedSave.SaveIdentity,
+                dedicatedSave.MetadataIdentity,
                 cancellationToken);
             if (!saveSession.Ready || string.IsNullOrWhiteSpace(saveSession.SessionToken))
             {
@@ -457,7 +467,7 @@ public sealed class LauncherService : ILauncherService
             catch
             {
                 await CompleteAbnormalSessionWithoutMaskingAsync(
-                    dedicatedSaveService,
+                    sessionSaveService,
                     steamId,
                     saveSession.SessionToken);
                 throw;
@@ -467,12 +477,12 @@ public sealed class LauncherService : ILauncherService
             if (!normalGuardedExit)
             {
                 await CompleteAbnormalSessionWithoutMaskingAsync(
-                    dedicatedSaveService,
+                    sessionSaveService,
                     steamId,
                     saveSession.SessionToken);
                 return launchResult;
             }
-            var saveCompletion = await dedicatedSaveService.CompleteSessionAsync(
+            var saveCompletion = await sessionSaveService.CompleteSessionAsync(
                 steamId,
                 saveSession.SessionToken,
                 normalGuardedExit: true,
@@ -626,7 +636,7 @@ internal sealed class NormalSaveBlockingFileAccess(IFileAccess inner) : IFileAcc
         if (IsNormalSave(path))
         {
             throw new UnauthorizedAccessException(
-                "The normal DRAKS0005.sl2 save cannot be opened before first-copy confirmation.");
+                "The normal DRAKS0005.sl2 save cannot be opened during guarded session setup or completion.");
         }
     }
 

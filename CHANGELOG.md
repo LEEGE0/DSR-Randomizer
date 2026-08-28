@@ -9,7 +9,7 @@ All notable changes to DSR Randomizer are documented here.
 - Windows x64 WPF foundation launcher.
 - Read-only verification of a Dark Souls Remastered source installation.
 - Explicit stock-file catalog that excludes installed Overhaul and companion files.
-- Full independent external runtime copies under `%LOCALAPPDATA%\DSR-Randomizer`.
+- Full independent runtime copies under the user-selected external material root; `%LOCALAPPDATA%\DSR-Randomizer` contains only the external-root pointer.
 - Staged copy verification with SHA-256, source snapshots, rollback, and atomic runtime activation.
 - Runtime-readiness validation and command-line status output.
 - Original-installation before/after immutability proof.

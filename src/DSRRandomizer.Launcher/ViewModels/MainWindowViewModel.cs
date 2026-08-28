@@ -24,9 +24,7 @@ public sealed class MainWindowViewModel : ObservableObject
     private SaveProfileCandidate? _selectedSaveProfile;
     private string _selectedSaveSourcePath = string.Empty;
     private string _dedicatedSavePath = string.Empty;
-    private bool _firstCopyConfirmed;
     private bool _runtimeReady;
-    private bool _saveReadyForLaunch;
 
     public MainWindowViewModel(
         ILauncherService? service,
@@ -54,9 +52,6 @@ public sealed class MainWindowViewModel : ObservableObject
         InitializeCommand = new AsyncRelayCommand(
             _ => InitializeAsync(),
             _ => CanMutate());
-        PrepareSaveCommand = new AsyncRelayCommand(
-            _ => PrepareSaveAsync(),
-            _ => CanPrepareSave());
         LaunchCommand = new AsyncRelayCommand(
             _ => LaunchAsync(),
             _ => CanLaunch);
@@ -114,14 +109,13 @@ public sealed class MainWindowViewModel : ObservableObject
         }
     }
 
-    public bool CanLaunch => CanPrepareSave()
+    public bool CanLaunch => CanUseMaterialOperations()
         && _runtimeReady
-        && _saveReadyForLaunch
         && SelectedSaveProfile is not null;
 
     public bool CanInitialize => CanMutate();
 
-    public bool AreSaveControlsEnabled => CanPrepareSave();
+    public bool AreSaveControlsEnabled => CanUseMaterialOperations();
 
     public ObservableCollection<SaveProfileCandidate> SaveProfiles { get; } = [];
 
@@ -132,8 +126,6 @@ public sealed class MainWindowViewModel : ObservableObject
         {
             if (SetProperty(ref _selectedSaveProfile, value))
             {
-                _saveReadyForLaunch = false;
-                FirstCopyConfirmed = false;
                 SelectedSaveSourcePath = value?.SourcePath ?? string.Empty;
                 DedicatedSavePath = value is null
                     ? string.Empty
@@ -159,17 +151,9 @@ public sealed class MainWindowViewModel : ObservableObject
         private set => SetProperty(ref _dedicatedSavePath, value);
     }
 
-    public bool FirstCopyConfirmed
-    {
-        get => _firstCopyConfirmed;
-        set => SetProperty(ref _firstCopyConfirmed, value);
-    }
-
     public AsyncRelayCommand VerifyCommand { get; }
 
     public AsyncRelayCommand InitializeCommand { get; }
-
-    public AsyncRelayCommand PrepareSaveCommand { get; }
 
     public AsyncRelayCommand LaunchCommand { get; }
 
@@ -205,16 +189,7 @@ public sealed class MainWindowViewModel : ObservableObject
                 return;
             }
 
-            var result = await Service.PrepareDedicatedSaveAsync(
-                SelectedSaveProfile.SteamId,
-                firstCopyConfirmed: false,
-                CancellationToken.None);
-            _saveReadyForLaunch = result.Ready
-                || (result.ErrorCode == SaveErrorCode.FirstCopyConfirmationRequired
-                    && !string.IsNullOrWhiteSpace(SelectedSaveProfile.SourcePath));
-            Status = _saveReadyForLaunch
-                ? "Modded runtime and save input are ready. Put Steam in Offline Mode before launch."
-                : $"Modded launch is not ready: {result.Message}";
+            Status = AutomaticSaveLaunchStatus;
         }
         catch (Exception exception)
         {
@@ -279,69 +254,20 @@ public sealed class MainWindowViewModel : ObservableObject
             }
 
             _runtimeReady = true;
+            await DiscoverProfilesOnceAsync();
+            if (SaveProfiles.Count == 1)
+            {
+                SelectedSaveProfile = SaveProfiles[0];
+            }
             ProgressPercent = 100;
-            Status = "External mod runtime is ready. Select a SteamID to launch after placing Steam in Offline Mode.";
+            Status = SelectedSaveProfile is null
+                ? "External mod runtime is ready. Select a SteamID to launch after placing Steam in Offline Mode."
+                : AutomaticSaveLaunchStatus;
         }
         catch (Exception exception)
         {
             await LogWithoutMaskingAsync(exception);
             Status = $"Runtime creation failed: {exception.Message}";
-        }
-        finally
-        {
-            IsBusy = false;
-        }
-    }
-
-    private async Task PrepareSaveAsync()
-    {
-        IsBusy = true;
-        try
-        {
-            await DiscoverProfilesOnceAsync();
-
-            if (SaveProfiles.Count == 0)
-            {
-                Status = "No Dark Souls Remastered save profile was discovered.";
-                return;
-            }
-
-            if (SelectedSaveProfile is null)
-            {
-                Status = "Multiple save profiles were discovered. Select the exact SteamID to continue.";
-                return;
-            }
-
-            var selection = SelectedSaveProfile;
-            var firstCopyConfirmed = FirstCopyConfirmed;
-            var selectedSaveSourcePath = SelectedSaveSourcePath;
-            var dedicatedSavePath = DedicatedSavePath;
-            var result = await Service.PrepareDedicatedSaveAsync(
-                selection.SteamId,
-                firstCopyConfirmed,
-                CancellationToken.None);
-            if (result.Ready)
-            {
-                _saveReadyForLaunch = true;
-                Status = result.ReusedExisting
-                    ? $"Reusing existing DRAKS0005.rmm at {result.SavePath}."
-                    : $"Dedicated DRAKS0005.rmm created at {result.SavePath}.";
-                return;
-            }
-
-            _saveReadyForLaunch = !firstCopyConfirmed
-                && result.ErrorCode == SaveErrorCode.FirstCopyConfirmationRequired
-                && !string.IsNullOrWhiteSpace(selectedSaveSourcePath);
-
-            Status = !firstCopyConfirmed
-                && result.ErrorCode == SaveErrorCode.FirstCopyConfirmationRequired
-                ? $"First-copy confirmation required. Source: {selectedSaveSourcePath} Destination: {dedicatedSavePath}"
-                : $"Dedicated save preparation failed: {result.Message}";
-        }
-        catch (Exception exception)
-        {
-            await LogWithoutMaskingAsync(exception);
-            Status = $"Dedicated save preparation failed: {exception.Message}";
         }
         finally
         {
@@ -421,10 +347,10 @@ public sealed class MainWindowViewModel : ObservableObject
         }
     }
 
-    private bool CanMutate() => CanPrepareSave()
+    private bool CanMutate() => CanUseMaterialOperations()
         && !string.IsNullOrWhiteSpace(GamePath);
 
-    private bool CanPrepareSave() => _materialOperationsAvailable
+    private bool CanUseMaterialOperations() => _materialOperationsAvailable
         && !IsBusy
         && !_restartRequired
         && _service is not null;
@@ -433,7 +359,6 @@ public sealed class MainWindowViewModel : ObservableObject
     {
         VerifyCommand.RaiseCanExecuteChanged();
         InitializeCommand.RaiseCanExecuteChanged();
-        PrepareSaveCommand.RaiseCanExecuteChanged();
         LaunchCommand.RaiseCanExecuteChanged();
         SaveExternalRootCommand.RaiseCanExecuteChanged();
     }
@@ -452,6 +377,9 @@ public sealed class MainWindowViewModel : ObservableObject
 
     private ILauncherService Service => _service ?? throw new InvalidOperationException(
         "EXTERNAL_ROOT_NOT_SELECTED");
+
+    private const string AutomaticSaveLaunchStatus =
+        "Launch will reuse an existing DRAKS0005.rmm. If it is absent, launch automatically copies the selected DRAKS0005.sl2 once before process creation. Put Steam in Offline Mode before launch.";
 
     private sealed class InlineProgress<T>(Action<T> report) : IProgress<T>
     {

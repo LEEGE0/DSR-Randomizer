@@ -70,10 +70,10 @@
 
             <TextBlock Margin="0,20,0,0"
                        FontWeight="SemiBold"
-                       Text="Dedicated randomizer save" />
+                       Text="Dedicated mod save" />
             <TextBlock Margin="0,6,0,8"
                        TextWrapping="Wrap"
-                       Text="Choose the exact SteamID. An existing external save can be reused without reading the normal save; the first copy requires explicit confirmation." />
+                       Text="Choose the exact SteamID. Launch reuses an existing DRAKS0005.rmm. If it is absent, Launch automatically copies the selected DRAKS0005.sl2 once before starting the modded copy; the normal save is never written." />
             <ComboBox Margin="0,0,0,8"
                       MinHeight="30"
                       ItemsSource="{Binding SaveProfiles}"
@@ -88,16 +88,6 @@
             <TextBlock Margin="0,3,0,8"
                        Text="{Binding DedicatedSavePath}"
                        TextWrapping="Wrap" />
-            <CheckBox Margin="0,0,0,8"
-                      IsChecked="{Binding FirstCopyConfirmed}"
-                      IsEnabled="{Binding AreSaveControlsEnabled}"
-                      Content="I confirm the first copy from the exact source shown above." />
-            <Button MinWidth="180"
-                    HorizontalAlignment="Left"
-                    Padding="12,7"
-                    Content="Discover / prepare dedicated save"
-                    Command="{Binding PrepareSaveCommand}" />
-
             <Button Margin="0,18,0,14"
                     Padding="12,9"
                     Content="Launch modded copy"
