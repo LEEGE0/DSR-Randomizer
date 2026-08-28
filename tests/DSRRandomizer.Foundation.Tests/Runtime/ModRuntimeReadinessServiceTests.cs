@@ -53,6 +53,50 @@ public sealed class ModRuntimeReadinessServiceTests
     }
 
     [Fact]
+    public async Task ValidateAsync_RejectsRuntimeLeafJunctionBeforeCanonicalization()
+    {
+        using var fixture = await ModRuntimeFixture.CreateAsync();
+        var alias = Path.Combine(fixture.Layout.Runtimes, "runtime-alias");
+        CreateReparseDirectory(alias, fixture.RuntimeRoot);
+        try
+        {
+            await fixture.ActivatePointerAsync("runtime-abc", "runtimes/runtime-alias");
+
+            var result = await fixture.Service.ValidateAsync(CancellationToken.None);
+
+            Assert.False(result.IsReady);
+            Assert.Contains(result.Errors, error => error.Contains("reparse", StringComparison.OrdinalIgnoreCase));
+        }
+        finally
+        {
+            DeleteReparseDirectory(alias);
+        }
+    }
+
+    [Fact]
+    public async Task ValidateAsync_RejectsRuntimesRootJunctionBeforeCanonicalization()
+    {
+        using var fixture = await ModRuntimeFixture.CreateAsync();
+        var target = Path.Combine(fixture.Layout.Root, "runtime-store");
+        Directory.Move(fixture.Layout.Runtimes, target);
+        CreateReparseDirectory(fixture.Layout.Runtimes, target);
+        try
+        {
+            await fixture.ActivatePointerAsync("runtime-abc", "runtimes/runtime-abc");
+
+            var result = await fixture.Service.ValidateAsync(CancellationToken.None);
+
+            Assert.False(result.IsReady);
+            Assert.Contains(result.Errors, error => error.Contains("reparse", StringComparison.OrdinalIgnoreCase));
+        }
+        finally
+        {
+            DeleteReparseDirectory(fixture.Layout.Runtimes);
+            Directory.Move(target, fixture.Layout.Runtimes);
+        }
+    }
+
+    [Fact]
     public async Task ValidateAsync_RejectsPointerOutsideSelectedRoot()
     {
         using var fixture = await ModRuntimeFixture.CreateAsync();
@@ -186,6 +230,12 @@ public sealed class ModRuntimeReadinessServiceTests
             File.WriteAllTextAsync(
                 Path.Combine(Layout.Root, "runtime-current.json"),
                 JsonSerializer.Serialize(pointer, JsonOptions));
+
+        public async Task ActivatePointerAsync(string runtimeId, string relativeRuntimePath) =>
+            await WritePointerAsync(new RuntimePointer(
+                runtimeId,
+                relativeRuntimePath,
+                await _hashes.ComputeSha256Async(ManifestPath, CancellationToken.None)));
 
         public void Dispose() => Directory.Delete(_container, recursive: true);
 

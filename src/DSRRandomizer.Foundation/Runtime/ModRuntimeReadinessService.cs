@@ -46,6 +46,8 @@ public sealed class ModRuntimeReadinessService
             var runtimeCandidate = RuntimePathSafety.ResolveUnderRoot(
                 _layout.Root,
                 pointer.RelativeRuntimePath);
+            EnsureNoReparsePathSegments(_layout.Root, _layout.Runtimes);
+            EnsureNoReparsePathSegments(_layout.Root, runtimeCandidate);
             _boundary.EnsureAllowed(runtimeCandidate);
             var runtimePath = _canonicalizer.Canonicalize(runtimeCandidate);
             var runtimesRoot = _canonicalizer.Canonicalize(_layout.Runtimes);
@@ -172,6 +174,43 @@ public sealed class ModRuntimeReadinessService
                     pending.Push(entry.FullName);
                 }
             }
+        }
+    }
+
+    private static void EnsureNoReparsePathSegments(string root, string path)
+    {
+        var normalizedRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
+        var candidate = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+        if (!candidate.Equals(normalizedRoot, StringComparison.OrdinalIgnoreCase)
+            && !candidate.StartsWith(
+                normalizedRoot + Path.DirectorySeparatorChar,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new UnauthorizedAccessException($"Path escapes its declared root: {path}");
+        }
+
+        var current = normalizedRoot;
+        ThrowIfReparsePoint(current);
+        var relativePath = Path.GetRelativePath(normalizedRoot, candidate);
+        foreach (var segment in relativePath.Split(
+                     [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, segment);
+            if (!Directory.Exists(current) && !File.Exists(current))
+            {
+                return;
+            }
+
+            ThrowIfReparsePoint(current);
+        }
+    }
+
+    private static void ThrowIfReparsePoint(string path)
+    {
+        if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+        {
+            throw new IOException($"Reparse points are not allowed in a runtime: {path}");
         }
     }
 
