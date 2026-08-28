@@ -27,7 +27,7 @@
 
 - The active content-addressed runtime selected by the existing runtime pointer is the conceptual `Game` directory. Do not create a second copy, junction, or reparse-point alias.
 - `RuntimeReadinessService` remains the strict clean-copy audit. The new `ModRuntimeReadinessService` is the only readiness check used by the modded launch path.
-- `RuntimeBuilder` may create an empty top-level `Mods` directory after writing the clean manifest. Once the user adds files, strict audit may fail by design while mod readiness can still succeed.
+- `RuntimeBuilder` copies only paths present in the verified stock `GameFileCatalog`; files present in the source but absent from that copy manifest are never copied. It may create an empty top-level `Mods` directory after writing the clean runtime manifest. Once the user adds files, strict audit may fail by design while mod readiness can still succeed.
 - The known experimental heartbeat/monitor implementation is out of the simplified product path. Task reviews only reopen it if the new one-shot path reaches or weakens it.
 - Root changes take effect after restart so every material service has one immutable external root for its lifetime.
 - A launch must verify an existing valid `.rmm` without opening or mutating the normal `.sl2`; save bootstrap remains a separate explicit operation.
@@ -179,6 +179,8 @@ public async Task ValidateAsync_RejectsProtectedCoreChange(string relativePath)
 
 Add cases for a reparse point anywhere, runtime outside the selected root, missing/changed manifest, case-colliding protected names, top-level mod folder sorting, and folder deletion removing the name without persisted state.
 
+Add a `RuntimeBuilderTests.BuildAsync_CopiesOnlyVerifiedCatalogEntries` characterization test. Place an extra file under a stock source directory but omit it from the verified `GameFileCatalog`; assert the file is absent from the built runtime and the generated runtime manifest. `RuntimeBuilder` must never enumerate unlisted source files as copy candidates.
+
 - [ ] **Step 2: Run focused tests and observe RED**
 
 Run:
@@ -201,7 +203,7 @@ private static readonly string[] ProtectedCore =
 ];
 ```
 
-It must require every traversed path to remain a non-reparse descendant, allow ordinary file changes/additions/deletions, and never modify the runtime. `RuntimeBuilder` creates an empty `Mods` directory after activating the verified runtime. `ModFolderDiscovery` rejects reparse directories and returns only `DirectoryInfo.Name`, sorted ordinal-ignore-case.
+It must require every traversed path to remain a non-reparse descendant, allow ordinary file changes/additions/deletions, and never modify the runtime. `RuntimeBuilder` copies only the verified stock catalog entries and creates an empty `Mods` directory after activating the verified runtime. It must not copy a source file that is absent from the catalog, even when that file is located under a stock data directory. `ModFolderDiscovery` rejects reparse directories and returns only `DirectoryInfo.Name`, sorted ordinal-ignore-case.
 
 - [ ] **Step 4: Run focused and full Foundation tests**
 
@@ -216,7 +218,7 @@ Expected: all pass; existing strict immutability tests remain unchanged and gree
 - [ ] **Step 5: Commit**
 
 ```powershell
-git add -- src/DSRRandomizer.Foundation/Runtime/ModRuntimeReadinessService.cs src/DSRRandomizer.Foundation/Runtime/ModFolderDiscovery.cs src/DSRRandomizer.Foundation/Runtime/RuntimeBuilder.cs src/DSRRandomizer.Foundation/Paths/LocalDataLayout.cs tests/DSRRandomizer.Foundation.Tests/Runtime/ModRuntimeReadinessServiceTests.cs tests/DSRRandomizer.Foundation.Tests/Runtime/ModFolderDiscoveryTests.cs
+git add -- src/DSRRandomizer.Foundation/Runtime/ModRuntimeReadinessService.cs src/DSRRandomizer.Foundation/Runtime/ModFolderDiscovery.cs src/DSRRandomizer.Foundation/Runtime/RuntimeBuilder.cs src/DSRRandomizer.Foundation/Paths/LocalDataLayout.cs tests/DSRRandomizer.Foundation.Tests/Runtime/ModRuntimeReadinessServiceTests.cs tests/DSRRandomizer.Foundation.Tests/Runtime/ModFolderDiscoveryTests.cs tests/DSRRandomizer.Foundation.Tests/Runtime/RuntimeBuilderTests.cs
 git commit -m "feat: allow folder-based mods in copied runtime"
 ```
 
