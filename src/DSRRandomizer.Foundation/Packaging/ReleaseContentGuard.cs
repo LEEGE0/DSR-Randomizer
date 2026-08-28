@@ -68,5 +68,5 @@ public sealed class ReleaseContentGuard
     }
 
     private static string Normalize(string path) =>
-        path?.Replace('\\', '/').Trim() ?? string.Empty;
+        path?.Replace('\\', '/') ?? string.Empty;
 }

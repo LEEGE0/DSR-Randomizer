@@ -1,6 +1,7 @@
 using System.IO;
 using System.Text.Json;
 using DSRRandomizer.Foundation.Packaging;
+using DSRRandomizer.Launcher.Safety;
 using DSRRandomizer.Launcher.Services;
 
 namespace DSRRandomizer.Launcher;
@@ -43,6 +44,10 @@ public sealed class LauncherApplication
 
             var paths = EnumeratePackagePaths(packagePath);
             var prohibited = new ReleaseContentGuard().Validate(paths);
+            if (prohibited.Count == 0)
+            {
+                prohibited = ReleaseArtifactIdentityValidator.Validate(packagePath);
+            }
             await WriteJsonAsync(new
             {
                 success = prohibited.Count == 0,
@@ -201,21 +206,22 @@ public sealed class LauncherApplication
     {
         var root = Path.GetFullPath(packageRoot);
         var paths = new List<string>();
-        var pending = new Stack<string>();
-        pending.Push(root);
-        while (pending.TryPop(out var directory))
+        var pending = new Stack<(string Directory, string RelativePath)>();
+        pending.Push((root, string.Empty));
+        while (pending.TryPop(out var current))
         {
-            foreach (var entry in new DirectoryInfo(directory).EnumerateFileSystemInfos())
+            foreach (var entry in new DirectoryInfo(current.Directory).EnumerateFileSystemInfos())
             {
-                var relativePath = Path.GetRelativePath(root, entry.FullName)
-                    .Replace(Path.DirectorySeparatorChar, '/');
+                var relativePath = string.IsNullOrEmpty(current.RelativePath)
+                    ? entry.Name
+                    : $"{current.RelativePath}/{entry.Name}";
                 if ((entry.Attributes & FileAttributes.ReparsePoint) != 0)
                 {
                     paths.Add($"reparse-point:{relativePath}");
                 }
                 else if ((entry.Attributes & FileAttributes.Directory) != 0)
                 {
-                    pending.Push(entry.FullName);
+                    pending.Push((entry.FullName, relativePath));
                 }
                 else
                 {

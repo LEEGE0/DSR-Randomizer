@@ -16,6 +16,8 @@ public sealed class ReleaseContentGuardTests
     [InlineData("captures/local.bin")]
     [InlineData("credentials.json")]
     [InlineData("config/generated-compatibility-profiles.json")]
+    [InlineData(" README.md")]
+    [InlineData("README.md ")]
     public void Validate_RejectsEveryUnrecognizedOrGameDerivedPath(string path)
     {
         Assert.Contains(path, new ReleaseContentGuard().Validate(new[] { path }));

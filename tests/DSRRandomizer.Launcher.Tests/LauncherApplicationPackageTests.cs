@@ -3,6 +3,7 @@ using DSRRandomizer.Foundation.Runtime;
 using DSRRandomizer.Foundation.Saves;
 using DSRRandomizer.Launcher.Services;
 using DSRRandomizer.Launcher.Safety;
+using System.Security.Cryptography;
 
 namespace DSRRandomizer.Launcher.Tests;
 
@@ -81,6 +82,105 @@ public sealed class LauncherApplicationPackageTests : IDisposable
         Assert.Contains($"missing:{missingPath}", output.ToString(), StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(" README.md")]
+    [InlineData("README.md ")]
+    public async Task RunAsync_ValidatePackageRejectsWhitespaceAliasAndReportsExactReadmeMissing(
+        string alias)
+    {
+        await CreateCompletePackageAsync();
+        var destination = Path.Combine(_packageRoot, alias);
+        if (alias.EndsWith(' '))
+        {
+            destination = @"\\?\" + destination;
+        }
+        File.Move(Path.Combine(_packageRoot, "README.md"), destination);
+        var output = new StringWriter();
+        var application = new LauncherApplication(
+            new UnusedLauncherService(),
+            output,
+            new StringWriter());
+
+        var exitCode = await application.RunAsync(
+            new[] { "--validate-package", _packageRoot },
+            CancellationToken.None);
+
+        Assert.Equal(6, exitCode);
+        Assert.Contains(alias, output.ToString(), StringComparison.Ordinal);
+        Assert.Contains("missing:README.md", output.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RunAsync_ValidatePackageRejectsGuardAndMatchingTamperedSidecar()
+    {
+        await CreateCompletePackageAsync();
+        var guardPath = PackagePath("native/DSRRandomizer.Runtime.dll");
+        var tampered = "tampered packaged guard"u8.ToArray();
+        await File.WriteAllBytesAsync(guardPath, tampered);
+        await File.WriteAllTextAsync(
+            PackagePath("native/DSRRandomizer.Runtime.dll.sha256"),
+            $"{Convert.ToHexString(SHA256.HashData(tampered)).ToLowerInvariant()}\n");
+
+        var (exitCode, output) = await ValidatePackageAsync();
+
+        Assert.Equal(6, exitCode);
+        Assert.Contains(
+            "mismatch:native/DSRRandomizer.Runtime.dll",
+            output,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RunAsync_ValidatePackageRejectsTamperedCompatibilityProfile()
+    {
+        await CreateCompletePackageAsync();
+        await File.WriteAllTextAsync(
+            PackagePath("config/compatibility-profiles.json"),
+            "{\"tampered\":true}");
+
+        var (exitCode, output) = await ValidatePackageAsync();
+
+        Assert.Equal(6, exitCode);
+        Assert.Contains(
+            "mismatch:config/compatibility-profiles.json",
+            output,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RunAsync_ValidatePackageRejectsSidecarThatDoesNotNameStagedGuard()
+    {
+        await CreateCompletePackageAsync();
+        await File.WriteAllTextAsync(
+            PackagePath("native/DSRRandomizer.Runtime.dll.sha256"),
+            $"{new string('0', 64)}\n");
+
+        var (exitCode, output) = await ValidatePackageAsync();
+
+        Assert.Equal(6, exitCode);
+        Assert.Contains(
+            "mismatch:native/DSRRandomizer.Runtime.dll.sha256",
+            output,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RunAsync_ValidatePackageRejectsMalformedGuardSidecar()
+    {
+        await CreateCompletePackageAsync();
+        await File.WriteAllTextAsync(
+            PackagePath("native/DSRRandomizer.Runtime.dll.sha256"),
+            "not-a-sha256\n");
+
+        var (exitCode, output) = await ValidatePackageAsync();
+
+        Assert.Equal(6, exitCode);
+        Assert.Contains(
+            "mismatch:native/DSRRandomizer.Runtime.dll.sha256",
+            output,
+            StringComparison.Ordinal);
+    }
+
     private async Task CreateCompletePackageAsync()
     {
         Directory.CreateDirectory(_packageRoot);
@@ -90,19 +190,47 @@ public sealed class LauncherApplicationPackageTests : IDisposable
                      "README.md",
                      "LICENSE",
                      "THIRD_PARTY_NOTICES.md",
-                     "CHANGELOG.md",
-                     "native/DSRRandomizer.Runtime.dll",
-                     "native/DSRRandomizer.Runtime.dll.sha256",
-                     "config/compatibility-profiles.json"
+                     "CHANGELOG.md"
                  })
         {
-            var fullPath = Path.Combine(
-                _packageRoot,
-                path.Replace('/', Path.DirectorySeparatorChar));
+            var fullPath = PackagePath(path);
             Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
             await File.WriteAllTextAsync(fullPath, path);
         }
+
+        var guardPath = PackagePath("native/DSRRandomizer.Runtime.dll");
+        var profilePath = PackagePath("config/compatibility-profiles.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(guardPath)!);
+        Directory.CreateDirectory(Path.GetDirectoryName(profilePath)!);
+        File.Copy(
+            Path.Combine(AppContext.BaseDirectory, "native", "DSRRandomizer.Runtime.dll"),
+            guardPath);
+        File.Copy(
+            Path.Combine(AppContext.BaseDirectory, "config", "compatibility-profiles.json"),
+            profilePath);
+        var guardHash = Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(guardPath)))
+            .ToLowerInvariant();
+        await File.WriteAllTextAsync(
+            PackagePath("native/DSRRandomizer.Runtime.dll.sha256"),
+            $"{guardHash}\n");
     }
+
+    private async Task<(int ExitCode, string Output)> ValidatePackageAsync()
+    {
+        var output = new StringWriter();
+        var application = new LauncherApplication(
+            new UnusedLauncherService(),
+            output,
+            new StringWriter());
+        var exitCode = await application.RunAsync(
+            new[] { "--validate-package", _packageRoot },
+            CancellationToken.None);
+        return (exitCode, output.ToString());
+    }
+
+    private string PackagePath(string relativePath) => Path.Combine(
+        _packageRoot,
+        relativePath.Replace('/', Path.DirectorySeparatorChar));
 
     public void Dispose()
     {
