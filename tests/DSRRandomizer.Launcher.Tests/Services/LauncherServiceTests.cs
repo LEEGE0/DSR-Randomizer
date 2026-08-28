@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.Json;
 using DSRRandomizer.Foundation.Paths;
@@ -314,6 +315,88 @@ public sealed class LauncherServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task LaunchModdedAsync_ReturnedFailureLeavesPreviousSaveBaselineUnchangedAndReleasesLock()
+    {
+        using var fixture = await LaunchFixture.CreateAsync(existingRmm: true);
+        var baseline = fixture.ReadMetadata();
+        fixture.Platform.Process.OnInject = _ =>
+        {
+            fixture.MutateDedicatedSave();
+            fixture.FileAccess.FailNextLeaseVerification = true;
+            return Task.FromResult(ProtectionHandshake.Failed("EXPECTED_HANDSHAKE_FAILURE"));
+        };
+
+        var result = await fixture.Service.LaunchModdedAsync(
+            SteamId,
+            CancellationToken.None);
+
+        Assert.False(result.Started);
+        Assert.Equal("EXPECTED_HANDSHAKE_FAILURE", result.ErrorCode);
+        fixture.AssertAbnormalBaselineAndReleasedLock(baseline);
+    }
+
+    [Fact]
+    public async Task LaunchModdedAsync_NonzeroExitLeavesPreviousSaveBaselineUnchangedAndReleasesLock()
+    {
+        using var fixture = await LaunchFixture.CreateAsync(existingRmm: true);
+        var baseline = fixture.ReadMetadata();
+        fixture.Platform.Process.OnWait = _ =>
+        {
+            fixture.MutateDedicatedSave();
+            return Task.FromResult(17);
+        };
+
+        var result = await fixture.Service.LaunchModdedAsync(
+            SteamId,
+            CancellationToken.None);
+
+        Assert.True(result.Started, result.ErrorCode);
+        Assert.Equal(17, result.ExitCode);
+        fixture.AssertAbnormalBaselineAndReleasedLock(baseline);
+    }
+
+    [Fact]
+    public async Task LaunchModdedAsync_ThrownFailurePreservesOriginalWhenAbnormalCleanupFails()
+    {
+        using var fixture = await LaunchFixture.CreateAsync(existingRmm: true);
+        var baseline = fixture.ReadMetadata();
+        var expected = new InvalidOperationException("EXPECTED_LAUNCH_FAILURE");
+        fixture.Platform.Process.OnInject = _ =>
+        {
+            fixture.MutateDedicatedSave();
+            fixture.FileAccess.FailNextLeaseVerification = true;
+            return Task.FromResult(ProtectionHandshake.Failed("EXPECTED_HANDSHAKE_FAILURE"));
+        };
+        fixture.Platform.Process.DisposeException = expected;
+
+        var actual = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            fixture.Service.LaunchModdedAsync(SteamId, CancellationToken.None));
+
+        Assert.Same(expected, actual);
+        fixture.AssertAbnormalBaselineAndReleasedLock(baseline);
+    }
+
+    [Fact]
+    public async Task LaunchModdedAsync_CancellationLeavesPreviousSaveBaselineUnchangedAndReleasesLock()
+    {
+        using var fixture = await LaunchFixture.CreateAsync(existingRmm: true);
+        var baseline = fixture.ReadMetadata();
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        fixture.Platform.Process.OnWait = _ =>
+        {
+            fixture.MutateDedicatedSave();
+            fixture.FileAccess.FailNextLeaseVerification = true;
+            return Task.FromCanceled<int>(cancellation.Token);
+        };
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            fixture.Service.LaunchModdedAsync(SteamId, CancellationToken.None));
+
+        fixture.AssertAbnormalBaselineAndReleasedLock(baseline);
+    }
+
+    [Fact]
     public async Task LaunchModdedAsync_BothSavesMissingFailsBeforeProcessCreation()
     {
         using var fixture = await LaunchFixture.CreateAsync(
@@ -404,6 +487,123 @@ public sealed class LauncherServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task LaunchModdedAsync_ReplacingGuardAndInformationalSidecarTogetherFailsBeforeProcessCreation()
+    {
+        using var fixture = await LaunchFixture.CreateAsync(existingRmm: true);
+        var replacement = LaunchFixture.SyntheticPe(0x71);
+        await File.WriteAllBytesAsync(fixture.GuardDll, replacement);
+        await File.WriteAllTextAsync(fixture.GuardHashPath, LaunchFixture.Sha256(replacement));
+
+        var result = await fixture.Service.LaunchModdedAsync(SteamId, CancellationToken.None);
+
+        Assert.False(result.Started);
+        Assert.Equal("GUARD_ARTIFACT_INVALID", result.ErrorCode);
+        Assert.Equal(0, fixture.Platform.CreateCalls);
+    }
+
+    [Fact]
+    public async Task LaunchModdedAsync_MutatedCompatibilityProfileFailsBeforeProcessCreation()
+    {
+        using var fixture = await LaunchFixture.CreateAsync(existingRmm: true);
+        await File.AppendAllTextAsync(fixture.ProfilePath, "tampered");
+
+        var result = await fixture.Service.LaunchModdedAsync(SteamId, CancellationToken.None);
+
+        Assert.False(result.Started);
+        Assert.Equal("PROFILE_ARTIFACT_INVALID", result.ErrorCode);
+        Assert.Equal(0, fixture.Platform.CreateCalls);
+    }
+
+    [Theory]
+    [InlineData("DarkSoulsRemastered.exe", "create")]
+    [InlineData("DSRRandomizer.Runtime.dll", "inject")]
+    public async Task LaunchModdedAsync_SubstitutionAtProcessBoundaryIsBlockedAndCannotResume(
+        string artifact,
+        string boundary)
+    {
+        using var fixture = await LaunchFixture.CreateAsync(existingRmm: true);
+        var path = artifact == "DarkSoulsRemastered.exe"
+            ? fixture.RuntimeExe
+            : fixture.GuardDll;
+        var substitutionBlocked = false;
+        void AttemptSubstitution() => substitutionBlocked = !TryReplace(
+            path,
+            LaunchFixture.SyntheticPe(0x72));
+        if (boundary == "create")
+        {
+            fixture.Platform.OnCreate = AttemptSubstitution;
+            fixture.Platform.Process.OnInject = _ => Task.FromResult(
+                ProtectionHandshake.Failed("EXPECTED_BOUNDARY_FAILURE"));
+        }
+        else
+        {
+            fixture.Platform.Process.OnInject = _ =>
+            {
+                AttemptSubstitution();
+                return Task.FromResult(ProtectionHandshake.Failed("EXPECTED_BOUNDARY_FAILURE"));
+            };
+        }
+
+        var result = await fixture.Service.LaunchModdedAsync(SteamId, CancellationToken.None);
+
+        Assert.True(substitutionBlocked);
+        Assert.False(result.Started);
+        Assert.Equal("EXPECTED_BOUNDARY_FAILURE", result.ErrorCode);
+        Assert.Equal(0, fixture.Platform.Process.ResumeCalls);
+    }
+
+    [Fact]
+    public async Task LaunchModdedAsync_RetainsSteamModuleLockUntilChildExit()
+    {
+        using var fixture = await LaunchFixture.CreateAsync(existingRmm: true);
+        var blockedDuringWait = false;
+        fixture.Platform.Process.OnWait = _ =>
+        {
+            blockedDuringWait = !TryReplace(
+                fixture.SteamDll,
+                LaunchFixture.SyntheticPe(0x73));
+            return Task.FromResult(0);
+        };
+
+        var result = await fixture.Service.LaunchModdedAsync(SteamId, CancellationToken.None);
+
+        Assert.True(result.Started, result.ErrorCode);
+        Assert.True(blockedDuringWait);
+        Assert.True(TryReplace(fixture.SteamDll, LaunchFixture.SyntheticPe(0x74)));
+    }
+
+    [Fact]
+    public async Task LaunchModdedAsync_RejectsHardLinkedCompatibilityProfile()
+    {
+        using var fixture = await LaunchFixture.CreateAsync(existingRmm: true);
+        var alias = Path.Combine(fixture.Container, "profile-hardlink.json");
+        Assert.True(CreateHardLink(alias, fixture.ProfilePath, IntPtr.Zero));
+
+        var result = await fixture.Service.LaunchModdedAsync(SteamId, CancellationToken.None);
+
+        Assert.False(result.Started);
+        Assert.Equal(0, fixture.Platform.CreateCalls);
+    }
+
+    [Fact]
+    public async Task LaunchModdedAsync_RejectsCompatibilityProfileBelowReparseParent()
+    {
+        using var fixture = await LaunchFixture.CreateAsync(existingRmm: true);
+        fixture.ReplaceProfileParentWithJunction();
+        try
+        {
+            var result = await fixture.Service.LaunchModdedAsync(SteamId, CancellationToken.None);
+
+            Assert.False(result.Started);
+            Assert.Equal(0, fixture.Platform.CreateCalls);
+        }
+        finally
+        {
+            fixture.RemoveProfileParentJunction();
+        }
+    }
+
+    [Fact]
     public async Task LaunchModdedAsync_RuntimeUsedAsSourceFailsBeforeProcessCreation()
     {
         using var fixture = await LaunchFixture.CreateAsync(existingRmm: true);
@@ -424,6 +624,48 @@ public sealed class LauncherServiceTests : IDisposable
             Directory.Delete(_container, recursive: true);
         }
     }
+
+    private static bool TryReplace(string path, byte[] replacement)
+    {
+        var temporary = path + $".{Guid.NewGuid():N}.replacement";
+        File.WriteAllBytes(temporary, replacement);
+        try
+        {
+            File.Move(temporary, path, overwrite: true);
+            return true;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+        finally
+        {
+            if (File.Exists(temporary))
+            {
+                File.Delete(temporary);
+            }
+        }
+    }
+
+    private static void RunCmd(string arguments)
+    {
+        using var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = "cmd.exe",
+            Arguments = $"/c {arguments}",
+            CreateNoWindow = true,
+            UseShellExecute = false
+        }) ?? throw new InvalidOperationException("Unable to start junction helper.");
+        process.WaitForExit();
+        Assert.Equal(0, process.ExitCode);
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CreateHardLink(
+        string fileName,
+        string existingFileName,
+        IntPtr securityAttributes);
 
     private static void CreateFakeInstallation(string source)
     {
@@ -505,9 +747,12 @@ public sealed class LauncherServiceTests : IDisposable
             string sourceRoot,
             string runtimeRoot,
             string runtimeExe,
+            string steamDll,
             string normalSave,
             string dedicatedRmm,
             string guardDll,
+            string guardHashPath,
+            string profilePath,
             TrackingFileAccess fileAccess,
             RecordingPlatform platform,
             LauncherService service)
@@ -517,9 +762,12 @@ public sealed class LauncherServiceTests : IDisposable
             SourceRoot = sourceRoot;
             RuntimeRoot = runtimeRoot;
             RuntimeExe = runtimeExe;
+            SteamDll = steamDll;
             NormalSave = normalSave;
             DedicatedRmm = dedicatedRmm;
             GuardDll = guardDll;
+            GuardHashPath = guardHashPath;
+            ProfilePath = profilePath;
             FileAccess = fileAccess;
             Platform = platform;
             Service = service;
@@ -530,16 +778,68 @@ public sealed class LauncherServiceTests : IDisposable
         public string SourceRoot { get; }
         public string RuntimeRoot { get; }
         public string RuntimeExe { get; }
+        public string SteamDll { get; }
         public string NormalSave { get; }
         public string DedicatedRmm { get; }
         public string GuardDll { get; }
+        public string GuardHashPath { get; }
+        public string ProfilePath { get; }
         public TrackingFileAccess FileAccess { get; }
         public RecordingPlatform Platform { get; }
         public LauncherService Service { get; }
 
+        public DedicatedSaveMetadata ReadMetadata() => JsonSerializer.Deserialize<DedicatedSaveMetadata>(
+            File.ReadAllBytes(Path.Combine(
+                ExternalRoot,
+                "saves",
+                SteamId,
+                "save-metadata.json")),
+            new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase })!;
+
+        public void MutateDedicatedSave()
+        {
+            var bytes = File.ReadAllBytes(DedicatedRmm);
+            bytes[0] ^= 0xff;
+            File.WriteAllBytes(DedicatedRmm, bytes);
+        }
+
+        public void AssertAbnormalBaselineAndReleasedLock(DedicatedSaveMetadata baseline)
+        {
+            var after = ReadMetadata();
+            Assert.False(after.CleanExit);
+            Assert.Equal(baseline.LastKnownSha256, after.LastKnownSha256);
+            using var lease = new SystemFileAccess().AcquireSessionLock(
+                ExternalRoot,
+                Path.Combine(ExternalRoot, "saves", SteamId, ".session.lock"));
+            lease.Verify();
+        }
+
         public Task PointSourceAtRuntimeAsync() => File.WriteAllTextAsync(
             Path.Combine(ExternalRoot, "config", "source-installation.json"),
             JsonSerializer.Serialize(new { canonicalInstallationPath = RuntimeRoot }));
+
+        public void ReplaceProfileParentWithJunction()
+        {
+            var parent = Path.GetDirectoryName(ProfilePath)!;
+            var target = parent + "-target";
+            Directory.Move(parent, target);
+            RunCmd($"mklink /J \"{parent}\" \"{target}\"");
+        }
+
+        public void RemoveProfileParentJunction()
+        {
+            var parent = Path.GetDirectoryName(ProfilePath)!;
+            var target = parent + "-target";
+            if (Directory.Exists(parent)
+                && (new DirectoryInfo(parent).Attributes & FileAttributes.ReparsePoint) != 0)
+            {
+                Directory.Delete(parent);
+            }
+            if (Directory.Exists(target))
+            {
+                Directory.Move(target, parent);
+            }
+        }
 
         public static async Task<LaunchFixture> CreateAsync(
             bool existingRmm,
@@ -644,6 +944,11 @@ public sealed class LauncherServiceTests : IDisposable
             await File.WriteAllBytesAsync(guardDll, guardBytes);
             var guardHashPath = guardDll + ".sha256";
             await File.WriteAllTextAsync(guardHashPath, Sha256(guardBytes));
+            var profileDirectory = Path.Combine(container, "package", "config");
+            Directory.CreateDirectory(profileDirectory);
+            var profilePath = Path.Combine(profileDirectory, "compatibility-profiles.json");
+            var profileBytes = "synthetic pinned profile"u8.ToArray();
+            await File.WriteAllBytesAsync(profilePath, profileBytes);
 
             var executableIdentity = ProfileInspector.InspectIdentity(runtimeExe);
             var steamIdentity = ProfileInspector.InspectIdentity(steamDll);
@@ -671,16 +976,22 @@ public sealed class LauncherServiceTests : IDisposable
                 catalog,
                 platform,
                 guardDll,
-                guardHashPath);
+                profilePath,
+                new LaunchArtifactIdentities(
+                    Sha256(guardBytes),
+                    Sha256(profileBytes)));
             return new LaunchFixture(
                 container,
                 externalRoot,
                 sourceRoot,
                 runtimeRoot,
                 runtimeExe,
+                steamDll,
                 normalSave,
                 dedicatedRmm,
                 guardDll,
+                guardHashPath,
+                profilePath,
                 fileAccess,
                 platform,
                 service);
@@ -688,7 +999,7 @@ public sealed class LauncherServiceTests : IDisposable
 
         public void Dispose() => Directory.Delete(Container, recursive: true);
 
-        private static byte[] SyntheticPe(byte fill)
+        internal static byte[] SyntheticPe(byte fill)
         {
             var image = Enumerable.Repeat(fill, 0x1400).ToArray();
             image[0] = (byte)'M';
@@ -715,7 +1026,7 @@ public sealed class LauncherServiceTests : IDisposable
             return image;
         }
 
-        private static string Sha256(byte[] bytes) =>
+        internal static string Sha256(byte[] bytes) =>
             Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
     }
 
@@ -725,11 +1036,13 @@ public sealed class LauncherServiceTests : IDisposable
         public int CreateCalls { get; private set; }
         public int NormalSaveOpenCountAtProcessCreation { get; private set; }
         public RecordingProcess Process { get; } = new();
+        public Action? OnCreate { get; set; }
 
         public Task<IProtectedProcess> CreateSuspendedAsync(
             SafetyLaunchRequest request,
             CancellationToken cancellationToken)
         {
+            OnCreate?.Invoke();
             CreateCalls++;
             Request = request;
             NormalSaveOpenCountAtProcessCreation = fileAccess.NormalSaveOpenCount;
@@ -742,11 +1055,15 @@ public sealed class LauncherServiceTests : IDisposable
     {
         public ulong RequiredFlags { get; set; }
         public Action? OnWaitForExit { get; set; }
+        public Func<CancellationToken, Task<ProtectionHandshake>>? OnInject { get; set; }
+        public Func<CancellationToken, Task<int>>? OnWait { get; set; }
+        public Exception? DisposeException { get; set; }
         public int ResumeCalls { get; private set; }
         public int ProcessId => 1;
         public void AssignKillOnCloseJob() { }
         public Task<ProtectionHandshake> InjectAndInitializeAsync(CancellationToken cancellationToken) =>
-            Task.FromResult(new ProtectionHandshake(true, RequiredFlags, string.Empty));
+            OnInject?.Invoke(cancellationToken)
+            ?? Task.FromResult(new ProtectionHandshake(true, RequiredFlags, string.Empty));
         public uint ResumeMainThread()
         {
             ResumeCalls++;
@@ -756,18 +1073,21 @@ public sealed class LauncherServiceTests : IDisposable
         public Task<int> WaitForExitAsync(CancellationToken cancellationToken)
         {
             OnWaitForExit?.Invoke();
-            return Task.FromResult(0);
+            return OnWait?.Invoke(cancellationToken) ?? Task.FromResult(0);
         }
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        public ValueTask DisposeAsync() => DisposeException is null
+            ? ValueTask.CompletedTask
+            : ValueTask.FromException(DisposeException);
     }
 
     private sealed class TrackingFileAccess(string normalSave) : IFileAccess
     {
         private readonly IFileAccess _inner = new SystemFileAccess();
+        public bool FailNextLeaseVerification { get; set; }
         public int NormalSaveOpenCount { get; private set; }
         public bool Exists(string path) => _inner.Exists(path);
         public IFileMutationLease AcquireMutationLease(string rootPath, IReadOnlyCollection<string> directoryPaths) =>
-            _inner.AcquireMutationLease(rootPath, directoryPaths);
+            new TrackingLease(_inner.AcquireMutationLease(rootPath, directoryPaths), this);
         public IFileMutationLease AcquireSessionLock(string rootPath, string lockPath) =>
             _inner.AcquireSessionLock(rootPath, lockPath);
         public FileAttributes GetAttributes(string path) => _inner.GetAttributes(path);
@@ -796,6 +1116,23 @@ public sealed class LauncherServiceTests : IDisposable
             _inner.ReplaceIfSourceIdentityMatches(sourcePath, destinationPath, expectedSourceIdentity);
         public bool DeleteIfIdentityMatches(string path, string expectedIdentity) =>
             _inner.DeleteIfIdentityMatches(path, expectedIdentity);
+
+        private sealed class TrackingLease(
+            IFileMutationLease inner,
+            TrackingFileAccess owner) : IFileMutationLease
+        {
+            public void Verify()
+            {
+                if (owner.FailNextLeaseVerification)
+                {
+                    owner.FailNextLeaseVerification = false;
+                    throw new InvalidOperationException("EXPECTED_ABNORMAL_CLEANUP_FAILURE");
+                }
+                inner.Verify();
+            }
+
+            public void Dispose() => inner.Dispose();
+        }
     }
 
     private sealed class FixedKnownFolderProvider(string documents) : IKnownFolderProvider

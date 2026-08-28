@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using DSRRandomizer.Foundation.Installation;
 using DSRRandomizer.Foundation.Paths;
@@ -16,10 +17,11 @@ public sealed class LauncherService : ILauncherService
     private readonly ISaveProfileLocator _saveProfileLocator;
     private readonly IFileAccess _fileAccess;
     private readonly IKnownFolderProvider _knownFolderProvider;
-    private readonly CompatibilityProfileCatalog _profiles;
+    private readonly CompatibilityProfileCatalog? _profiles;
     private readonly IProtectedProcessPlatform _platform;
     private readonly string _guardDllPath;
-    private readonly string _guardHashPath;
+    private readonly string _profilePath;
+    private readonly LaunchArtifactIdentities _artifactIdentities;
 
     public LauncherService(string externalRoot)
         : this(externalRoot, new WindowsKnownFolderProvider())
@@ -41,10 +43,11 @@ public sealed class LauncherService : ILauncherService
             externalRoot,
             knownFolderProvider,
             fileAccess,
-            CompatibilityProfileCatalog.Default,
+            profiles: null,
             new WindowsProtectedProcessPlatform(),
             Path.Combine(AppContext.BaseDirectory, "native", "DSRRandomizer.Runtime.dll"),
-            Path.Combine(AppContext.BaseDirectory, "native", "DSRRandomizer.Runtime.dll.sha256"))
+            Path.Combine(AppContext.BaseDirectory, "config", "compatibility-profiles.json"),
+            LaunchArtifactIdentities.LoadEmbedded())
     {
     }
 
@@ -52,18 +55,19 @@ public sealed class LauncherService : ILauncherService
         string externalRoot,
         IKnownFolderProvider knownFolderProvider,
         IFileAccess fileAccess,
-        CompatibilityProfileCatalog profiles,
+        CompatibilityProfileCatalog? profiles,
         IProtectedProcessPlatform platform,
         string guardDllPath,
-        string guardHashPath)
+        string profilePath,
+        LaunchArtifactIdentities artifactIdentities)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(externalRoot);
         ArgumentNullException.ThrowIfNull(knownFolderProvider);
         ArgumentNullException.ThrowIfNull(fileAccess);
-        ArgumentNullException.ThrowIfNull(profiles);
         ArgumentNullException.ThrowIfNull(platform);
         ArgumentException.ThrowIfNullOrWhiteSpace(guardDllPath);
-        ArgumentException.ThrowIfNullOrWhiteSpace(guardHashPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(profilePath);
+        ArgumentNullException.ThrowIfNull(artifactIdentities);
         _externalRoot = Path.GetFullPath(externalRoot);
         _canonicalizer = new WindowsPathCanonicalizer();
         _saveProfileLocator = new WindowsSaveProfileLocator(knownFolderProvider);
@@ -72,7 +76,8 @@ public sealed class LauncherService : ILauncherService
         _profiles = profiles;
         _platform = platform;
         _guardDllPath = Path.GetFullPath(guardDllPath);
-        _guardHashPath = Path.GetFullPath(guardHashPath);
+        _profilePath = Path.GetFullPath(profilePath);
+        _artifactIdentities = artifactIdentities;
     }
 
     public Task<VerificationResult> VerifyAsync(
@@ -316,10 +321,36 @@ public sealed class LauncherService : ILauncherService
             }
 
             var executablePath = Path.Combine(runtimeRoot, "DarkSoulsRemastered.exe");
+            var steamModulePath = Path.Combine(runtimeRoot, "steam_api64.dll");
+            using var profileArtifact = LaunchArtifactLease.TryOpen(_profilePath);
+            if (profileArtifact is null
+                || !profileArtifact.Sha256.Equals(
+                    _artifactIdentities.ProfileSha256,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return SafetyLaunchResult.Failed("PROFILE_ARTIFACT_INVALID");
+            }
+            using var executableArtifact = LaunchArtifactLease.TryOpen(executablePath);
+            using var steamArtifact = LaunchArtifactLease.TryOpen(steamModulePath);
+            if (executableArtifact is null || steamArtifact is null)
+            {
+                return SafetyLaunchResult.Failed("GAME_PROFILE_MISMATCH");
+            }
+            using var guardArtifact = LaunchArtifactLease.TryOpen(_guardDllPath);
+            if (guardArtifact is null
+                || !guardArtifact.Sha256.Equals(
+                    _artifactIdentities.GuardSha256,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return SafetyLaunchResult.Failed("GUARD_ARTIFACT_INVALID");
+            }
+
+            var profiles = _profiles ?? CompatibilityProfileCatalog.LoadJson(
+                Encoding.UTF8.GetString(profileArtifact.Bytes));
             CompatibilityProfile profile;
             try
             {
-                profile = _profiles.Select(ProfileInspector.InspectIdentity(executablePath));
+                profile = profiles.Select(ProfileInspector.InspectIdentity(executableArtifact.Bytes));
             }
             catch (UnsupportedGameBuildException)
             {
@@ -330,7 +361,13 @@ public sealed class LauncherService : ILauncherService
                 return SafetyLaunchResult.Failed("GAME_PROFILE_UNSUPPORTED");
             }
 
-            var profileVerification = ProfileInspector.VerifyFiles(executablePath, profile);
+            var profileVerification = ProfileInspector.VerifyFiles(
+                executableArtifact.Bytes,
+                new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["steam_api64.dll"] = steamArtifact.Bytes
+                },
+                profile);
             if (profileVerification.Error != ProfileError.None)
             {
                 return SafetyLaunchResult.Failed("GAME_PROFILE_MISMATCH");
@@ -369,11 +406,6 @@ public sealed class LauncherService : ILauncherService
             {
                 return SafetyLaunchResult.Failed(
                     $"DEDICATED_SAVE_{dedicatedSave.ErrorCode.ToString().ToUpperInvariant()}");
-            }
-
-            if (!await GuardArtifactMatchesAsync(cancellationToken))
-            {
-                return SafetyLaunchResult.Failed("GUARD_ARTIFACT_INVALID");
             }
 
             var virtualDocuments = layout.VirtualProfile;
@@ -424,22 +456,30 @@ public sealed class LauncherService : ILauncherService
             }
             catch
             {
-                _ = await dedicatedSaveService.CompleteSessionAsync(
+                await CompleteAbnormalSessionWithoutMaskingAsync(
+                    dedicatedSaveService,
                     steamId,
-                    saveSession.SessionToken,
-                    normalGuardedExit: true,
-                    CancellationToken.None);
+                    saveSession.SessionToken);
                 throw;
             }
 
+            var normalGuardedExit = launchResult.Started && launchResult.ExitCode == 0;
+            if (!normalGuardedExit)
+            {
+                await CompleteAbnormalSessionWithoutMaskingAsync(
+                    dedicatedSaveService,
+                    steamId,
+                    saveSession.SessionToken);
+                return launchResult;
+            }
             var saveCompletion = await dedicatedSaveService.CompleteSessionAsync(
                 steamId,
                 saveSession.SessionToken,
                 normalGuardedExit: true,
                 CancellationToken.None);
-            return saveCompletion.Ready
-                ? launchResult
-                : SafetyLaunchResult.Failed("DEDICATED_SAVE_SESSION_INVALID");
+            return !saveCompletion.Ready
+                ? SafetyLaunchResult.Failed("DEDICATED_SAVE_SESSION_INVALID")
+                : launchResult;
         }
         catch (OperationCanceledException)
         {
@@ -456,27 +496,23 @@ public sealed class LauncherService : ILauncherService
         }
     }
 
-    private async Task<bool> GuardArtifactMatchesAsync(CancellationToken cancellationToken)
+    private static async Task CompleteAbnormalSessionWithoutMaskingAsync(
+        DedicatedSaveService service,
+        string steamId,
+        string sessionToken)
     {
-        if (!File.Exists(_guardDllPath) || !File.Exists(_guardHashPath))
+        try
         {
-            return false;
+            _ = await service.CompleteSessionAsync(
+                steamId,
+                sessionToken,
+                normalGuardedExit: false,
+                CancellationToken.None);
         }
-        if ((File.GetAttributes(_guardDllPath) & FileAttributes.ReparsePoint) != 0
-            || (File.GetAttributes(_guardHashPath) & FileAttributes.ReparsePoint) != 0
-            || !_fileAccess.IsSingleLinkFile(_guardDllPath))
+        catch
         {
-            return false;
+            // The original launch failure or cancellation remains authoritative.
         }
-
-        var expected = (await File.ReadAllTextAsync(_guardHashPath, cancellationToken)).Trim();
-        if (expected.Length != 64 || !expected.All(Uri.IsHexDigit))
-        {
-            return false;
-        }
-        var actual = await new FileHashService()
-            .ComputeSha256Async(_guardDllPath, cancellationToken);
-        return actual.Equals(expected, StringComparison.OrdinalIgnoreCase);
     }
 
     private async Task<SaveComponents> CreateSaveComponentsAsync(

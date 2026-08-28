@@ -45,6 +45,8 @@ public sealed class ReleaseContentGuardTests
     {
         var paths = new[] { "README.md", "readme.md" };
 
-        Assert.Equal(paths, new ReleaseContentGuard().Validate(paths));
+        var failures = new ReleaseContentGuard().Validate(paths);
+        Assert.Contains(paths[0], failures);
+        Assert.Contains(paths[1], failures);
     }
 }

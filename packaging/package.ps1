@@ -78,7 +78,6 @@ $publishedLauncher = Join-Path $publishRoot 'DSRRandomizer.Launcher.exe'
 if (-not (Test-Path -LiteralPath $publishedLauncher -PathType Leaf)) {
     throw "Published launcher is missing: $publishedLauncher"
 }
-Invoke-PackageValidator -Launcher $publishedLauncher -Directory $publishRoot
 
 if (Test-Path -LiteralPath $stagingRoot) {
     Remove-Item -LiteralPath $stagingRoot -Recurse -Force

@@ -117,18 +117,7 @@ public static class ProfileInspector
             }
 
             var executable = ReadMappedFile(executablePath);
-            var result = VerifyImage(
-                executable,
-                profile.ExecutableModule,
-                profile.Executable,
-                profile.GameServiceTargets.Where(target =>
-                    string.Equals(target.Module, profile.ExecutableModule,
-                        StringComparison.OrdinalIgnoreCase)).ToArray());
-            if (result.Error != ProfileError.None)
-            {
-                return result;
-            }
-
+            var modules = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
             foreach (var module in profile.Modules)
             {
                 var modulePath = Path.Combine(directory, module.Name);
@@ -138,34 +127,9 @@ public static class ProfileInspector
                 {
                     return new(ProfileError.ModuleMissing);
                 }
-
-                var image = ReadMappedFile(modulePath);
-                result = VerifyImage(
-                    image,
-                    module.Name,
-                    module.Identity,
-                    profile.GameServiceTargets.Where(target =>
-                        string.Equals(target.Module, module.Name,
-                            StringComparison.OrdinalIgnoreCase)).ToArray());
-                if (result.Error != ProfileError.None)
-                {
-                    return result;
-                }
-                if (module.DeclaredInterfaces.Count != 0 ||
-                    module.ProtectedFactoryExports.Count != 0)
-                {
-                    if (module.DeclaredInterfaces.Any(version =>
-                            !ContainsNullTerminatedAscii(executable, version)) ||
-                        module.ProtectedFactoryExports.Any(name =>
-                            !HasExport(image, name)) ||
-                        HasImport(executable, module.Name) == module.AllowDeferred)
-                    {
-                        return new(ProfileError.ModuleDeclarationMismatch);
-                    }
-                }
+                modules.Add(module.Name, ReadMappedFile(modulePath));
             }
-
-            return ProfileVerificationResult.Success;
+            return VerifyFiles(executable, modules, profile);
         }
         catch (Exception exception) when (
             exception is IOException or UnauthorizedAccessException or NotSupportedException)
@@ -177,7 +141,12 @@ public static class ProfileInspector
     public static ExecutableIdentity InspectIdentity(string path)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
-        var image = ReadMappedFile(path);
+        return InspectIdentity(ReadMappedFile(path));
+    }
+
+    public static ExecutableIdentity InspectIdentity(byte[] image)
+    {
+        ArgumentNullException.ThrowIfNull(image);
         if (!TryReadHeaders(image, out var headers))
         {
             throw new BadImageFormatException("The module is not a supported PE32+ image.");
@@ -188,6 +157,61 @@ public static class ProfileInspector
             headers.Machine,
             headers.Timestamp,
             headers.SizeOfImage);
+    }
+
+    public static ProfileVerificationResult VerifyFiles(
+        byte[] executable,
+        IReadOnlyDictionary<string, byte[]> modules,
+        CompatibilityProfile profile)
+    {
+        ArgumentNullException.ThrowIfNull(executable);
+        ArgumentNullException.ThrowIfNull(modules);
+        ArgumentNullException.ThrowIfNull(profile);
+
+        var result = VerifyImage(
+            executable,
+            profile.ExecutableModule,
+            profile.Executable,
+            profile.GameServiceTargets.Where(target =>
+                string.Equals(target.Module, profile.ExecutableModule,
+                    StringComparison.OrdinalIgnoreCase)).ToArray());
+        if (result.Error != ProfileError.None)
+        {
+            return result;
+        }
+
+        foreach (var module in profile.Modules)
+        {
+            if (!modules.TryGetValue(module.Name, out var image))
+            {
+                return new(ProfileError.ModuleMissing);
+            }
+            result = VerifyImage(
+                image,
+                module.Name,
+                module.Identity,
+                profile.GameServiceTargets.Where(target =>
+                    string.Equals(target.Module, module.Name,
+                        StringComparison.OrdinalIgnoreCase)).ToArray());
+            if (result.Error != ProfileError.None)
+            {
+                return result;
+            }
+            if (module.DeclaredInterfaces.Count != 0
+                || module.ProtectedFactoryExports.Count != 0)
+            {
+                if (module.DeclaredInterfaces.Any(version =>
+                        !ContainsNullTerminatedAscii(executable, version))
+                    || module.ProtectedFactoryExports.Any(name =>
+                        !HasExport(image, name))
+                    || HasImport(executable, module.Name) == module.AllowDeferred)
+                {
+                    return new(ProfileError.ModuleDeclarationMismatch);
+                }
+            }
+        }
+
+        return ProfileVerificationResult.Success;
     }
 
     private static byte[] ReadMappedFile(string path)

@@ -39,29 +39,7 @@ public sealed class LauncherApplicationPackageTests : IDisposable
     [Fact]
     public async Task RunAsync_ValidatePackageAcceptsExactAllowlist()
     {
-        Directory.CreateDirectory(_packageRoot);
-        foreach (var file in new[]
-                 {
-                     "DSRRandomizer.Launcher.exe",
-                     "README.md",
-                     "LICENSE",
-                     "THIRD_PARTY_NOTICES.md",
-                     "CHANGELOG.md"
-                 })
-        {
-            await File.WriteAllTextAsync(Path.Combine(_packageRoot, file), file);
-        }
-        Directory.CreateDirectory(Path.Combine(_packageRoot, "native"));
-        await File.WriteAllTextAsync(
-            Path.Combine(_packageRoot, "native", "DSRRandomizer.Runtime.dll"),
-            "guard");
-        await File.WriteAllTextAsync(
-            Path.Combine(_packageRoot, "native", "DSRRandomizer.Runtime.dll.sha256"),
-            new string('a', 64));
-        Directory.CreateDirectory(Path.Combine(_packageRoot, "config"));
-        await File.WriteAllTextAsync(
-            Path.Combine(_packageRoot, "config", "compatibility-profiles.json"),
-            "{}");
+        await CreateCompletePackageAsync();
 
         var application = new LauncherApplication(
             new UnusedLauncherService(),
@@ -71,6 +49,59 @@ public sealed class LauncherApplicationPackageTests : IDisposable
         Assert.Equal(0, await application.RunAsync(
             new[] { "--validate-package", _packageRoot },
             CancellationToken.None));
+    }
+
+    [Theory]
+    [InlineData("DSRRandomizer.Launcher.exe")]
+    [InlineData("README.md")]
+    [InlineData("LICENSE")]
+    [InlineData("CHANGELOG.md")]
+    [InlineData("THIRD_PARTY_NOTICES.md")]
+    [InlineData("config/compatibility-profiles.json")]
+    [InlineData("native/DSRRandomizer.Runtime.dll")]
+    [InlineData("native/DSRRandomizer.Runtime.dll.sha256")]
+    public async Task RunAsync_ValidatePackageRejectsEachMissingRequiredArtifact(
+        string missingPath)
+    {
+        await CreateCompletePackageAsync();
+        File.Delete(Path.Combine(
+            _packageRoot,
+            missingPath.Replace('/', Path.DirectorySeparatorChar)));
+        var output = new StringWriter();
+        var application = new LauncherApplication(
+            new UnusedLauncherService(),
+            output,
+            new StringWriter());
+
+        var exitCode = await application.RunAsync(
+            new[] { "--validate-package", _packageRoot },
+            CancellationToken.None);
+
+        Assert.Equal(6, exitCode);
+        Assert.Contains($"missing:{missingPath}", output.ToString(), StringComparison.Ordinal);
+    }
+
+    private async Task CreateCompletePackageAsync()
+    {
+        Directory.CreateDirectory(_packageRoot);
+        foreach (var path in new[]
+                 {
+                     "DSRRandomizer.Launcher.exe",
+                     "README.md",
+                     "LICENSE",
+                     "THIRD_PARTY_NOTICES.md",
+                     "CHANGELOG.md",
+                     "native/DSRRandomizer.Runtime.dll",
+                     "native/DSRRandomizer.Runtime.dll.sha256",
+                     "config/compatibility-profiles.json"
+                 })
+        {
+            var fullPath = Path.Combine(
+                _packageRoot,
+                path.Replace('/', Path.DirectorySeparatorChar));
+            Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+            await File.WriteAllTextAsync(fullPath, path);
+        }
     }
 
     public void Dispose()

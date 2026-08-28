@@ -16,21 +16,48 @@
     <DebugSymbols>false</DebugSymbols>
   </PropertyGroup>
 
+  <PropertyGroup>
+    <PinnedGuardPath>$(MSBuildProjectDirectory)\..\..\native\out\build\windows-x64-release\native\runtime\Release\DSRRandomizer.Runtime.dll</PinnedGuardPath>
+    <PinnedProfilePath>$(MSBuildProjectDirectory)\..\..\config\compatibility-profiles.json</PinnedProfilePath>
+  </PropertyGroup>
+
+  <Target Name="GenerateLaunchArtifactIdentities" BeforeTargets="GetAssemblyAttributes">
+    <Error Condition="!Exists('$(PinnedGuardPath)')"
+           Text="The Release native guard must be built before compiling the launcher: $(PinnedGuardPath)" />
+    <Error Condition="!Exists('$(PinnedProfilePath)')"
+           Text="The compatibility profile is missing: $(PinnedProfilePath)" />
+    <ItemGroup>
+      <_PinnedGuard Include="$(PinnedGuardPath)" />
+      <_PinnedProfile Include="$(PinnedProfilePath)" />
+    </ItemGroup>
+    <GetFileHash Files="@(_PinnedGuard)" Algorithm="SHA256" HashEncoding="hex">
+      <Output TaskParameter="Items" ItemName="_PinnedGuardHash" />
+    </GetFileHash>
+    <GetFileHash Files="@(_PinnedProfile)" Algorithm="SHA256" HashEncoding="hex">
+      <Output TaskParameter="Items" ItemName="_PinnedProfileHash" />
+    </GetFileHash>
+    <ItemGroup>
+      <AssemblyMetadata Include="DSRRandomizer.GuardSha256"
+                        Value="%(_PinnedGuardHash.FileHash)" />
+      <AssemblyMetadata Include="DSRRandomizer.ProfileSha256"
+                        Value="%(_PinnedProfileHash.FileHash)" />
+    </ItemGroup>
+  </Target>
+
   <ItemGroup>
     <PackageReference Include="System.IO.Pipes.AccessControl" Version="5.0.0" />
     <ProjectReference Include="..\DSRRandomizer.Foundation\DSRRandomizer.Foundation.csproj" />
   </ItemGroup>
 
   <ItemGroup>
-    <Content Include="..\..\config\compatibility-profiles.json">
+    <Content Include="$(PinnedProfilePath)">
       <Link>config\compatibility-profiles.json</Link>
       <TargetPath>config\compatibility-profiles.json</TargetPath>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
       <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
     </Content>
-    <Content Include="..\..\native\out\build\windows-x64-release\native\runtime\Release\DSRRandomizer.Runtime.dll"
-             Condition="Exists('..\..\native\out\build\windows-x64-release\native\runtime\Release\DSRRandomizer.Runtime.dll')">
+    <Content Include="$(PinnedGuardPath)">
       <Link>native\DSRRandomizer.Runtime.dll</Link>
       <TargetPath>native\DSRRandomizer.Runtime.dll</TargetPath>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

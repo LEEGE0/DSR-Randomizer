@@ -2,6 +2,18 @@ namespace DSRRandomizer.Foundation.Packaging;
 
 public sealed class ReleaseContentGuard
 {
+    private static readonly string[] RequiredPaths =
+    [
+        "DSRRandomizer.Launcher.exe",
+        "README.md",
+        "LICENSE",
+        "CHANGELOG.md",
+        "THIRD_PARTY_NOTICES.md",
+        "config/compatibility-profiles.json",
+        "native/DSRRandomizer.Runtime.dll",
+        "native/DSRRandomizer.Runtime.dll.sha256"
+    ];
+
     private static readonly HashSet<string> AllowedPaths = new(
         new[]
         {
@@ -38,6 +50,17 @@ public sealed class ReleaseContentGuard
                 || !AllowedPaths.Contains(normalized))
             {
                 prohibited.Add(originalPath);
+            }
+        }
+
+        var present = paths
+            .Select(Normalize)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var requiredPath in RequiredPaths)
+        {
+            if (!present.Contains(requiredPath))
+            {
+                prohibited.Add($"missing:{requiredPath}");
             }
         }
 
