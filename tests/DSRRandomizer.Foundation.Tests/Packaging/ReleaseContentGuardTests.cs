@@ -12,13 +12,17 @@ public sealed class ReleaseContentGuardTests
     [InlineData("DSRRandomizer.Foundation.dll")]
     [InlineData("../outside.txt")]
     [InlineData("nested/README.md")]
+    [InlineData("Mods/EnemyRandomizer/config.ini")]
+    [InlineData("captures/local.bin")]
+    [InlineData("credentials.json")]
+    [InlineData("config/generated-compatibility-profiles.json")]
     public void Validate_RejectsEveryUnrecognizedOrGameDerivedPath(string path)
     {
         Assert.Contains(path, new ReleaseContentGuard().Validate(new[] { path }));
     }
 
     [Fact]
-    public void Validate_AllowsOnlyPublishedLauncherAndProjectNotices()
+    public void Validate_AllowsOnlyPublishedLauncherProjectGuardProfileAndNotices()
     {
         var paths = new[]
         {
@@ -27,7 +31,10 @@ public sealed class ReleaseContentGuardTests
             "README.md",
             "LICENSE",
             "THIRD_PARTY_NOTICES.md",
-            "CHANGELOG.md"
+            "CHANGELOG.md",
+            "native/DSRRandomizer.Runtime.dll",
+            "native/DSRRandomizer.Runtime.dll.sha256",
+            "config/compatibility-profiles.json"
         };
 
         Assert.Empty(new ReleaseContentGuard().Validate(paths));

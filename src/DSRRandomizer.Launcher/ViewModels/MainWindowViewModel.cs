@@ -25,6 +25,8 @@ public sealed class MainWindowViewModel : ObservableObject
     private string _selectedSaveSourcePath = string.Empty;
     private string _dedicatedSavePath = string.Empty;
     private bool _firstCopyConfirmed;
+    private bool _runtimeReady;
+    private bool _saveReadyForLaunch;
 
     public MainWindowViewModel(
         ILauncherService? service,
@@ -55,6 +57,9 @@ public sealed class MainWindowViewModel : ObservableObject
         PrepareSaveCommand = new AsyncRelayCommand(
             _ => PrepareSaveAsync(),
             _ => CanPrepareSave());
+        LaunchCommand = new AsyncRelayCommand(
+            _ => LaunchAsync(),
+            _ => CanLaunch);
         SaveExternalRootCommand = new AsyncRelayCommand(
             _ => SaveExternalRootAsync(),
             _ => !IsBusy && _externalRootStore is not null);
@@ -109,7 +114,10 @@ public sealed class MainWindowViewModel : ObservableObject
         }
     }
 
-    public bool CanLaunch => false;
+    public bool CanLaunch => CanPrepareSave()
+        && _runtimeReady
+        && _saveReadyForLaunch
+        && SelectedSaveProfile is not null;
 
     public bool CanInitialize => CanMutate();
 
@@ -124,6 +132,7 @@ public sealed class MainWindowViewModel : ObservableObject
         {
             if (SetProperty(ref _selectedSaveProfile, value))
             {
+                _saveReadyForLaunch = false;
                 FirstCopyConfirmed = false;
                 SelectedSaveSourcePath = value?.SourcePath ?? string.Empty;
                 DedicatedSavePath = value is null
@@ -133,6 +142,7 @@ public sealed class MainWindowViewModel : ObservableObject
                         "saves",
                         value.SteamId,
                         "DRAKS0005.rmm");
+                RaiseCommandStates();
             }
         }
     }
@@ -161,7 +171,61 @@ public sealed class MainWindowViewModel : ObservableObject
 
     public AsyncRelayCommand PrepareSaveCommand { get; }
 
+    public AsyncRelayCommand LaunchCommand { get; }
+
     public AsyncRelayCommand SaveExternalRootCommand { get; }
+
+    public async Task LoadAsync()
+    {
+        if (!_materialOperationsAvailable || _service is null || IsBusy)
+        {
+            return;
+        }
+
+        IsBusy = true;
+        try
+        {
+            var readiness = await Service.GetModdedLaunchReadinessAsync(
+                CancellationToken.None);
+            _runtimeReady = readiness.IsReady;
+            if (!_runtimeReady)
+            {
+                Status = $"Modded runtime is not ready: {string.Join("; ", readiness.Errors)}";
+                return;
+            }
+
+            await DiscoverProfilesOnceAsync();
+            if (SaveProfiles.Count == 1)
+            {
+                SelectedSaveProfile = SaveProfiles[0];
+            }
+            if (SelectedSaveProfile is null)
+            {
+                Status = "Modded runtime is ready. Select the exact SteamID before launch.";
+                return;
+            }
+
+            var result = await Service.PrepareDedicatedSaveAsync(
+                SelectedSaveProfile.SteamId,
+                firstCopyConfirmed: false,
+                CancellationToken.None);
+            _saveReadyForLaunch = result.Ready
+                || (result.ErrorCode == SaveErrorCode.FirstCopyConfirmationRequired
+                    && !string.IsNullOrWhiteSpace(SelectedSaveProfile.SourcePath));
+            Status = _saveReadyForLaunch
+                ? "Modded runtime and save input are ready. Put Steam in Offline Mode before launch."
+                : $"Modded launch is not ready: {result.Message}";
+        }
+        catch (Exception exception)
+        {
+            await LogWithoutMaskingAsync(exception);
+            Status = $"Modded launch readiness failed: {exception.Message}";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
 
     private async Task VerifyAsync()
     {
@@ -208,14 +272,15 @@ public sealed class MainWindowViewModel : ObservableObject
                 GamePath,
                 progress,
                 CancellationToken.None);
-            var readiness = await Service.GetReadinessAsync(CancellationToken.None);
+            var readiness = await Service.GetModdedLaunchReadinessAsync(CancellationToken.None);
             if (!readiness.IsReady)
             {
                 throw new IOException(string.Join("; ", readiness.Errors));
             }
 
+            _runtimeReady = true;
             ProgressPercent = 100;
-            Status = "External runtime is ready. Launch stays locked until dedicated-save and online-blocking safety is installed.";
+            Status = "External mod runtime is ready. Select a SteamID to launch after placing Steam in Offline Mode.";
         }
         catch (Exception exception)
         {
@@ -233,20 +298,7 @@ public sealed class MainWindowViewModel : ObservableObject
         IsBusy = true;
         try
         {
-            if (!_saveProfilesDiscovered)
-            {
-                var profiles = await Service.DiscoverSaveProfilesAsync(CancellationToken.None);
-                foreach (var profile in profiles)
-                {
-                    SaveProfiles.Add(profile);
-                }
-
-                _saveProfilesDiscovered = true;
-                if (SaveProfiles.Count == 1)
-                {
-                    SelectedSaveProfile = SaveProfiles[0];
-                }
-            }
+            await DiscoverProfilesOnceAsync();
 
             if (SaveProfiles.Count == 0)
             {
@@ -270,11 +322,16 @@ public sealed class MainWindowViewModel : ObservableObject
                 CancellationToken.None);
             if (result.Ready)
             {
+                _saveReadyForLaunch = true;
                 Status = result.ReusedExisting
-                    ? $"Reusing existing DRAKS0005.rmm at {result.SavePath}. Launch remains locked."
-                    : $"Dedicated DRAKS0005.rmm created at {result.SavePath}. Launch remains locked.";
+                    ? $"Reusing existing DRAKS0005.rmm at {result.SavePath}."
+                    : $"Dedicated DRAKS0005.rmm created at {result.SavePath}.";
                 return;
             }
+
+            _saveReadyForLaunch = !firstCopyConfirmed
+                && result.ErrorCode == SaveErrorCode.FirstCopyConfirmationRequired
+                && !string.IsNullOrWhiteSpace(selectedSaveSourcePath);
 
             Status = !firstCopyConfirmed
                 && result.ErrorCode == SaveErrorCode.FirstCopyConfirmationRequired
@@ -285,6 +342,50 @@ public sealed class MainWindowViewModel : ObservableObject
         {
             await LogWithoutMaskingAsync(exception);
             Status = $"Dedicated save preparation failed: {exception.Message}";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task DiscoverProfilesOnceAsync()
+    {
+        if (_saveProfilesDiscovered)
+        {
+            return;
+        }
+        var profiles = await Service.DiscoverSaveProfilesAsync(CancellationToken.None);
+        foreach (var profile in profiles)
+        {
+            SaveProfiles.Add(profile);
+        }
+        _saveProfilesDiscovered = true;
+        if (SaveProfiles.Count == 1)
+        {
+            SelectedSaveProfile = SaveProfiles[0];
+        }
+    }
+
+    private async Task LaunchAsync()
+    {
+        IsBusy = true;
+        try
+        {
+            var selection = SelectedSaveProfile ?? throw new InvalidOperationException(
+                "Select a SteamID before launch.");
+            Status = "Launching modded copy. Steam Offline Mode is a user-managed prerequisite.";
+            var result = await Service.LaunchModdedAsync(
+                selection.SteamId,
+                CancellationToken.None);
+            Status = result.Started
+                ? $"Modded copy exited with code {result.ExitCode ?? 0}. Original and Overhaul remain untouched."
+                : $"Modded launch failed: {result.ErrorCode}";
+        }
+        catch (Exception exception)
+        {
+            await LogWithoutMaskingAsync(exception);
+            Status = $"Modded launch failed: {exception.Message}";
         }
         finally
         {
@@ -333,6 +434,7 @@ public sealed class MainWindowViewModel : ObservableObject
         VerifyCommand.RaiseCanExecuteChanged();
         InitializeCommand.RaiseCanExecuteChanged();
         PrepareSaveCommand.RaiseCanExecuteChanged();
+        LaunchCommand.RaiseCanExecuteChanged();
         SaveExternalRootCommand.RaiseCanExecuteChanged();
     }
 

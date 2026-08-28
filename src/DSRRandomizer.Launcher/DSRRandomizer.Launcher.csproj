@@ -21,4 +21,22 @@
     <ProjectReference Include="..\DSRRandomizer.Foundation\DSRRandomizer.Foundation.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Content Include="..\..\config\compatibility-profiles.json">
+      <Link>config\compatibility-profiles.json</Link>
+      <TargetPath>config\compatibility-profiles.json</TargetPath>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+    </Content>
+    <Content Include="..\..\native\out\build\windows-x64-release\native\runtime\Release\DSRRandomizer.Runtime.dll"
+             Condition="Exists('..\..\native\out\build\windows-x64-release\native\runtime\Release\DSRRandomizer.Runtime.dll')">
+      <Link>native\DSRRandomizer.Runtime.dll</Link>
+      <TargetPath>native\DSRRandomizer.Runtime.dll</TargetPath>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+    </Content>
+  </ItemGroup>
+
 </Project>

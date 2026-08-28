@@ -248,9 +248,18 @@ public sealed class ProtectionPipeServer :
     }
 
     internal async ValueTask<ProtectionHandshake> CompleteOneShotAsync(
-        ProtectionHandshake handshake)
+        ProtectionHandshake handshake,
+        ulong expectedActiveFlags)
     {
         await DisposeAsync();
+        var exactOneShot = DedicatedSaveProtection.IsExact(expectedActiveFlags)
+            || SimplifiedOfflineProtection.IsExact(expectedActiveFlags);
+        if (!handshake.Success
+            || !exactOneShot
+            || handshake.ActiveFlags != expectedActiveFlags)
+        {
+            return ProtectionHandshake.Failed("SAFETY_FLAGS_INCOMPLETE");
+        }
         return handshake with { Session = null };
     }
 

@@ -1,7 +1,11 @@
 #include <winsock2.h>
 
 #include <array>
+#include <chrono>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <future>
 #include <iostream>
 #include <new>
 #include <string>
@@ -10,12 +14,16 @@
 #include "ProtectionBootstrap.h"
 #include "modules/DeferredModuleGate.h"
 #include "network/WinsockHooks.h"
+#include "save/SaveHooks.h"
 
 namespace {
+
+namespace fs = std::filesystem;
 
 static_assert(sizeof(DSRRandomizer::ProtectionSocketEndpoint) == 24);
 static_assert(sizeof(DSRRandomizer::ProtectionInitBlock) == 5480);
 static_assert(DSRRandomizer::kSimplifiedOfflineRequiredFlags == 0x7FULL);
+static_assert(DSRRandomizer::kDedicatedSaveRequiredFlags == 0x7ULL);
 static_assert(offsetof(DSRRandomizer::ProtectionInitBlock, pipeName) == 52);
 static_assert(offsetof(DSRRandomizer::ProtectionInitBlock, virtualDocuments) == 308);
 static_assert(offsetof(DSRRandomizer::ProtectionInitBlock, virtualLogicalSave) == 1332);
@@ -63,6 +71,30 @@ public:
         return pipeName_;
     }
 
+    std::future<bool> ReadHandshakeAsync(const std::uint64_t expectedFlags) {
+        return std::async(std::launch::async, [this, expectedFlags] {
+            const BOOL connected = ConnectNamedPipe(pipe_, nullptr);
+            if (!connected && GetLastError() != ERROR_PIPE_CONNECTED) {
+                return false;
+            }
+            DSRRandomizer::ProtectionHandshakeMessage message{};
+            DWORD bytesRead = 0;
+            return ReadFile(
+                    pipe_,
+                    &message,
+                    static_cast<DWORD>(sizeof(message)),
+                    &bytesRead,
+                    nullptr)
+                && bytesRead == sizeof(message)
+                && message.magic == DSRRandomizer::kProtectionMagic
+                && message.version == DSRRandomizer::kProtectionProtocolVersion
+                && message.kind == static_cast<std::uint32_t>(
+                    DSRRandomizer::ProtectionMessageKind::Handshake)
+                && message.status == 0
+                && message.activeFlags == expectedFlags;
+        });
+    }
+
 private:
     std::wstring pipeName_;
     HANDLE pipe_ = INVALID_HANDLE_VALUE;
@@ -84,6 +116,43 @@ DSRRandomizer::ProtectionInitBlock ProductionBlock(
     wcsncpy_s(block.externalSaveRoot, path, _TRUNCATE);
     wcsncpy_s(block.dedicatedRmm, path, _TRUNCATE);
     return block;
+}
+
+bool SetDedicatedSaveFixturePaths(
+    DSRRandomizer::ProtectionInitBlock& block,
+    const fs::path& root) {
+    const auto virtualDocuments = root / L"virtual-documents";
+    const auto virtualProfile = virtualDocuments / L"NBGI"
+        / L"DARK SOULS REMASTERED" / L"12345678901234567";
+    const auto realSaveRoot = root / L"real-normal";
+    const auto externalSaveRoot = root / L"external";
+    const auto dedicatedRmm = externalSaveRoot / L"DRAKS0005.rmm";
+    std::error_code error;
+    fs::create_directories(virtualProfile, error);
+    if (error) {
+        return false;
+    }
+    fs::create_directories(realSaveRoot, error);
+    if (error) {
+        return false;
+    }
+    fs::create_directories(externalSaveRoot, error);
+    if (error) {
+        return false;
+    }
+    std::ofstream(dedicatedRmm, std::ios::binary) << "harmless-rmm-fixture";
+    if (!fs::is_regular_file(dedicatedRmm, error) || error) {
+        return false;
+    }
+    wcsncpy_s(block.virtualDocuments, virtualDocuments.c_str(), _TRUNCATE);
+    wcsncpy_s(
+        block.virtualLogicalSave,
+        (virtualProfile / L"DRAKS0005.sl2").c_str(),
+        _TRUNCATE);
+    wcsncpy_s(block.realSaveRoot, realSaveRoot.c_str(), _TRUNCATE);
+    wcsncpy_s(block.externalSaveRoot, externalSaveRoot.c_str(), _TRUNCATE);
+    wcsncpy_s(block.dedicatedRmm, dedicatedRmm.c_str(), _TRUNCATE);
+    return true;
 }
 
 int VerifySimplifiedProductionBitmap() {
@@ -125,6 +194,63 @@ int VerifySimplifiedProductionBitmap() {
     const auto exactStatus = DSRRandomizer::InitializeProtection(&exact);
     if (exactStatus != DSRRandomizer::InitStatus::GameServiceProfileMismatch) {
         return Fail("exact simplified bitmap did not enter production core initialization");
+    }
+    return 0;
+}
+
+int VerifyDedicatedSaveProductionBitmap() {
+    HarmlessPipeFixture pipe;
+    if (!pipe.IsValid()) {
+        return Fail("harmless dedicated-save supervisor pipe fixture could not be created");
+    }
+
+    constexpr auto dedicatedSave = 0x7ULL;
+    const std::array rejected{
+        std::pair{"missing save protection bit", 0x6ULL},
+        std::pair{"unexpected Winsock bit", 0xFULL},
+        std::pair{"unexpected unknown high bit", dedicatedSave | (1ULL << 40)},
+    };
+
+    for (const auto& [name, flags] : rejected) {
+        auto candidate = ProductionBlock(pipe.Name(), flags);
+        const auto actual = DSRRandomizer::InitializeProtection(&candidate);
+        if (actual != DSRRandomizer::InitStatus::RequiredProtectionUnavailable
+            || DSRRandomizer::CurrentProtectionFlags()
+                != DSRRandomizer::ProtectionFlags::None) {
+            std::cerr << "dedicated-save bitmap rejection failed: " << name
+                      << ", flags=" << flags
+                      << ", actual=" << static_cast<unsigned int>(actual) << '\n';
+            return 1;
+        }
+    }
+
+    auto exact = ProductionBlock(pipe.Name(), dedicatedSave);
+    const auto fixtureRoot = fs::temp_directory_path()
+        / (L"DSRRandomizer-ProtectionBootstrap-"
+            + std::to_wstring(GetCurrentProcessId())
+            + L"-" + std::to_wstring(
+                std::chrono::steady_clock::now().time_since_epoch().count()));
+    if (!SetDedicatedSaveFixturePaths(exact, fixtureRoot)) {
+        return Fail("dedicated-save fixture paths could not be created");
+    }
+    auto handshake = pipe.ReadHandshakeAsync(dedicatedSave);
+    const auto exactStatus = DSRRandomizer::InitializeProtection(&exact);
+    if (exactStatus != DSRRandomizer::InitStatus::Success) {
+        std::cerr << "exact dedicated-save bitmap status="
+                  << static_cast<unsigned int>(exactStatus) << '\n';
+        return Fail("exact dedicated-save bitmap did not complete one-shot initialization");
+    }
+    if (!handshake.get()) {
+        return Fail("exact dedicated-save bitmap did not authenticate its handshake");
+    }
+    if (DSRRandomizer::Save::UninstallSaveHooks()
+        != DSRRandomizer::Save::SaveHookCleanupStatus::Success) {
+        return Fail("exact dedicated-save fixture hooks did not uninstall cleanly");
+    }
+    std::error_code cleanupError;
+    fs::remove_all(fixtureRoot, cleanupError);
+    if (cleanupError) {
+        return Fail("dedicated-save fixture paths could not be removed");
     }
     return 0;
 }
@@ -252,6 +378,11 @@ int main() {
     if (const auto simplifiedResult = VerifySimplifiedProductionBitmap();
         simplifiedResult != 0) {
         return simplifiedResult;
+    }
+
+    if (const auto dedicatedSaveResult = VerifyDedicatedSaveProductionBitmap();
+        dedicatedSaveResult != 0) {
+        return dedicatedSaveResult;
     }
 
     if (const auto invalidWinsockResult = VerifyInvalidWinsockBlocks();

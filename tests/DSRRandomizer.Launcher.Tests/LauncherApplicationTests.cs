@@ -2,6 +2,7 @@ using DSRRandomizer.Foundation.Installation;
 using DSRRandomizer.Foundation.Runtime;
 using DSRRandomizer.Foundation.Saves;
 using DSRRandomizer.Launcher.Services;
+using DSRRandomizer.Launcher.Safety;
 using System.Text.Json;
 
 namespace DSRRandomizer.Launcher.Tests;
@@ -69,18 +70,26 @@ public sealed class LauncherApplicationTests
     }
 
     [Fact]
-    public async Task RunAsync_LaunchArgumentIsRejected()
+    public async Task RunAsync_LaunchWithSteamIdCallsSharedService()
     {
         var output = new StringWriter();
+        var service = new FakeLauncherService
+        {
+            LaunchResult = new SafetyLaunchResult(true, string.Empty, 0)
+        };
         var application = new LauncherApplication(
-            new FakeLauncherService(),
+            service,
             output,
             new StringWriter());
 
-        var exitCode = await application.RunAsync(new[] { "--launch" }, CancellationToken.None);
+        var exitCode = await application.RunAsync(
+            new[] { "--launch", "12345678901234567" },
+            CancellationToken.None);
 
-        Assert.Equal(2, exitCode);
-        Assert.Contains("unsupported", output.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, exitCode);
+        Assert.Equal("12345678901234567", Assert.Single(service.LaunchCalls));
+        using var document = JsonDocument.Parse(output.ToString());
+        Assert.True(document.RootElement.GetProperty("success").GetBoolean());
     }
 
     [Fact]
@@ -231,6 +240,11 @@ public sealed class LauncherApplicationTests
         public RuntimeReadinessResult ReadinessResult { get; init; } =
             new(true, @"C:\Local\runtime", Array.Empty<string>());
 
+        public SafetyLaunchResult LaunchResult { get; init; } =
+            SafetyLaunchResult.Failed("not configured");
+
+        public List<string> LaunchCalls { get; } = [];
+
         public Task<VerificationResult> VerifyAsync(
             string gamePath,
             CancellationToken cancellationToken) =>
@@ -250,6 +264,10 @@ public sealed class LauncherApplicationTests
             CancellationToken cancellationToken) =>
             Task.FromResult(ReadinessResult);
 
+        public Task<RuntimeReadinessResult> GetModdedLaunchReadinessAsync(
+            CancellationToken cancellationToken) =>
+            Task.FromResult(ReadinessResult);
+
         public Task<IReadOnlyList<SaveProfileCandidate>> DiscoverSaveProfilesAsync(
             CancellationToken cancellationToken) =>
             Task.FromResult<IReadOnlyList<SaveProfileCandidate>>([]);
@@ -266,6 +284,14 @@ public sealed class LauncherApplicationTests
             }
 
             return Task.FromResult(PrepareResult);
+        }
+
+        public Task<SafetyLaunchResult> LaunchModdedAsync(
+            string steamId,
+            CancellationToken cancellationToken)
+        {
+            LaunchCalls.Add(steamId);
+            return Task.FromResult(LaunchResult);
         }
     }
 

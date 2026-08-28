@@ -57,6 +57,55 @@ public sealed class SafetyLaunchCoordinatorTests
         Assert.Equal(0, platform.Process.TerminateCalls);
     }
 
+    [Fact]
+    public async Task LaunchAsync_ExactDedicatedSaveBitmap_ResumesWithoutMonitorSession()
+    {
+        var platform = new RecordingPlatform(
+            new ProtectionHandshake(true, 0x7, string.Empty, Session: null));
+
+        var result = await new SafetyLaunchCoordinator(platform)
+            .LaunchAsync(CreateRequest(requiredFlags: 0x7), CancellationToken.None);
+
+        Assert.True(result.Started);
+        Assert.Equal(1, platform.Process.ResumeCalls);
+        Assert.Equal(0, platform.Process.TerminateCalls);
+    }
+
+    [Theory]
+    [InlineData(0x6UL)]
+    [InlineData(0xFUL)]
+    [InlineData(0x10000000007UL)]
+    public async Task LaunchAsync_NonExactDedicatedSaveBitmap_NeverResumes(ulong flags)
+    {
+        var platform = new RecordingPlatform(
+            new ProtectionHandshake(true, flags, string.Empty, Session: null));
+
+        var result = await new SafetyLaunchCoordinator(platform)
+            .LaunchAsync(CreateRequest(requiredFlags: 0x7), CancellationToken.None);
+
+        Assert.False(result.Started);
+        Assert.Equal(0, platform.Process.ResumeCalls);
+        Assert.Equal(1, platform.Process.TerminateCalls);
+    }
+
+    [Fact]
+    public async Task LaunchAsync_ExactDedicatedSaveBitmapWithMonitorSession_NeverResumes()
+    {
+        var platform = new RecordingPlatform(
+            new ProtectionHandshake(
+                true,
+                0x7,
+                string.Empty,
+                new BlockingProtectionSession()));
+
+        var result = await new SafetyLaunchCoordinator(platform)
+            .LaunchAsync(CreateRequest(requiredFlags: 0x7), CancellationToken.None);
+
+        Assert.False(result.Started);
+        Assert.Equal(0, platform.Process.ResumeCalls);
+        Assert.Equal(1, platform.Process.TerminateCalls);
+    }
+
     [Theory]
     [InlineData(0x7EUL)]
     [InlineData(0xFFUL)]

@@ -325,7 +325,8 @@ std::uint64_t ReadCurrentProtectionFlags() noexcept {
 
 InitStatus InitializeProtection(ProtectionInitBlock* block) noexcept {
     if (block != nullptr
-        && block->requiredFlags == kSimplifiedOfflineRequiredFlags) {
+        && (block->requiredFlags == kDedicatedSaveRequiredFlags
+            || block->requiredFlags == kSimplifiedOfflineRequiredFlags)) {
         const auto status = InitializeCore(block, &ReadRequiredPath, nullptr);
         if (status != InitStatus::Success) {
             return status;

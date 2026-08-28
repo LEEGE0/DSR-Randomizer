@@ -62,19 +62,33 @@ public sealed class LauncherApplication
             return 8;
         }
 
-        if (args is ["--launch"])
+        if (args is ["--launch", var launchSteamId])
         {
+            if (!IsSteamId(launchSteamId))
+            {
+                await WriteJsonAsync(new
+                {
+                    success = false,
+                    error = "SteamID must contain exactly 16 to 20 decimal digits."
+                });
+                return 2;
+            }
+
+            var result = await Service.LaunchModdedAsync(
+                launchSteamId,
+                cancellationToken);
             await WriteJsonAsync(new
             {
-                success = false,
-                error = "Game launch is unsupported until dedicated-save and online-blocking safety is installed."
+                success = result.Started,
+                errorCode = result.ErrorCode,
+                exitCode = result.ExitCode
             });
-            return 2;
+            return result.Started ? 0 : 9;
         }
 
         if (args is ["--prepare-save", var steamId])
         {
-            if (steamId.Length is < 16 or > 20 || !steamId.All(char.IsAsciiDigit))
+            if (!IsSteamId(steamId))
             {
                 await WriteJsonAsync(new
                 {
@@ -169,7 +183,7 @@ public sealed class LauncherApplication
         await WriteJsonAsync(new
         {
             success = false,
-            error = "Invalid arguments. Supported commands: --set-root <external-root>, --verify <game-path>, --initialize-runtime <game-path>, --prepare-save <SteamID>, --status."
+            error = "Invalid arguments. Supported commands: --set-root <external-root>, --verify <game-path>, --initialize-runtime <game-path>, --prepare-save <SteamID>, --launch <SteamID>, --status."
         });
         return 2;
     }
@@ -179,6 +193,9 @@ public sealed class LauncherApplication
 
     private ILauncherService Service => _service ?? throw new InvalidOperationException(
         "EXTERNAL_ROOT_NOT_SELECTED");
+
+    private static bool IsSteamId(string value) =>
+        value.Length is >= 16 and <= 20 && value.All(char.IsAsciiDigit);
 
     private static IReadOnlyList<string> EnumeratePackagePaths(string packageRoot)
     {

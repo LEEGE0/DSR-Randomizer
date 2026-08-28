@@ -1,6 +1,12 @@
+using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Text.Json;
+using DSRRandomizer.Foundation.Paths;
+using DSRRandomizer.Foundation.Runtime;
+using DSRRandomizer.Foundation.Safety;
 using DSRRandomizer.Foundation.Saves;
+using DSRRandomizer.Launcher.Native;
+using DSRRandomizer.Launcher.Safety;
 using DSRRandomizer.Launcher.Services;
 
 namespace DSRRandomizer.Launcher.Tests.Services;
@@ -192,6 +198,225 @@ public sealed class LauncherServiceTests : IDisposable
         Assert.Empty(access.NormalSaveOpens);
     }
 
+    [Fact]
+    public async Task LaunchModdedAsync_UsesCopiedExeDedicatedRmmAndExactSaveBitmap()
+    {
+        using var fixture = await LaunchFixture.CreateAsync(existingRmm: true);
+
+        var result = await fixture.Service.LaunchModdedAsync(
+            SteamId,
+            CancellationToken.None);
+
+        Assert.True(result.Started, result.ErrorCode);
+        Assert.Equal(fixture.RuntimeExe, fixture.Platform.Request?.ExecutablePath);
+        Assert.Equal(fixture.RuntimeRoot, fixture.Platform.Request?.WorkingDirectory);
+        Assert.Equal(fixture.DedicatedRmm, fixture.Platform.Request?.SavePaths?.DedicatedRmm);
+        Assert.StartsWith(
+            fixture.ExternalRoot,
+            fixture.Platform.Request?.SavePaths?.VirtualDocuments,
+            StringComparison.OrdinalIgnoreCase);
+        Assert.EndsWith(
+            Path.Combine(SteamId, "DRAKS0005.sl2"),
+            fixture.Platform.Request?.SavePaths?.VirtualLogicalSave,
+            StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(
+            "overhaul",
+            fixture.Platform.Request?.SavePaths?.VirtualLogicalSave,
+            StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(
+            fixture.NormalSave,
+            new[]
+            {
+                fixture.Platform.Request!.SavePaths!.VirtualLogicalSave,
+                fixture.Platform.Request.SavePaths.DedicatedRmm
+            },
+            StringComparer.OrdinalIgnoreCase);
+        Assert.Equal(0x7UL, fixture.Platform.Request?.RequiredProtectionFlags);
+        Assert.Empty(fixture.Platform.Request?.Arguments ?? []);
+        Assert.Equal(1, fixture.Platform.Process.ResumeCalls);
+    }
+
+    [Fact]
+    public async Task LaunchModdedAsync_MissingRmmBootstrapsSelectedNormalSaveBeforeProcessCreation()
+    {
+        using var fixture = await LaunchFixture.CreateAsync(existingRmm: false);
+        var sourceBefore = await File.ReadAllBytesAsync(fixture.NormalSave);
+
+        var result = await fixture.Service.LaunchModdedAsync(
+            SteamId,
+            CancellationToken.None);
+
+        Assert.True(result.Started, result.ErrorCode);
+        Assert.Equal(sourceBefore, await File.ReadAllBytesAsync(fixture.NormalSave));
+        Assert.Equal(sourceBefore, await File.ReadAllBytesAsync(fixture.DedicatedRmm));
+        Assert.Equal(1, fixture.FileAccess.NormalSaveOpenCount);
+        Assert.Equal(1, fixture.Platform.NormalSaveOpenCountAtProcessCreation);
+    }
+
+    [Fact]
+    public async Task LaunchModdedAsync_SteamIdSelectsUniqueNormalSaveWhenRmmIsMissing()
+    {
+        using var fixture = await LaunchFixture.CreateAsync(
+            existingRmm: false,
+            persistNormalSelection: false);
+
+        var result = await fixture.Service.LaunchModdedAsync(
+            SteamId,
+            CancellationToken.None);
+
+        Assert.True(result.Started, result.ErrorCode);
+        Assert.Equal(1, fixture.FileAccess.NormalSaveOpenCount);
+        Assert.True(File.Exists(fixture.DedicatedRmm));
+    }
+
+    [Fact]
+    public async Task LaunchModdedAsync_ExistingRmmNeverOpensNormalSaveAndReusesItByteForByte()
+    {
+        using var fixture = await LaunchFixture.CreateAsync(existingRmm: true);
+        var rmmBefore = await File.ReadAllBytesAsync(fixture.DedicatedRmm);
+        await using var exclusiveNormal = new FileStream(
+            fixture.NormalSave,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.None);
+
+        var result = await fixture.Service.LaunchModdedAsync(
+            SteamId,
+            CancellationToken.None);
+
+        Assert.True(result.Started, result.ErrorCode);
+        Assert.Equal(0, fixture.FileAccess.NormalSaveOpenCount);
+        Assert.Equal(rmmBefore, await File.ReadAllBytesAsync(fixture.DedicatedRmm));
+    }
+
+    [Fact]
+    public async Task LaunchModdedAsync_GameSaveWriteIsCommittedForNextLaunch()
+    {
+        using var fixture = await LaunchFixture.CreateAsync(existingRmm: true);
+        fixture.Platform.Process.OnWaitForExit = () =>
+        {
+            var bytes = File.ReadAllBytes(fixture.DedicatedRmm);
+            bytes[0] ^= 0xff;
+            File.WriteAllBytes(fixture.DedicatedRmm, bytes);
+        };
+
+        var first = await fixture.Service.LaunchModdedAsync(
+            SteamId,
+            CancellationToken.None);
+        fixture.Platform.Process.OnWaitForExit = null;
+        var second = await fixture.Service.LaunchModdedAsync(
+            SteamId,
+            CancellationToken.None);
+
+        Assert.True(first.Started, first.ErrorCode);
+        Assert.True(second.Started, second.ErrorCode);
+        Assert.Equal(2, fixture.Platform.CreateCalls);
+    }
+
+    [Fact]
+    public async Task LaunchModdedAsync_BothSavesMissingFailsBeforeProcessCreation()
+    {
+        using var fixture = await LaunchFixture.CreateAsync(
+            existingRmm: false,
+            existingNormalSave: false);
+
+        var result = await fixture.Service.LaunchModdedAsync(
+            SteamId,
+            CancellationToken.None);
+
+        Assert.False(result.Started);
+        Assert.Equal(0, fixture.Platform.CreateCalls);
+    }
+
+    [Fact]
+    public async Task LaunchModdedAsync_InvalidBootstrapSourceFailsBeforeProcessCreation()
+    {
+        using var fixture = await LaunchFixture.CreateAsync(existingRmm: false);
+        await File.WriteAllTextAsync(fixture.NormalSave, "invalid-save-length");
+
+        var result = await fixture.Service.LaunchModdedAsync(
+            SteamId,
+            CancellationToken.None);
+
+        Assert.False(result.Started);
+        Assert.Equal(0, fixture.Platform.CreateCalls);
+        Assert.False(File.Exists(fixture.DedicatedRmm));
+    }
+
+    [Theory]
+    [InlineData("DarkSoulsRemastered.exe")]
+    [InlineData("steam_api64.dll")]
+    public async Task LaunchModdedAsync_ChangedProtectedCoreFailsBeforeProcessCreation(
+        string relativePath)
+    {
+        using var fixture = await LaunchFixture.CreateAsync(existingRmm: true);
+        await File.AppendAllTextAsync(Path.Combine(fixture.RuntimeRoot, relativePath), "changed");
+
+        var result = await fixture.Service.LaunchModdedAsync(
+            SteamId,
+            CancellationToken.None);
+
+        Assert.False(result.Started);
+        Assert.Equal(0, fixture.Platform.CreateCalls);
+    }
+
+    [Fact]
+    public async Task LaunchModdedAsync_UnsupportedProfileFailsBeforeProcessCreation()
+    {
+        using var fixture = await LaunchFixture.CreateAsync(
+            existingRmm: true,
+            supportedProfile: false);
+
+        var result = await fixture.Service.LaunchModdedAsync(
+            SteamId,
+            CancellationToken.None);
+
+        Assert.False(result.Started);
+        Assert.Equal(0, fixture.Platform.CreateCalls);
+    }
+
+    [Fact]
+    public async Task LaunchModdedAsync_MissingGuardFailsBeforeProcessCreation()
+    {
+        using var fixture = await LaunchFixture.CreateAsync(existingRmm: true);
+        File.Delete(fixture.GuardDll);
+
+        var result = await fixture.Service.LaunchModdedAsync(
+            SteamId,
+            CancellationToken.None);
+
+        Assert.False(result.Started);
+        Assert.Equal(0, fixture.Platform.CreateCalls);
+    }
+
+    [Fact]
+    public async Task LaunchModdedAsync_ChangedGuardHashFailsBeforeProcessCreation()
+    {
+        using var fixture = await LaunchFixture.CreateAsync(existingRmm: true);
+        await File.AppendAllTextAsync(fixture.GuardDll, "tampered");
+
+        var result = await fixture.Service.LaunchModdedAsync(
+            SteamId,
+            CancellationToken.None);
+
+        Assert.False(result.Started);
+        Assert.Equal(0, fixture.Platform.CreateCalls);
+    }
+
+    [Fact]
+    public async Task LaunchModdedAsync_RuntimeUsedAsSourceFailsBeforeProcessCreation()
+    {
+        using var fixture = await LaunchFixture.CreateAsync(existingRmm: true);
+        await fixture.PointSourceAtRuntimeAsync();
+
+        var result = await fixture.Service.LaunchModdedAsync(
+            SteamId,
+            CancellationToken.None);
+
+        Assert.False(result.Started);
+        Assert.Equal(0, fixture.Platform.CreateCalls);
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_container))
@@ -271,6 +496,307 @@ public sealed class LauncherServiceTests : IDisposable
                 var hash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path)));
                 return $"{Path.GetRelativePath(source, path)}|{info.Length}|{info.LastWriteTimeUtc.Ticks}|{hash}";
             }));
+
+    private sealed class LaunchFixture : IDisposable
+    {
+        private LaunchFixture(
+            string container,
+            string externalRoot,
+            string sourceRoot,
+            string runtimeRoot,
+            string runtimeExe,
+            string normalSave,
+            string dedicatedRmm,
+            string guardDll,
+            TrackingFileAccess fileAccess,
+            RecordingPlatform platform,
+            LauncherService service)
+        {
+            Container = container;
+            ExternalRoot = externalRoot;
+            SourceRoot = sourceRoot;
+            RuntimeRoot = runtimeRoot;
+            RuntimeExe = runtimeExe;
+            NormalSave = normalSave;
+            DedicatedRmm = dedicatedRmm;
+            GuardDll = guardDll;
+            FileAccess = fileAccess;
+            Platform = platform;
+            Service = service;
+        }
+
+        public string Container { get; }
+        public string ExternalRoot { get; }
+        public string SourceRoot { get; }
+        public string RuntimeRoot { get; }
+        public string RuntimeExe { get; }
+        public string NormalSave { get; }
+        public string DedicatedRmm { get; }
+        public string GuardDll { get; }
+        public TrackingFileAccess FileAccess { get; }
+        public RecordingPlatform Platform { get; }
+        public LauncherService Service { get; }
+
+        public Task PointSourceAtRuntimeAsync() => File.WriteAllTextAsync(
+            Path.Combine(ExternalRoot, "config", "source-installation.json"),
+            JsonSerializer.Serialize(new { canonicalInstallationPath = RuntimeRoot }));
+
+        public static async Task<LaunchFixture> CreateAsync(
+            bool existingRmm,
+            bool existingNormalSave = true,
+            bool supportedProfile = true,
+            bool persistNormalSelection = true)
+        {
+            var container = Path.Combine(
+                Path.GetTempPath(),
+                $"dsr-launch-fixture-{Guid.NewGuid():N}");
+            var externalRoot = Path.Combine(container, "external");
+            var sourceRoot = Path.Combine(container, "source");
+            var documents = Path.Combine(container, "documents");
+            var runtimeId = "runtime-test";
+            var runtimeRoot = Path.Combine(externalRoot, "runtimes", runtimeId);
+            Directory.CreateDirectory(sourceRoot);
+            Directory.CreateDirectory(runtimeRoot);
+
+            var executableBytes = SyntheticPe(0x41);
+            var steamBytes = SyntheticPe(0x52);
+            var runtimeExe = Path.Combine(runtimeRoot, "DarkSoulsRemastered.exe");
+            var steamDll = Path.Combine(runtimeRoot, "steam_api64.dll");
+            await File.WriteAllBytesAsync(runtimeExe, executableBytes);
+            await File.WriteAllBytesAsync(steamDll, steamBytes);
+
+            var manifest = new RuntimeManifest(
+                1,
+                runtimeId,
+                DateTimeOffset.UnixEpoch,
+                Sha256(executableBytes),
+                new string('a', 64),
+                executableBytes.LongLength + steamBytes.LongLength,
+                [
+                    new RuntimeFileManifestEntry(
+                        "DarkSoulsRemastered.exe",
+                        executableBytes.LongLength,
+                        Sha256(executableBytes)),
+                    new RuntimeFileManifestEntry(
+                        "steam_api64.dll",
+                        steamBytes.LongLength,
+                        Sha256(steamBytes))
+                ]);
+            var jsonOptions = new JsonSerializerOptions
+            {
+                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+            };
+            var manifestPath = Path.Combine(runtimeRoot, "runtime-manifest.json");
+            await File.WriteAllBytesAsync(
+                manifestPath,
+                JsonSerializer.SerializeToUtf8Bytes(manifest, jsonOptions));
+            await File.WriteAllBytesAsync(
+                Path.Combine(externalRoot, "runtime-current.json"),
+                JsonSerializer.SerializeToUtf8Bytes(
+                    new RuntimePointer(
+                        runtimeId,
+                        Path.Combine("runtimes", runtimeId),
+                        Sha256(await File.ReadAllBytesAsync(manifestPath))),
+                    jsonOptions));
+            var config = Path.Combine(externalRoot, "config");
+            Directory.CreateDirectory(config);
+            await File.WriteAllTextAsync(
+                Path.Combine(config, "source-installation.json"),
+                JsonSerializer.Serialize(
+                    new { canonicalInstallationPath = Path.GetFullPath(sourceRoot) }));
+
+            var normalSave = Path.Combine(
+                documents,
+                "NBGI",
+                "DARK SOULS REMASTERED",
+                SteamId,
+                "DRAKS0005.sl2");
+            if (existingNormalSave)
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(normalSave)!);
+                await File.WriteAllBytesAsync(
+                    normalSave,
+                    Enumerable.Repeat((byte)0x31, checked((int)FixedSaveLength)).ToArray());
+                if (persistNormalSelection)
+                {
+                    await File.WriteAllBytesAsync(
+                        Path.Combine(config, "selected-save-profile.json"),
+                        JsonSerializer.SerializeToUtf8Bytes(
+                            new SaveProfileCandidate(SteamId, normalSave),
+                            jsonOptions));
+                }
+            }
+
+            var dedicatedRmm = Path.Combine(
+                externalRoot,
+                "saves",
+                SteamId,
+                "DRAKS0005.rmm");
+            if (existingRmm)
+            {
+                CreateValidDedicatedSave(externalRoot, SteamId, 0x62);
+            }
+
+            var guardDirectory = Path.Combine(container, "package", "native");
+            Directory.CreateDirectory(guardDirectory);
+            var guardDll = Path.Combine(guardDirectory, "DSRRandomizer.Runtime.dll");
+            var guardBytes = SyntheticPe(0x63);
+            await File.WriteAllBytesAsync(guardDll, guardBytes);
+            var guardHashPath = guardDll + ".sha256";
+            await File.WriteAllTextAsync(guardHashPath, Sha256(guardBytes));
+
+            var executableIdentity = ProfileInspector.InspectIdentity(runtimeExe);
+            var steamIdentity = ProfileInspector.InspectIdentity(steamDll);
+            var profile = new CompatibilityProfile(
+                "synthetic-launch-profile",
+                "DarkSoulsRemastered.exe",
+                executableIdentity,
+                FixedSaveLength,
+                2,
+                [new ModuleProfile(
+                    "steam_api64.dll",
+                    steamIdentity,
+                    false,
+                    Array.Empty<string>(),
+                    Array.Empty<string>())],
+                Array.Empty<InternalTargetProfile>());
+            var catalog = new CompatibilityProfileCatalog(
+                supportedProfile ? [profile] : Array.Empty<CompatibilityProfile>());
+            var fileAccess = new TrackingFileAccess(normalSave);
+            var platform = new RecordingPlatform(fileAccess);
+            var service = new LauncherService(
+                externalRoot,
+                new FixedKnownFolderProvider(documents),
+                fileAccess,
+                catalog,
+                platform,
+                guardDll,
+                guardHashPath);
+            return new LaunchFixture(
+                container,
+                externalRoot,
+                sourceRoot,
+                runtimeRoot,
+                runtimeExe,
+                normalSave,
+                dedicatedRmm,
+                guardDll,
+                fileAccess,
+                platform,
+                service);
+        }
+
+        public void Dispose() => Directory.Delete(Container, recursive: true);
+
+        private static byte[] SyntheticPe(byte fill)
+        {
+            var image = Enumerable.Repeat(fill, 0x1400).ToArray();
+            image[0] = (byte)'M';
+            image[1] = (byte)'Z';
+            BinaryPrimitives.WriteInt32LittleEndian(image.AsSpan(0x3c), 0x80);
+            image[0x80] = (byte)'P';
+            image[0x81] = (byte)'E';
+            image[0x82] = 0;
+            image[0x83] = 0;
+            BinaryPrimitives.WriteUInt16LittleEndian(image.AsSpan(0x84), 0x8664);
+            BinaryPrimitives.WriteUInt16LittleEndian(image.AsSpan(0x86), 1);
+            BinaryPrimitives.WriteUInt32LittleEndian(image.AsSpan(0x88), 0x6344ca56);
+            BinaryPrimitives.WriteUInt16LittleEndian(image.AsSpan(0x94), 0xf0);
+            BinaryPrimitives.WriteUInt16LittleEndian(image.AsSpan(0x98), 0x20b);
+            BinaryPrimitives.WriteUInt32LittleEndian(image.AsSpan(0xd0), 0x3000);
+            BinaryPrimitives.WriteUInt32LittleEndian(image.AsSpan(0xd4), 0x200);
+            var section = image.AsSpan(0x188);
+            ".text\0\0\0"u8.CopyTo(section);
+            BinaryPrimitives.WriteUInt32LittleEndian(section[8..], 0x1000);
+            BinaryPrimitives.WriteUInt32LittleEndian(section[12..], 0x1000);
+            BinaryPrimitives.WriteUInt32LittleEndian(section[16..], 0x1000);
+            BinaryPrimitives.WriteUInt32LittleEndian(section[20..], 0x200);
+            BinaryPrimitives.WriteUInt32LittleEndian(section[36..], 0x60000020);
+            return image;
+        }
+
+        private static string Sha256(byte[] bytes) =>
+            Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+    }
+
+    private sealed class RecordingPlatform(TrackingFileAccess fileAccess) : IProtectedProcessPlatform
+    {
+        public SafetyLaunchRequest? Request { get; private set; }
+        public int CreateCalls { get; private set; }
+        public int NormalSaveOpenCountAtProcessCreation { get; private set; }
+        public RecordingProcess Process { get; } = new();
+
+        public Task<IProtectedProcess> CreateSuspendedAsync(
+            SafetyLaunchRequest request,
+            CancellationToken cancellationToken)
+        {
+            CreateCalls++;
+            Request = request;
+            NormalSaveOpenCountAtProcessCreation = fileAccess.NormalSaveOpenCount;
+            Process.RequiredFlags = request.RequiredProtectionFlags;
+            return Task.FromResult<IProtectedProcess>(Process);
+        }
+    }
+
+    private sealed class RecordingProcess : IProtectedProcess
+    {
+        public ulong RequiredFlags { get; set; }
+        public Action? OnWaitForExit { get; set; }
+        public int ResumeCalls { get; private set; }
+        public int ProcessId => 1;
+        public void AssignKillOnCloseJob() { }
+        public Task<ProtectionHandshake> InjectAndInitializeAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(new ProtectionHandshake(true, RequiredFlags, string.Empty));
+        public uint ResumeMainThread()
+        {
+            ResumeCalls++;
+            return 1;
+        }
+        public void TerminateJob() { }
+        public Task<int> WaitForExitAsync(CancellationToken cancellationToken)
+        {
+            OnWaitForExit?.Invoke();
+            return Task.FromResult(0);
+        }
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private sealed class TrackingFileAccess(string normalSave) : IFileAccess
+    {
+        private readonly IFileAccess _inner = new SystemFileAccess();
+        public int NormalSaveOpenCount { get; private set; }
+        public bool Exists(string path) => _inner.Exists(path);
+        public IFileMutationLease AcquireMutationLease(string rootPath, IReadOnlyCollection<string> directoryPaths) =>
+            _inner.AcquireMutationLease(rootPath, directoryPaths);
+        public IFileMutationLease AcquireSessionLock(string rootPath, string lockPath) =>
+            _inner.AcquireSessionLock(rootPath, lockPath);
+        public FileAttributes GetAttributes(string path) => _inner.GetAttributes(path);
+        public bool IsSingleLinkFile(string path) => _inner.IsSingleLinkFile(path);
+        public Stream Open(string path, FileMode mode, FileAccess access, FileShare share)
+        {
+            if (Path.GetFullPath(path).Equals(
+                    Path.GetFullPath(normalSave),
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                NormalSaveOpenCount++;
+            }
+            return _inner.Open(path, mode, access, share);
+        }
+        public Task<FileIdentityAndHash> IdentityAndHashAsync(Stream stream, CancellationToken cancellationToken) =>
+            _inner.IdentityAndHashAsync(stream, cancellationToken);
+        public Task<FileIdentityAndHash> IdentityAndHashAsync(string path, CancellationToken cancellationToken) =>
+            _inner.IdentityAndHashAsync(path, cancellationToken);
+        public Task<CreatedFileIdentity> CopyAndFlushAsync(Stream source, string destinationPath, CancellationToken cancellationToken) =>
+            _inner.CopyAndFlushAsync(source, destinationPath, cancellationToken);
+        public Task<CreatedFileIdentity> WriteAllBytesAndFlushAsync(string path, ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken) =>
+            _inner.WriteAllBytesAndFlushAsync(path, bytes, cancellationToken);
+        public bool MoveCreateNewIfIdentityMatches(string sourcePath, string destinationPath, string expectedSourceIdentity) =>
+            _inner.MoveCreateNewIfIdentityMatches(sourcePath, destinationPath, expectedSourceIdentity);
+        public bool ReplaceIfSourceIdentityMatches(string sourcePath, string destinationPath, string expectedSourceIdentity) =>
+            _inner.ReplaceIfSourceIdentityMatches(sourcePath, destinationPath, expectedSourceIdentity);
+        public bool DeleteIfIdentityMatches(string path, string expectedIdentity) =>
+            _inner.DeleteIfIdentityMatches(path, expectedIdentity);
+    }
 
     private sealed class FixedKnownFolderProvider(string documents) : IKnownFolderProvider
     {

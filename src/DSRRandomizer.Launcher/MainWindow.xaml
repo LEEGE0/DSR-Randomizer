@@ -1,7 +1,7 @@
 <Window x:Class="DSRRandomizer.Launcher.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="DSR Randomizer — Isolation Foundation"
+        Title="DSR Randomizer — Manual Offline Mod Runtime"
         Width="720"
         Height="700"
         MinWidth="640"
@@ -22,7 +22,7 @@
                     BorderThickness="1"
                     Background="#FFFFF4CE">
                 <TextBlock TextWrapping="Wrap"
-                           Text="Safety lock: this foundation release cannot start the game because dedicated-save redirection and official-online blocking are not installed yet." />
+                           Text="Steam Offline Mode required; launcher does not block networking; modded copy only; original and Overhaul remain untouched." />
             </Border>
 
             <TextBlock FontWeight="SemiBold"
@@ -100,8 +100,8 @@
 
             <Button Margin="0,18,0,14"
                     Padding="12,9"
-                    Content="Launch Random Dark Souls (safety components required)"
-                    IsEnabled="{Binding CanLaunch}" />
+                    Content="Launch modded copy"
+                    Command="{Binding LaunchCommand}" />
 
             <TextBlock FontWeight="SemiBold"
                        Text="Status" />

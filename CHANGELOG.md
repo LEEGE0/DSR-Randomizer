@@ -14,9 +14,14 @@ All notable changes to DSR Randomizer are documented here.
 - Runtime-readiness validation and command-line status output.
 - Original-installation before/after immutability proof.
 - Single-file packaging, prohibited-content guard, deterministic ZIP, and SHA-256 checksum.
+- User-selected external material root and copied mod runtime with folder-based manual mod installation.
+- Shared CLI/WPF modded launch path using an exact authenticated, sessionless save-only `0x7` guard handshake.
+- Existing dedicated `.rmm` reuse without normal-save access and atomic read-only bootstrap when `.rmm` is absent.
+- Deterministic packaging of the project native guard, guard checksum, and pinned compatibility profile.
 
-### Safety lock
+### Safety boundary
 
-- Game launch is deliberately unavailable in this release.
-- Item and enemy randomization, dedicated-save redirection, auto-equip, and official-online blocking are not included yet.
-- Launch remains locked until dedicated-save and official-online protections are implemented and verified.
+- Steam Offline Mode is required and remains user-managed; the launcher does not block or attest networking.
+- Product launch requests only bootstrap, known-folder save redirection, and file-I/O save redirection (`0x7`).
+- The original installation, installed Overhaul, and normal `.sl2` remain protected; only the copied mod runtime and dedicated `.rmm` are launched.
+- Automatic randomizer generation, mod enable/disable state, load-order management, and rollback are not included.

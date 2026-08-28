@@ -1,4 +1,5 @@
 using DSRRandomizer.Foundation.Safety;
+using DSRRandomizer.Launcher.Native;
 
 namespace DSRRandomizer.Launcher.Safety;
 
@@ -9,7 +10,8 @@ public sealed record SafetyLaunchRequest(
     CompatibilityProfile Profile,
     ulong RequiredProtectionFlags,
     bool DiagnosticMode,
-    IReadOnlyList<string>? Arguments = null);
+    IReadOnlyList<string>? Arguments = null,
+    GuardSavePathConfiguration? SavePaths = null);
 
 public sealed record ProtectionHandshake(
     bool Success,

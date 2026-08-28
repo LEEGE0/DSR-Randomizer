@@ -10,7 +10,10 @@ public sealed class ReleaseContentGuard
             "README.md",
             "LICENSE",
             "THIRD_PARTY_NOTICES.md",
-            "CHANGELOG.md"
+            "CHANGELOG.md",
+            "native/DSRRandomizer.Runtime.dll",
+            "native/DSRRandomizer.Runtime.dll.sha256",
+            "config/compatibility-profiles.json"
         },
         StringComparer.OrdinalIgnoreCase);
 
@@ -31,7 +34,6 @@ public sealed class ReleaseContentGuard
             if (duplicatePaths.Contains(originalPath)
                 || string.IsNullOrWhiteSpace(normalized)
                 || Path.IsPathRooted(originalPath)
-                || normalized.Contains('/', StringComparison.Ordinal)
                 || normalized is "." or ".."
                 || !AllowedPaths.Contains(normalized))
             {

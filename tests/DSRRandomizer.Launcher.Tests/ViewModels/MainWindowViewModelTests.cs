@@ -5,6 +5,7 @@ using DSRRandomizer.Launcher.Logging;
 using DSRRandomizer.Launcher.Configuration;
 using DSRRandomizer.Launcher.Services;
 using DSRRandomizer.Launcher.ViewModels;
+using DSRRandomizer.Launcher.Safety;
 
 namespace DSRRandomizer.Launcher.Tests.ViewModels;
 
@@ -61,7 +62,7 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
-    public async Task InitializeCommand_NativeFoundationStillKeepsPublicLaunchLocked()
+    public async Task InitializeCommand_MarksModRuntimeReadyButStillRequiresSelectedProfile()
     {
         var service = new FakeLauncherService();
         var viewModel = CreateViewModel(service, new RecordingLogger());
@@ -71,7 +72,7 @@ public sealed class MainWindowViewModelTests
 
         Assert.False(viewModel.CanLaunch);
         Assert.Equal(
-            "External runtime is ready. Launch stays locked until dedicated-save and online-blocking safety is installed.",
+            "External mod runtime is ready. Select a SteamID to launch after placing Steam in Offline Mode.",
             viewModel.Status);
         Assert.False(viewModel.IsBusy);
         Assert.Equal(100, viewModel.ProgressPercent);
@@ -236,6 +237,53 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
+    public async Task LaunchCommand_ReadyRuntimeAndSelectedProfileCallsSharedLaunchService()
+    {
+        var profile = new SaveProfileCandidate(
+            SteamId,
+            @"C:\Documents\12345678901234567\DRAKS0005.sl2");
+        var service = new FakeLauncherService
+        {
+            SaveProfiles = [profile],
+            PrepareResult = DedicatedSaveResult.Fail(
+                SaveErrorCode.FirstCopyConfirmationRequired,
+                "Launch can bootstrap the selected normal save."),
+            LaunchResult = new SafetyLaunchResult(true, string.Empty, 0)
+        };
+        var viewModel = CreateViewModel(service, new RecordingLogger());
+        viewModel.GamePath = @"C:\Steam\DSR";
+        await viewModel.InitializeCommand.ExecuteAsync(null);
+        await viewModel.PrepareSaveCommand.ExecuteAsync(null);
+
+        Assert.True(viewModel.LaunchCommand.CanExecute(null));
+        await viewModel.LaunchCommand.ExecuteAsync(null);
+
+        Assert.Equal(SteamId, Assert.Single(service.LaunchCalls));
+        Assert.Contains("exited", viewModel.Status, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task LoadAsync_ModReadyRuntimeAndValidExistingRmmEnablesLaunchWithoutPrepareCommand()
+    {
+        var service = new FakeLauncherService
+        {
+            SaveProfiles = [new SaveProfileCandidate(SteamId, string.Empty)],
+            PrepareResult = new DedicatedSaveResult(
+                true,
+                true,
+                @"C:\External\saves\12345678901234567\DRAKS0005.rmm",
+                SaveErrorCode.None,
+                string.Empty)
+        };
+        var viewModel = CreateViewModel(service, new RecordingLogger());
+
+        await viewModel.LoadAsync();
+
+        Assert.True(viewModel.LaunchCommand.CanExecute(null));
+        Assert.Equal((SteamId, false), Assert.Single(service.PrepareCalls));
+    }
+
+    [Fact]
     public async Task PrepareSaveCommand_InFlightProfileChangeRendersOriginalSelectionSnapshot()
     {
         var first = new SaveProfileCandidate(
@@ -305,6 +353,11 @@ public sealed class MainWindowViewModelTests
 
         public Exception? RuntimeException { get; init; }
 
+        public SafetyLaunchResult LaunchResult { get; init; } =
+            SafetyLaunchResult.Failed("not configured");
+
+        public List<string> LaunchCalls { get; } = [];
+
         public Task<VerificationResult> VerifyAsync(
             string gamePath,
             CancellationToken cancellationToken) =>
@@ -341,6 +394,9 @@ public sealed class MainWindowViewModelTests
                 @"C:\Local\runtime-test",
                 Array.Empty<string>()));
 
+        public Task<RuntimeReadinessResult> GetModdedLaunchReadinessAsync(
+            CancellationToken cancellationToken) => GetReadinessAsync(cancellationToken);
+
         public Task<IReadOnlyList<SaveProfileCandidate>> DiscoverSaveProfilesAsync(
             CancellationToken cancellationToken) =>
             Task.FromResult(SaveProfiles);
@@ -353,6 +409,14 @@ public sealed class MainWindowViewModelTests
             PrepareCalls.Add((steamId, firstCopyConfirmed));
             PrepareEntered.TrySetResult();
             return PendingPrepareResult?.Task ?? Task.FromResult(PrepareResult);
+        }
+
+        public Task<SafetyLaunchResult> LaunchModdedAsync(
+            string steamId,
+            CancellationToken cancellationToken)
+        {
+            LaunchCalls.Add(steamId);
+            return Task.FromResult(LaunchResult);
         }
     }
 

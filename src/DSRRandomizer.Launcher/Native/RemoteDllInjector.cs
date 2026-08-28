@@ -162,9 +162,12 @@ public sealed class RemoteDllInjector
                 return handshake;
             }
 
-            if (SimplifiedOfflineProtection.IsExact(configuration.RequiredFlags))
+            if (DedicatedSaveProtection.IsExact(configuration.RequiredFlags)
+                || SimplifiedOfflineProtection.IsExact(configuration.RequiredFlags))
             {
-                var oneShot = await pipe.CompleteOneShotAsync(handshake);
+                var oneShot = await pipe.CompleteOneShotAsync(
+                    handshake,
+                    configuration.RequiredFlags);
                 pipe = null;
                 return oneShot;
             }

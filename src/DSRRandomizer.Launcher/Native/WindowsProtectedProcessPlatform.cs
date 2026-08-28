@@ -181,11 +181,7 @@ public sealed class WindowsProtectedProcessPlatform : IProtectedProcessPlatform
             CancellationToken cancellationToken) =>
             new RemoteDllInjector().InitializeAsync(
                 this,
-                GuardConfiguration.Create(
-                    request.GuardDllPath,
-                    request.Profile.ProtocolVersion,
-                    request.RequiredProtectionFlags,
-                    request.DiagnosticMode),
+                CreateGuardConfiguration(request),
                 cancellationToken);
 
         public uint ResumeMainThread()
@@ -259,4 +255,15 @@ public sealed class WindowsProtectedProcessPlatform : IProtectedProcessPlatform
         private void ThrowIfDisposed() =>
             ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
     }
+
+    internal static GuardConfiguration CreateGuardConfiguration(
+        SafetyLaunchRequest request) =>
+        GuardConfiguration.Create(
+            request.GuardDllPath,
+            request.Profile.ProtocolVersion,
+            request.RequiredProtectionFlags,
+            request.DiagnosticMode) with
+        {
+            SavePaths = request.SavePaths
+        };
 }

@@ -45,15 +45,14 @@ public sealed class SafetyLaunchCoordinator
                 return SafetyLaunchResult.Failed("SAFETY_FLAGS_INCOMPLETE");
             }
 
-            var simplifiedOneShot =
-                SimplifiedOfflineProtection.IsExact(request.RequiredProtectionFlags) &&
-                SimplifiedOfflineProtection.IsExact(handshake.ActiveFlags);
-            if (simplifiedOneShot && session is not null)
+            var oneShot = IsExactOneShot(request.RequiredProtectionFlags)
+                && IsExactOneShot(handshake.ActiveFlags);
+            if (oneShot && session is not null)
             {
                 TerminateOnce();
                 return SafetyLaunchResult.Failed("SAFETY_MONITOR_UNEXPECTED");
             }
-            if (!simplifiedOneShot && session is null)
+            if (!oneShot && session is null)
             {
                 TerminateOnce();
                 return SafetyLaunchResult.Failed("SAFETY_MONITOR_UNAVAILABLE");
@@ -67,7 +66,7 @@ public sealed class SafetyLaunchCoordinator
             }
 
             var exitTask = process.WaitForExitAsync(cancellationToken);
-            if (simplifiedOneShot)
+            if (oneShot)
             {
                 return new SafetyLaunchResult(
                     true,
@@ -154,4 +153,8 @@ public sealed class SafetyLaunchCoordinator
             }
         }
     }
+
+    private static bool IsExactOneShot(ulong flags) =>
+        DedicatedSaveProtection.IsExact(flags)
+        || SimplifiedOfflineProtection.IsExact(flags);
 }

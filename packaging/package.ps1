@@ -94,6 +94,26 @@ try {
     foreach ($notice in @('README.md', 'LICENSE', 'CHANGELOG.md')) {
         Copy-Item -LiteralPath (Join-Path $repositoryRoot $notice) -Destination $stagingRoot
     }
+    $publishedGuard = Join-Path $publishRoot 'native/DSRRandomizer.Runtime.dll'
+    $publishedProfile = Join-Path $publishRoot 'config/compatibility-profiles.json'
+    if (-not (Test-Path -LiteralPath $publishedGuard -PathType Leaf)) {
+        throw "Published native guard is missing: $publishedGuard"
+    }
+    if (-not (Test-Path -LiteralPath $publishedProfile -PathType Leaf)) {
+        throw "Published compatibility profile is missing: $publishedProfile"
+    }
+    $stagedNative = Join-Path $stagingRoot 'native'
+    $stagedConfig = Join-Path $stagingRoot 'config'
+    [IO.Directory]::CreateDirectory($stagedNative) | Out-Null
+    [IO.Directory]::CreateDirectory($stagedConfig) | Out-Null
+    $stagedGuard = Join-Path $stagedNative 'DSRRandomizer.Runtime.dll'
+    Copy-Item -LiteralPath $publishedGuard -Destination $stagedGuard
+    Copy-Item -LiteralPath $publishedProfile -Destination $stagedConfig
+    $guardHash = (Get-FileHash -LiteralPath $stagedGuard -Algorithm SHA256).Hash.ToLowerInvariant()
+    [IO.File]::WriteAllText(
+        "$stagedGuard.sha256",
+        "$guardHash`n",
+        [Text.UTF8Encoding]::new($false))
 
     $dependencyManifest = Get-ChildItem `
         -LiteralPath (Join-Path $repositoryRoot 'src/DSRRandomizer.Launcher/obj/Release') `
@@ -143,8 +163,10 @@ try {
             [IO.Compression.ZipArchiveMode]::Create,
             $true)
         try {
-            foreach ($file in Get-ChildItem -LiteralPath $stagingRoot -File | Sort-Object Name) {
-                $entry = $archive.CreateEntry($file.Name, [IO.Compression.CompressionLevel]::Optimal)
+            foreach ($file in Get-ChildItem -LiteralPath $stagingRoot -File -Recurse |
+                     Sort-Object FullName) {
+                $entryName = [IO.Path]::GetRelativePath($stagingRoot, $file.FullName).Replace('\', '/')
+                $entry = $archive.CreateEntry($entryName, [IO.Compression.CompressionLevel]::Optimal)
                 $entry.LastWriteTime = [DateTimeOffset]::new(1980, 1, 1, 0, 0, 0, [TimeSpan]::Zero)
                 $input = [IO.File]::OpenRead($file.FullName)
                 $output = $entry.Open()

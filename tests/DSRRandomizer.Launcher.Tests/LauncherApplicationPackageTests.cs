@@ -2,6 +2,7 @@ using DSRRandomizer.Foundation.Installation;
 using DSRRandomizer.Foundation.Runtime;
 using DSRRandomizer.Foundation.Saves;
 using DSRRandomizer.Launcher.Services;
+using DSRRandomizer.Launcher.Safety;
 
 namespace DSRRandomizer.Launcher.Tests;
 
@@ -50,6 +51,17 @@ public sealed class LauncherApplicationPackageTests : IDisposable
         {
             await File.WriteAllTextAsync(Path.Combine(_packageRoot, file), file);
         }
+        Directory.CreateDirectory(Path.Combine(_packageRoot, "native"));
+        await File.WriteAllTextAsync(
+            Path.Combine(_packageRoot, "native", "DSRRandomizer.Runtime.dll"),
+            "guard");
+        await File.WriteAllTextAsync(
+            Path.Combine(_packageRoot, "native", "DSRRandomizer.Runtime.dll.sha256"),
+            new string('a', 64));
+        Directory.CreateDirectory(Path.Combine(_packageRoot, "config"));
+        await File.WriteAllTextAsync(
+            Path.Combine(_packageRoot, "config", "compatibility-profiles.json"),
+            "{}");
 
         var application = new LauncherApplication(
             new UnusedLauncherService(),
@@ -83,6 +95,10 @@ public sealed class LauncherApplicationPackageTests : IDisposable
         public Task<RuntimeReadinessResult> GetReadinessAsync(CancellationToken cancellationToken) =>
             throw new InvalidOperationException("Package validation must not read runtime status.");
 
+        public Task<RuntimeReadinessResult> GetModdedLaunchReadinessAsync(
+            CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("Package validation must not read mod runtime status.");
+
         public Task<IReadOnlyList<SaveProfileCandidate>> DiscoverSaveProfilesAsync(
             CancellationToken cancellationToken) =>
             throw new InvalidOperationException("Package validation must not discover save profiles.");
@@ -92,5 +108,10 @@ public sealed class LauncherApplicationPackageTests : IDisposable
             bool firstCopyConfirmed,
             CancellationToken cancellationToken) =>
             throw new InvalidOperationException("Package validation must not prepare a save.");
+
+        public Task<SafetyLaunchResult> LaunchModdedAsync(
+            string steamId,
+            CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("Package validation must not launch a process.");
     }
 }

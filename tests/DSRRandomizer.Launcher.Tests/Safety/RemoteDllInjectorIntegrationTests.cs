@@ -43,6 +43,19 @@ public sealed class RemoteDllInjectorIntegrationTests
         Assert.Equal(expected, SimplifiedOfflineProtection.IsExact(flags));
     }
 
+    [Theory]
+    [InlineData(0x7UL, true)]
+    [InlineData(0x6UL, false)]
+    [InlineData(0xFUL, false)]
+    [InlineData(0x10000000007UL, false)]
+    public void DedicatedSaveProtection_RequiresExactThreeBitBitmap(
+        ulong flags,
+        bool expected)
+    {
+        Assert.Equal(0x7UL, DedicatedSaveProtection.RequiredFlags);
+        Assert.Equal(expected, DedicatedSaveProtection.IsExact(flags));
+    }
+
     [Fact]
     public async Task CompleteOneShotAsync_DisposesPipeAndReturnsNoSession()
     {
@@ -55,13 +68,40 @@ public sealed class RemoteDllInjectorIntegrationTests
             string.Empty,
             Session: pipe);
 
-        var result = await pipe.CompleteOneShotAsync(handshake);
+        var result = await pipe.CompleteOneShotAsync(
+            handshake,
+            SimplifiedOfflineProtection.RequiredFlags);
 
         Assert.True(result.Success);
         Assert.Equal(SimplifiedOfflineProtection.RequiredFlags, result.ActiveFlags);
         Assert.Null(result.Session);
         await Assert.ThrowsAsync<ObjectDisposedException>(
             () => pipe.WaitForHandshakeAsync(CancellationToken.None));
+    }
+
+    [Theory]
+    [InlineData(0x6UL)]
+    [InlineData(0xFUL)]
+    [InlineData(0x10000000007UL)]
+    public async Task CompleteOneShotAsync_RejectsNonExactDedicatedSaveFlags(
+        ulong activeFlags)
+    {
+        await using var pipe = new ProtectionPipeServer(
+            RandomNumberGenerator.GetBytes(32),
+            TimeSpan.FromSeconds(1));
+        var handshake = new ProtectionHandshake(
+            true,
+            activeFlags,
+            string.Empty,
+            Session: pipe);
+
+        var result = await pipe.CompleteOneShotAsync(
+            handshake,
+            DedicatedSaveProtection.RequiredFlags);
+
+        Assert.False(result.Success);
+        Assert.Equal("SAFETY_FLAGS_INCOMPLETE", result.ErrorCode);
+        Assert.Null(result.Session);
     }
 
     [Fact]
