@@ -59,14 +59,39 @@ set_target_properties(DSRRandomizer.Runtime PROPERTIES
   OUTPUT_NAME "DSRRandomizer.Runtime")
 
 add_library(DSRRandomizer.RmmBridge.Core STATIC
+  bridge/RmmBridgeBootstrap.cpp
+  bridge/RmmBridgeBootstrap.h
   bridge/RmmBridgeConfiguration.cpp
-  bridge/RmmBridgeConfiguration.h)
+  bridge/RmmBridgeConfiguration.h
+  bridge/RmmBridgeHostClient.cpp
+  bridge/RmmBridgeHostClient.h)
 target_compile_features(DSRRandomizer.RmmBridge.Core PUBLIC cxx_std_20)
 target_include_directories(DSRRandomizer.RmmBridge.Core
   PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/native/include)
 dsr_configure_target(DSRRandomizer.RmmBridge.Core)
+target_link_libraries(DSRRandomizer.RmmBridge.Core PUBLIC BCrypt)
 set_target_properties(DSRRandomizer.RmmBridge.Core PROPERTIES
   CXX_EXTENSIONS OFF
   POSITION_INDEPENDENT_CODE ON)
+
+add_library(DSRRandomizer.RmmBridge SHARED
+  bridge/RmmBridgeEntry.cpp
+  bridge/WindowsBridgePlatform.cpp
+  bridge/WindowsBridgePlatform.h)
+target_compile_features(DSRRandomizer.RmmBridge PRIVATE cxx_std_20)
+target_include_directories(DSRRandomizer.RmmBridge
+  PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/native/include)
+target_link_libraries(DSRRandomizer.RmmBridge
+  PRIVATE
+    DSRRandomizer.RmmBridge.Core
+    DSRRandomizer.Runtime.Core
+    BCrypt
+    Shell32)
+dsr_configure_target(DSRRandomizer.RmmBridge)
+set_target_properties(DSRRandomizer.RmmBridge PROPERTIES
+  CXX_EXTENSIONS OFF
+  OUTPUT_NAME "DSRRandomizer.RmmBridge")

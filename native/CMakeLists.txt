@@ -314,6 +314,22 @@ set_target_properties(RmmBridgeConfigurationTests PROPERTIES
 
 add_test(NAME RmmBridgeConfigurationTests COMMAND RmmBridgeConfigurationTests)
 
+add_executable(RmmBridgeBootstrapTests
+  tests/RmmBridgeBootstrapTests.cpp)
+target_compile_features(RmmBridgeBootstrapTests PRIVATE cxx_std_20)
+target_link_libraries(RmmBridgeBootstrapTests
+  PRIVATE
+    DSRRandomizer.RmmBridge.Core
+    DSRRandomizer.Runtime.Core)
+target_include_directories(RmmBridgeBootstrapTests
+  PRIVATE
+    ${CMAKE_SOURCE_DIR}/native/runtime)
+dsr_configure_target(RmmBridgeBootstrapTests)
+set_target_properties(RmmBridgeBootstrapTests PROPERTIES
+  CXX_EXTENSIONS OFF)
+
+add_test(NAME RmmBridgeBootstrapTests COMMAND RmmBridgeBootstrapTests)
+
 add_executable(NetworkPolicyTests
   tests/NetworkPolicyTests.cpp)
 target_compile_features(NetworkPolicyTests PRIVATE cxx_std_20)
