@@ -353,8 +353,7 @@
 **Files:**
 - Create: `scripts/publish-rmm-bridge.ps1`
 - Create: `docs/enemy-randomizer-rmm-bridge.md`
-- Modify: `packaging/package.ps1`
-- Local generated file with backup: `D:\DSR MOD\runtimes\runtime-a39cb5e0b3d6c410d550f468b5e034ebe3d4db3e2c719ca3d3cff64102295c10\Mods\DS1 Enemy Randomizer-922-v0-1-3-1778373918\DS1EnemyRandomizer\dist1\config_randomizer.toml`
+- Local generated file with backup: `D:\DSR MOD\runtimes\runtime-a39cb5e0b3d6c410d550f468b5e034ebe3d4db3e2c719ca3d3cff64102295c10\Mods\DS1 Enemy Randomizer-922-v0-1-3-1778373918\DS1EnemyRandomizer\config_randomizer.toml`
 
 **Interfaces:**
 - Consumes: Release native DLL, self-contained win-x64 managed host publish, the current enemy-randomizer folder, and current `D:\DSR MOD` configuration.
@@ -407,7 +406,7 @@
 - [ ] **Step 6: Commit publishing and operations documentation**
 
   ```powershell
-  git add scripts/publish-rmm-bridge.ps1 packaging/package.ps1 docs/enemy-randomizer-rmm-bridge.md
+  git add scripts/publish-rmm-bridge.ps1 docs/enemy-randomizer-rmm-bridge.md
   git commit -m "build: publish enemy randomizer rmm bridge"
   ```
 
