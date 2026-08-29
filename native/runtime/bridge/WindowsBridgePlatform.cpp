@@ -260,8 +260,11 @@ bool WindowsBridgePlatform::StartHostAndWaitReady(
 bool WindowsBridgePlatform::InstallHooks(
     const Save::SaveHookConfiguration& configuration,
     std::wstring& message) {
-    if (Save::InstallSaveHooks(configuration) != Save::SaveHookInstallStatus::Success) {
-        message = L"The RMM save hooks could not be installed.";
+    const auto status = Save::InstallSaveHooks(configuration);
+    if (status != Save::SaveHookInstallStatus::Success) {
+        message = status == Save::SaveHookInstallStatus::InvalidConfiguration
+            ? L"The RMM save-hook configuration was rejected."
+            : L"The RMM save-hook detours could not be installed.";
         return false;
     }
     return true;

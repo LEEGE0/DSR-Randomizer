@@ -330,6 +330,29 @@ set_target_properties(RmmBridgeBootstrapTests PROPERTIES
 
 add_test(NAME RmmBridgeBootstrapTests COMMAND RmmBridgeBootstrapTests)
 
+add_executable(DSRRandomizer.RmmBridgeHostFixture
+  fixtures/RmmBridgeHostFixture.cpp)
+target_compile_features(DSRRandomizer.RmmBridgeHostFixture PRIVATE cxx_std_20)
+dsr_configure_target(DSRRandomizer.RmmBridgeHostFixture)
+set_target_properties(DSRRandomizer.RmmBridgeHostFixture PROPERTIES
+  CXX_EXTENSIONS OFF)
+
+add_executable(DSRRandomizer.RmmBridgeLoaderFixture
+  fixtures/RmmBridgeLoaderFixture.cpp)
+target_compile_features(DSRRandomizer.RmmBridgeLoaderFixture PRIVATE cxx_std_20)
+target_link_libraries(DSRRandomizer.RmmBridgeLoaderFixture PRIVATE Shell32 Ole32)
+dsr_configure_target(DSRRandomizer.RmmBridgeLoaderFixture)
+set_target_properties(DSRRandomizer.RmmBridgeLoaderFixture PROPERTIES
+  CXX_EXTENSIONS OFF)
+
+add_test(
+  NAME RmmBridgeIntegrationTests
+  COMMAND pwsh -NoProfile -File
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/RunRmmBridgeIntegration.ps1
+    -LoaderFixture $<TARGET_FILE:DSRRandomizer.RmmBridgeLoaderFixture>
+    -HostFixture $<TARGET_FILE:DSRRandomizer.RmmBridgeHostFixture>
+    -BridgeDll $<TARGET_FILE:DSRRandomizer.RmmBridge>)
+
 add_executable(NetworkPolicyTests
   tests/NetworkPolicyTests.cpp)
 target_compile_features(NetworkPolicyTests PRIVATE cxx_std_20)
