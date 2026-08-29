@@ -61,10 +61,10 @@ public sealed class SafetyLaunchCoordinatorTests
     public async Task LaunchAsync_ExactDedicatedSaveBitmap_ResumesWithoutMonitorSession()
     {
         var platform = new RecordingPlatform(
-            new ProtectionHandshake(true, 0x3, string.Empty, Session: null));
+            new ProtectionHandshake(true, 0x201, string.Empty, Session: null));
 
         var result = await new SafetyLaunchCoordinator(platform)
-            .LaunchAsync(CreateRequest(requiredFlags: 0x3), CancellationToken.None);
+            .LaunchAsync(CreateRequest(requiredFlags: 0x201), CancellationToken.None);
 
         Assert.True(result.Started);
         Assert.Equal(1, platform.Process.ResumeCalls);
@@ -72,16 +72,16 @@ public sealed class SafetyLaunchCoordinatorTests
     }
 
     [Theory]
-    [InlineData(0x2UL)]
-    [InlineData(0x7UL)]
-    [InlineData(0x10000000003UL)]
+    [InlineData(0x3UL)]
+    [InlineData(0x203UL)]
+    [InlineData(0x10000000201UL)]
     public async Task LaunchAsync_NonExactDedicatedSaveBitmap_NeverResumes(ulong flags)
     {
         var platform = new RecordingPlatform(
             new ProtectionHandshake(true, flags, string.Empty, Session: null));
 
         var result = await new SafetyLaunchCoordinator(platform)
-            .LaunchAsync(CreateRequest(requiredFlags: 0x3), CancellationToken.None);
+            .LaunchAsync(CreateRequest(requiredFlags: 0x201), CancellationToken.None);
 
         Assert.False(result.Started);
         Assert.Equal(0, platform.Process.ResumeCalls);
@@ -94,12 +94,12 @@ public sealed class SafetyLaunchCoordinatorTests
         var platform = new RecordingPlatform(
             new ProtectionHandshake(
                 true,
-                0x3,
+                0x201,
                 string.Empty,
                 new BlockingProtectionSession()));
 
         var result = await new SafetyLaunchCoordinator(platform)
-            .LaunchAsync(CreateRequest(requiredFlags: 0x3), CancellationToken.None);
+            .LaunchAsync(CreateRequest(requiredFlags: 0x201), CancellationToken.None);
 
         Assert.False(result.Started);
         Assert.Equal(0, platform.Process.ResumeCalls);

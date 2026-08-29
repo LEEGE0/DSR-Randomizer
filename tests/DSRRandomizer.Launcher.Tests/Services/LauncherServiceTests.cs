@@ -236,13 +236,13 @@ public sealed class LauncherServiceTests : IDisposable
                 fixture.Platform.Request.SavePaths.DedicatedRmm
             },
             StringComparer.OrdinalIgnoreCase);
-        Assert.Equal(0x3UL, fixture.Platform.Request?.RequiredProtectionFlags);
+        Assert.Equal(0x201UL, fixture.Platform.Request?.RequiredProtectionFlags);
         Assert.Empty(fixture.Platform.Request?.Arguments ?? []);
         Assert.Equal(1, fixture.Platform.Process.ResumeCalls);
     }
 
     [Fact]
-    public async Task LaunchModdedAsync_BindsRmmAsTemporarySl2HardLinkDuringGameOnly()
+    public async Task LaunchModdedAsync_UsesRmmDirectlyWithoutCreatingVirtualSl2()
     {
         using var fixture = await LaunchFixture.CreateAsync(existingRmm: true);
         var alias = Path.Combine(
@@ -252,15 +252,15 @@ public sealed class LauncherServiceTests : IDisposable
             "DARK SOULS REMASTERED",
             SteamId,
             "DRAKS0005.sl2");
-        var aliasWasPresentDuringGame = false;
-        var rmmWasLinkedDuringGame = false;
+        var aliasWasPresentDuringGame = true;
+        var rmmWasSingleLinkDuringGame = false;
         fixture.Platform.Process.OnWaitForExit = () =>
         {
             aliasWasPresentDuringGame = File.Exists(alias);
-            rmmWasLinkedDuringGame = !new SystemFileAccess()
+            rmmWasSingleLinkDuringGame = new SystemFileAccess()
                 .IsSingleLinkFile(fixture.DedicatedRmm);
             using var stream = new FileStream(
-                alias,
+                fixture.DedicatedRmm,
                 FileMode.Open,
                 FileAccess.Write,
                 FileShare.ReadWrite);
@@ -274,8 +274,8 @@ public sealed class LauncherServiceTests : IDisposable
             CancellationToken.None);
 
         Assert.True(result.Started, result.ErrorCode);
-        Assert.True(aliasWasPresentDuringGame);
-        Assert.True(rmmWasLinkedDuringGame);
+        Assert.False(aliasWasPresentDuringGame);
+        Assert.True(rmmWasSingleLinkDuringGame);
         Assert.Equal(0x7b, File.ReadAllBytes(fixture.DedicatedRmm)[0]);
         Assert.False(File.Exists(alias));
         Assert.True(new SystemFileAccess().IsSingleLinkFile(fixture.DedicatedRmm));

@@ -20,7 +20,8 @@ public enum ProtectionFlags : ulong
     DeferredModuleGate = 1UL << 5,
     GameServiceOffline = 1UL << 6,
     Heartbeat = 1UL << 7,
-    HookIntegrity = 1UL << 8
+    HookIntegrity = 1UL << 8,
+    SaveCallsiteRedirect = 1UL << 9
 }
 
 public sealed record GuardSavePathConfiguration(
@@ -215,6 +216,7 @@ public sealed class RemoteDllInjector
         10 => "GAME_SERVICE_PROFILE_MISMATCH",
         11 => "GAME_SERVICE_HOOK_FAILED",
         12 => "PROTECTION_CLEANUP_FAILED",
+        13 => "SAVE_CALLSITE_PROFILE_MISMATCH",
         _ => "SAFETY_INITIALIZER_FAILED"
     };
 
@@ -256,7 +258,9 @@ public sealed class RemoteDllInjector
         pipeNameBytes.CopyTo(block, PipeNameOffset);
 
         const ProtectionFlags saveMask =
-            ProtectionFlags.SaveKnownFolder | ProtectionFlags.SaveFileIo;
+            ProtectionFlags.SaveKnownFolder |
+            ProtectionFlags.SaveFileIo |
+            ProtectionFlags.SaveCallsiteRedirect;
         var requestedSaveFlags = (ProtectionFlags)configuration.RequiredFlags & saveMask;
         if ((requestedSaveFlags & ProtectionFlags.SaveFileIo) != 0
             && (requestedSaveFlags & ProtectionFlags.SaveKnownFolder) == 0)
@@ -264,6 +268,20 @@ public sealed class RemoteDllInjector
             throw new ArgumentException(
                 "Save file-I/O protection requires Known Folder protection.",
                 nameof(configuration));
+        }
+        if ((requestedSaveFlags & ProtectionFlags.SaveCallsiteRedirect) != 0)
+        {
+            if (configuration.SavePaths is null)
+            {
+                throw new ArgumentException(
+                    "The dedicated rmm path is required for callsite redirection.",
+                    nameof(configuration));
+            }
+            WriteCanonicalPath(
+                block,
+                DedicatedRmmOffset,
+                configuration.SavePaths.DedicatedRmm,
+                configuration);
         }
         if ((requestedSaveFlags & ProtectionFlags.SaveKnownFolder) != 0)
         {

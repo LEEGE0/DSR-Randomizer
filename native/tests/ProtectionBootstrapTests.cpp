@@ -23,7 +23,7 @@ namespace fs = std::filesystem;
 static_assert(sizeof(DSRRandomizer::ProtectionSocketEndpoint) == 24);
 static_assert(sizeof(DSRRandomizer::ProtectionInitBlock) == 5480);
 static_assert(DSRRandomizer::kSimplifiedOfflineRequiredFlags == 0x7FULL);
-static_assert(DSRRandomizer::kDedicatedSaveRequiredFlags == 0x3ULL);
+static_assert(DSRRandomizer::kDedicatedSaveRequiredFlags == 0x201ULL);
 static_assert(offsetof(DSRRandomizer::ProtectionInitBlock, pipeName) == 52);
 static_assert(offsetof(DSRRandomizer::ProtectionInitBlock, virtualDocuments) == 308);
 static_assert(offsetof(DSRRandomizer::ProtectionInitBlock, virtualLogicalSave) == 1332);
@@ -118,45 +118,6 @@ DSRRandomizer::ProtectionInitBlock ProductionBlock(
     return block;
 }
 
-bool SetDedicatedSaveFixturePaths(
-    DSRRandomizer::ProtectionInitBlock& block,
-    const fs::path& root) {
-    const auto virtualDocuments = root / L"virtual-documents";
-    const auto virtualProfile = virtualDocuments / L"NBGI"
-        / L"DARK SOULS REMASTERED" / L"12345678901234567";
-    const auto realSaveRoot = root / L"real-normal";
-    const auto externalSaveRoot = root / L"external";
-    const auto dedicatedRmm = externalSaveRoot / L"DRAKS0005.rmm";
-    std::error_code error;
-    fs::create_directories(virtualProfile, error);
-    if (error) {
-        return false;
-    }
-    fs::create_directories(realSaveRoot, error);
-    if (error) {
-        return false;
-    }
-    std::ofstream(realSaveRoot / L"DRAKS0005.sl2", std::ios::binary)
-        << "harmless-normal-fixture";
-    fs::create_directories(externalSaveRoot, error);
-    if (error) {
-        return false;
-    }
-    std::ofstream(dedicatedRmm, std::ios::binary) << "harmless-rmm-fixture";
-    if (!fs::is_regular_file(dedicatedRmm, error) || error) {
-        return false;
-    }
-    wcsncpy_s(block.virtualDocuments, virtualDocuments.c_str(), _TRUNCATE);
-    wcsncpy_s(
-        block.virtualLogicalSave,
-        (virtualProfile / L"DRAKS0005.sl2").c_str(),
-        _TRUNCATE);
-    wcsncpy_s(block.realSaveRoot, realSaveRoot.c_str(), _TRUNCATE);
-    wcsncpy_s(block.externalSaveRoot, externalSaveRoot.c_str(), _TRUNCATE);
-    wcsncpy_s(block.dedicatedRmm, dedicatedRmm.c_str(), _TRUNCATE);
-    return true;
-}
-
 int VerifySimplifiedProductionBitmap() {
     HarmlessPipeFixture pipe;
     if (!pipe.IsValid()) {
@@ -206,11 +167,11 @@ int VerifyDedicatedSaveProductionBitmap() {
         return Fail("harmless dedicated-save supervisor pipe fixture could not be created");
     }
 
-    constexpr auto dedicatedSave = 0x3ULL;
+    constexpr auto dedicatedSave = 0x201ULL;
     const std::array rejected{
-        std::pair{"missing known-folder protection bit", 0x1ULL},
-        std::pair{"unexpected file-I/O protection bit", 0x7ULL},
-        std::pair{"unexpected Winsock bit", 0xBULL},
+        std::pair{"missing callsite redirect protection bit", 0x1ULL},
+        std::pair{"unexpected known-folder protection bit", 0x203ULL},
+        std::pair{"unexpected Winsock bit", 0x209ULL},
         std::pair{"unexpected unknown high bit", dedicatedSave | (1ULL << 40)},
     };
 
@@ -228,45 +189,11 @@ int VerifyDedicatedSaveProductionBitmap() {
     }
 
     auto exact = ProductionBlock(pipe.Name(), dedicatedSave);
-    const auto fixtureRoot = fs::temp_directory_path()
-        / (L"DSRRandomizer-ProtectionBootstrap-"
-            + std::to_wstring(GetCurrentProcessId())
-            + L"-" + std::to_wstring(
-                std::chrono::steady_clock::now().time_since_epoch().count()));
-    if (!SetDedicatedSaveFixturePaths(exact, fixtureRoot)) {
-        return Fail("dedicated-save fixture paths could not be created");
-    }
-    auto handshake = pipe.ReadHandshakeAsync(dedicatedSave);
     const auto exactStatus = DSRRandomizer::InitializeProtection(&exact);
-    if (exactStatus != DSRRandomizer::InitStatus::Success) {
+    if (exactStatus != DSRRandomizer::InitStatus::SaveCallsiteProfileMismatch) {
         std::cerr << "exact dedicated-save bitmap status="
                   << static_cast<unsigned int>(exactStatus) << '\n';
-        return Fail("exact dedicated-save bitmap did not complete one-shot initialization");
-    }
-    if (!handshake.get()) {
-        return Fail("exact dedicated-save bitmap did not authenticate its handshake");
-    }
-    const auto normalSave = fixtureRoot / L"real-normal" / L"DRAKS0005.sl2";
-    const HANDLE normalHandle = CreateFileW(
-        normalSave.c_str(),
-        GENERIC_READ,
-        FILE_SHARE_READ,
-        nullptr,
-        OPEN_EXISTING,
-        0,
-        nullptr);
-    if (normalHandle == INVALID_HANDLE_VALUE) {
-        return Fail("known-folder-only mode unexpectedly installed save file-I/O hooks");
-    }
-    CloseHandle(normalHandle);
-    if (DSRRandomizer::Save::UninstallSaveHooks()
-        != DSRRandomizer::Save::SaveHookCleanupStatus::Success) {
-        return Fail("exact dedicated-save fixture hooks did not uninstall cleanly");
-    }
-    std::error_code cleanupError;
-    fs::remove_all(fixtureRoot, cleanupError);
-    if (cleanupError) {
-        return Fail("dedicated-save fixture paths could not be removed");
+        return Fail("exact dedicated-save bitmap did not require the pinned game callsites");
     }
     return 0;
 }

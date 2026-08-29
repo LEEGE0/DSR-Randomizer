@@ -14,6 +14,7 @@
 #include "network/WinsockHooks.h"
 #include "profile/PinnedCompatibilityProfile.h"
 #include "save/SaveHooks.h"
+#include "save/SaveCallsiteRedirect.h"
 
 namespace DSRRandomizer {
 namespace {
@@ -77,6 +78,9 @@ bool UninstallProtectionGroups() noexcept {
     complete = Save::UninstallSaveHooks()
             == Save::SaveHookCleanupStatus::Success
         && complete;
+    complete = Save::UninstallSaveCallsiteRedirect()
+            == Save::SaveCallsiteRedirectCleanupStatus::Success
+        && complete;
     complete = Modules::UninstallDeferredModuleGate()
             == Modules::DeferredModuleGateCleanupStatus::Success
         && complete;
@@ -136,12 +140,14 @@ InitStatus InitializeCore(
         static_cast<std::uint64_t>(ProtectionFlags::Heartbeat);
     constexpr auto hookIntegrityFlag =
         static_cast<std::uint64_t>(ProtectionFlags::HookIntegrity);
+    constexpr auto saveCallsiteRedirectFlag =
+        static_cast<std::uint64_t>(ProtectionFlags::SaveCallsiteRedirect);
     constexpr auto saveFlags = saveKnownFolderFlag | saveFileIoFlag;
     constexpr auto steamFlags = steamInterfacesFlag | deferredModuleGateFlag;
     constexpr auto monitorFlags = heartbeatFlag | hookIntegrityFlag;
     constexpr auto supportedFlags =
         bootstrapFlag | saveFlags | winsockFlag | steamFlags
-        | gameServiceOfflineFlag | monitorFlags;
+        | gameServiceOfflineFlag | monitorFlags | saveCallsiteRedirectFlag;
     if ((block->requiredFlags & bootstrapFlag) == 0
         || (block->requiredFlags & ~supportedFlags) != 0
         || ((block->requiredFlags & saveFileIoFlag) != 0
@@ -169,12 +175,15 @@ InitStatus InitializeCore(
 
     std::optional<Profile::PinnedCompatibilityProfile> pinnedProfile;
     if (steamProvider == nullptr
-        && (block->requiredFlags & (steamFlags | gameServiceOfflineFlag)) != 0) {
+        && (block->requiredFlags
+            & (steamFlags | gameServiceOfflineFlag | saveCallsiteRedirectFlag)) != 0) {
         pinnedProfile.emplace();
         if (Profile::BuildPinnedCompatibilityProfile(*pinnedProfile)
             != Profile::PinnedCompatibilityProfileStatus::Success) {
             return CleanupOr(
-                (block->requiredFlags & gameServiceOfflineFlag) != 0
+                (block->requiredFlags & saveCallsiteRedirectFlag) != 0
+                    ? InitStatus::SaveCallsiteProfileMismatch
+                    : (block->requiredFlags & gameServiceOfflineFlag) != 0
                     ? InitStatus::GameServiceProfileMismatch
                     : InitStatus::SteamConfigurationUnavailable);
         }
@@ -258,6 +267,33 @@ InitStatus InitializeCore(
             }
             if (Save::InstallSaveHooks(configuration)
                 != Save::SaveHookInstallStatus::Success) {
+                return CleanupOr(InitStatus::SaveHookInstallFailed);
+            }
+        }
+        catch (...) {
+            return CleanupOr(InitStatus::SaveHookInstallFailed);
+        }
+    }
+
+    if ((block->requiredFlags & saveCallsiteRedirectFlag) != 0) {
+        try {
+            if (pathReader == nullptr || !pinnedProfile.has_value()) {
+                return CleanupOr(InitStatus::SaveHookInstallFailed);
+            }
+            std::wstring dedicatedRmm;
+            if (!pathReader(
+                    block->dedicatedRmm,
+                    kProtectionSavePathCharacters,
+                    dedicatedRmm)) {
+                return CleanupOr(InitStatus::SaveHookInstallFailed);
+            }
+            auto configuration = pinnedProfile->saveRedirect;
+            configuration.dedicatedRmm = std::move(dedicatedRmm);
+            const auto status = Save::InstallSaveCallsiteRedirect(configuration);
+            if (status == Save::SaveCallsiteRedirectInstallStatus::ProfileMismatch) {
+                return CleanupOr(InitStatus::SaveCallsiteProfileMismatch);
+            }
+            if (status != Save::SaveCallsiteRedirectInstallStatus::Success) {
                 return CleanupOr(InitStatus::SaveHookInstallFailed);
             }
         }

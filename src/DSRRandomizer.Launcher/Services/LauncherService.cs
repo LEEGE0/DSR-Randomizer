@@ -445,7 +445,6 @@ public sealed class LauncherService : ILauncherService
                 selectionStore,
                 new NormalSaveBlockingFileAccess(_fileAccess));
 
-            Directory.CreateDirectory(virtualProfile);
             var dedicatedPath = Path.GetFullPath(dedicatedSave.SavePath);
             var externalSaveRoot = Path.GetDirectoryName(dedicatedPath)
                 ?? throw new IOException("The dedicated save root could not be resolved.");
@@ -479,37 +478,11 @@ public sealed class LauncherService : ILauncherService
                 DiagnosticMode: false,
                 Arguments: Array.Empty<string>(),
                 SavePaths: savePaths);
-            VirtualSaveLinkBinding saveBinding;
-            try
-            {
-                saveBinding = VirtualSaveLinkBinding.Create(
-                    layout,
-                    boundary,
-                    _fileAccess,
-                    virtualLogicalSave,
-                    dedicatedPath);
-            }
-            catch (VirtualSaveAliasConflictException)
-            {
-                await CompleteAbnormalSessionWithoutMaskingAsync(
-                    sessionSaveService,
-                    steamId,
-                    saveSession.SessionToken);
-                return SafetyLaunchResult.Failed("DEDICATED_SAVE_ALIAS_CONFLICT");
-            }
             SafetyLaunchResult launchResult;
-            var saveBindingReleased = false;
             try
             {
-                try
-                {
-                    launchResult = await new SafetyLaunchCoordinator(_platform)
-                        .LaunchAsync(request, cancellationToken);
-                }
-                finally
-                {
-                    saveBindingReleased = saveBinding.TryRelease();
-                }
+                launchResult = await new SafetyLaunchCoordinator(_platform)
+                    .LaunchAsync(request, cancellationToken);
             }
             catch
             {
@@ -527,14 +500,6 @@ public sealed class LauncherService : ILauncherService
                     steamId,
                     saveSession.SessionToken);
                 return launchResult;
-            }
-            if (!saveBindingReleased)
-            {
-                await CompleteAbnormalSessionWithoutMaskingAsync(
-                    sessionSaveService,
-                    steamId,
-                    saveSession.SessionToken);
-                return SafetyLaunchResult.Failed("DEDICATED_SAVE_ALIAS_CONFLICT");
             }
             var saveCompletion = await sessionSaveService.CompleteSessionAsync(
                 steamId,

@@ -377,6 +377,25 @@ PinnedCompatibilityProfileStatus BuildPinnedCompatibilityProfile(
         }
 
         profile.identityLease = lease;
+        profile.saveRedirect.identityLease = lease;
+        profile.saveRedirect.targets = {{
+            Save::SaveCallsiteRedirectTarget{
+                reinterpret_cast<std::byte*>(executableModule) + 0xD051DF,
+                {
+                    0xff, 0x15, 0x57, 0x22, 0x31, 0x01,
+                    0x48, 0x89, 0x46, 0x60, 0x48, 0x83, 0xf8, 0xff,
+                },
+                0,
+            },
+            Save::SaveCallsiteRedirectTarget{
+                reinterpret_cast<std::byte*>(executableModule) + 0xD045BF,
+                {
+                    0x33, 0xd2, 0xff, 0x15, 0x75, 0x2e, 0x31, 0x01,
+                    0x48, 0x8b, 0xf8, 0x40, 0xb6, 0x01,
+                },
+                2,
+            },
+        }};
         profile.gameService.identityLease = lease;
         profile.gameService.images.push_back({
             kExecutableModule,

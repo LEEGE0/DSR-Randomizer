@@ -17,6 +17,8 @@ add_library(DSRRandomizer.Runtime.Core STATIC
   network/WinsockHooks.h
   save/SaveHooks.cpp
   save/SaveHooks.h
+  save/SaveCallsiteRedirect.cpp
+  save/SaveCallsiteRedirect.h
   steam/SteamHooks.cpp
   steam/SteamHooks.h
   steam/SteamPolicy.cpp

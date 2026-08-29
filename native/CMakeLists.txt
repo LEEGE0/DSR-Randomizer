@@ -359,6 +359,19 @@ add_test(
     $<TARGET_FILE:DSRRandomizer.SaveClientFixture>
     $<TARGET_FILE:DSRRandomizer.Runtime>)
 
+add_executable(SaveCallsiteRedirectTests
+  tests/SaveCallsiteRedirectTests.cpp)
+target_compile_features(SaveCallsiteRedirectTests PRIVATE cxx_std_20)
+target_link_libraries(SaveCallsiteRedirectTests PRIVATE DSRRandomizer.Runtime.Core)
+target_include_directories(SaveCallsiteRedirectTests
+  PRIVATE
+    ${CMAKE_SOURCE_DIR}/native/runtime)
+dsr_configure_target(SaveCallsiteRedirectTests)
+set_target_properties(SaveCallsiteRedirectTests PROPERTIES
+  CXX_EXTENSIONS OFF)
+
+add_test(NAME SaveCallsiteRedirectTests COMMAND SaveCallsiteRedirectTests)
+
 add_executable(SteamGuardTests
   tests/SteamGuardTests.cpp)
 target_compile_features(SteamGuardTests PRIVATE cxx_std_20)

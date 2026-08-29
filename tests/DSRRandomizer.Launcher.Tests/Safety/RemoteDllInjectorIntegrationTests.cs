@@ -22,6 +22,7 @@ public sealed class RemoteDllInjectorIntegrationTests
     [InlineData(10U, "GAME_SERVICE_PROFILE_MISMATCH")]
     [InlineData(11U, "GAME_SERVICE_HOOK_FAILED")]
     [InlineData(12U, "PROTECTION_CLEANUP_FAILED")]
+    [InlineData(13U, "SAVE_CALLSITE_PROFILE_MISMATCH")]
     [InlineData(7U, "SAFETY_INITIALIZER_FAILED")]
     public void InitializerErrorCode_PreservesExactNativeFailure(
         uint nativeStatus,
@@ -44,15 +45,15 @@ public sealed class RemoteDllInjectorIntegrationTests
     }
 
     [Theory]
-    [InlineData(0x3UL, true)]
-    [InlineData(0x2UL, false)]
-    [InlineData(0x7UL, false)]
-    [InlineData(0x10000000003UL, false)]
-    public void DedicatedSaveProtection_RequiresExactKnownFolderBitmap(
+    [InlineData(0x201UL, true)]
+    [InlineData(0x3UL, false)]
+    [InlineData(0x203UL, false)]
+    [InlineData(0x10000000201UL, false)]
+    public void DedicatedSaveProtection_RequiresExactCallsiteRedirectBitmap(
         ulong flags,
         bool expected)
     {
-        Assert.Equal(0x3UL, DedicatedSaveProtection.RequiredFlags);
+        Assert.Equal(0x201UL, DedicatedSaveProtection.RequiredFlags);
         Assert.Equal(expected, DedicatedSaveProtection.IsExact(flags));
     }
 
@@ -80,9 +81,9 @@ public sealed class RemoteDllInjectorIntegrationTests
     }
 
     [Theory]
-    [InlineData(0x2UL)]
-    [InlineData(0x7UL)]
-    [InlineData(0x10000000003UL)]
+    [InlineData(0x3UL)]
+    [InlineData(0x203UL)]
+    [InlineData(0x10000000201UL)]
     public async Task CompleteOneShotAsync_RejectsNonExactDedicatedSaveFlags(
         ulong activeFlags)
     {
@@ -142,7 +143,7 @@ public sealed class RemoteDllInjectorIntegrationTests
     }
 
     [Fact]
-    public void CreateInitBlock_KnownFolderOnlyMarshalsOnlyVirtualDocuments()
+    public void CreateInitBlock_CallsiteRedirectMarshalsOnlyDedicatedRmm()
     {
         var configuration = GuardConfiguration.Create(
             @"C:\fixture\DSRRandomizer.Runtime.dll",
@@ -162,12 +163,12 @@ public sealed class RemoteDllInjectorIntegrationTests
             configuration,
             @"\\.\pipe\fixture");
 
-        Assert.Equal(3UL, BinaryPrimitives.ReadUInt64LittleEndian(block.AsSpan(8)));
-        Assert.Equal(configuration.SavePaths.VirtualDocuments, ReadFixedWide(block, 308));
+        Assert.Equal(0x201UL, BinaryPrimitives.ReadUInt64LittleEndian(block.AsSpan(8)));
+        Assert.Equal(string.Empty, ReadFixedWide(block, 308));
         Assert.Equal(string.Empty, ReadFixedWide(block, 1332));
         Assert.Equal(string.Empty, ReadFixedWide(block, 2356));
         Assert.Equal(string.Empty, ReadFixedWide(block, 3380));
-        Assert.Equal(string.Empty, ReadFixedWide(block, 4404));
+        Assert.Equal(configuration.SavePaths.DedicatedRmm, ReadFixedWide(block, 4404));
     }
 
     [Fact]

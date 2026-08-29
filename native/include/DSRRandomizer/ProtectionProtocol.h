@@ -8,7 +8,7 @@ namespace DSRRandomizer {
 inline constexpr std::uint32_t kProtectionMagic = 0x44535252;
 inline constexpr std::uint16_t kProtectionProtocolVersion = 2;
 inline constexpr std::uint64_t kDedicatedSaveRequiredFlags =
-    (1ULL << 2) - 1ULL;
+    (1ULL << 0) | (1ULL << 9);
 inline constexpr std::uint64_t kSimplifiedOfflineRequiredFlags =
     (1ULL << 7) - 1ULL;
 inline constexpr std::size_t kProtectionNonceSize = 32;
@@ -33,6 +33,7 @@ enum class ProtectionFlags : std::uint64_t {
     GameServiceOffline = 1ULL << 6,
     Heartbeat = 1ULL << 7,
     HookIntegrity = 1ULL << 8,
+    SaveCallsiteRedirect = 1ULL << 9,
 };
 
 enum class ProtectionMessageKind : std::uint32_t {

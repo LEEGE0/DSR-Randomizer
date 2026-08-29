@@ -25,6 +25,7 @@ enum class InitStatus : std::uint32_t {
     GameServiceProfileMismatch = 10,
     GameServiceHookFailed = 11,
     ProtectionCleanupFailed = 12,
+    SaveCallsiteProfileMismatch = 13,
 };
 
 InitStatus InitializeProtection(ProtectionInitBlock* block) noexcept;
