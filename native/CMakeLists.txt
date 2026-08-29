@@ -301,6 +301,19 @@ set_target_properties(SavePathPolicyTests PROPERTIES
 
 add_test(NAME SavePathPolicyTests COMMAND SavePathPolicyTests)
 
+add_executable(RmmBridgeConfigurationTests
+  tests/RmmBridgeConfigurationTests.cpp)
+target_compile_features(RmmBridgeConfigurationTests PRIVATE cxx_std_20)
+target_link_libraries(RmmBridgeConfigurationTests PRIVATE DSRRandomizer.RmmBridge.Core)
+target_include_directories(RmmBridgeConfigurationTests
+  PRIVATE
+    ${CMAKE_SOURCE_DIR}/native/runtime)
+dsr_configure_target(RmmBridgeConfigurationTests)
+set_target_properties(RmmBridgeConfigurationTests PROPERTIES
+  CXX_EXTENSIONS OFF)
+
+add_test(NAME RmmBridgeConfigurationTests COMMAND RmmBridgeConfigurationTests)
+
 add_executable(NetworkPolicyTests
   tests/NetworkPolicyTests.cpp)
 target_compile_features(NetworkPolicyTests PRIVATE cxx_std_20)

@@ -57,3 +57,16 @@ dsr_configure_target(DSRRandomizer.Runtime)
 set_target_properties(DSRRandomizer.Runtime PROPERTIES
   CXX_EXTENSIONS OFF
   OUTPUT_NAME "DSRRandomizer.Runtime")
+
+add_library(DSRRandomizer.RmmBridge.Core STATIC
+  bridge/RmmBridgeConfiguration.cpp
+  bridge/RmmBridgeConfiguration.h)
+target_compile_features(DSRRandomizer.RmmBridge.Core PUBLIC cxx_std_20)
+target_include_directories(DSRRandomizer.RmmBridge.Core
+  PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/native/include)
+dsr_configure_target(DSRRandomizer.RmmBridge.Core)
+set_target_properties(DSRRandomizer.RmmBridge.Core PROPERTIES
+  CXX_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE ON)
