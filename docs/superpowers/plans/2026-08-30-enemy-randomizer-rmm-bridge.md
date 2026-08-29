@@ -74,9 +74,9 @@
   Add `RmmBridgeConfigurationTests` in `native/CMakeLists.txt`, linked to a new static `DSRRandomizer.RmmBridge.Core` target. Run:
 
   ```powershell
-  cmake --preset windows-msvc-debug
-  cmake --build --preset windows-msvc-debug --target RmmBridgeConfigurationTests
-  ctest --preset windows-msvc-debug -R RmmBridgeConfigurationTests --output-on-failure
+  cmake --preset windows-x64-debug
+  cmake --build --preset windows-x64-debug --target RmmBridgeConfigurationTests
+  ctest --preset windows-x64-debug -R RmmBridgeConfigurationTests --output-on-failure
   ```
 
   Expected: compilation fails because `RmmBridgeConfiguration.h` and resolver symbols do not exist.
@@ -113,8 +113,8 @@
 - [ ] **Step 4: Run focused and existing save tests**
 
   ```powershell
-  cmake --build --preset windows-msvc-debug --target RmmBridgeConfigurationTests SavePathPolicyTests SaveHookIntegrationTests
-  ctest --preset windows-msvc-debug -R "RmmBridgeConfigurationTests|SavePathPolicyTests|SaveHookIntegrationTests" --output-on-failure
+  cmake --build --preset windows-x64-debug --target RmmBridgeConfigurationTests SavePathPolicyTests SaveHookIntegrationTests
+  ctest --preset windows-x64-debug -R "RmmBridgeConfigurationTests|SavePathPolicyTests|SaveHookIntegrationTests" --output-on-failure
   ```
 
   Expected: all selected tests pass.
@@ -247,8 +247,8 @@
   Create shared target `DSRRandomizer.RmmBridge` linked to `DSRRandomizer.RmmBridge.Core` and `DSRRandomizer.Runtime.Core`. Run:
 
   ```powershell
-  cmake --build --preset windows-msvc-debug --target RmmBridgeBootstrapTests DSRRandomizer.RmmBridge
-  ctest --preset windows-msvc-debug -R RmmBridgeBootstrapTests --output-on-failure
+  cmake --build --preset windows-x64-debug --target RmmBridgeBootstrapTests DSRRandomizer.RmmBridge
+  ctest --preset windows-x64-debug -R RmmBridgeBootstrapTests --output-on-failure
   ```
 
   Expected: compilation/link failure for missing bootstrap/client symbols.
@@ -284,8 +284,8 @@
 - [ ] **Step 5: Run bridge and hook tests**
 
   ```powershell
-  cmake --build --preset windows-msvc-debug --target DSRRandomizer.RmmBridge RmmBridgeBootstrapTests RmmBridgeConfigurationTests SaveHookIntegrationTests
-  ctest --preset windows-msvc-debug -R "RmmBridge|SaveHookIntegrationTests" --output-on-failure
+  cmake --build --preset windows-x64-debug --target DSRRandomizer.RmmBridge RmmBridgeBootstrapTests RmmBridgeConfigurationTests SaveHookIntegrationTests
+  ctest --preset windows-x64-debug -R "RmmBridge|SaveHookIntegrationTests" --output-on-failure
   ```
 
   Expected: all selected tests pass and `dumpbin /exports` lists `modengine_ext_init`.
@@ -317,8 +317,8 @@
 - [ ] **Step 2: Register and run the red integration test**
 
   ```powershell
-  cmake --build --preset windows-msvc-debug --target RmmBridgeIntegrationTests
-  ctest --preset windows-msvc-debug -R RmmBridgeIntegrationTests --output-on-failure
+  cmake --build --preset windows-x64-debug --target RmmBridgeIntegrationTests
+  ctest --preset windows-x64-debug -R RmmBridgeIntegrationTests --output-on-failure
   ```
 
   Expected: test fails until the fixture deployment layout and host executable override are wired into the bootstrap test platform.
@@ -330,11 +330,11 @@
 - [ ] **Step 4: Run native Debug and Release suites**
 
   ```powershell
-  cmake --build --preset windows-msvc-debug
-  ctest --preset windows-msvc-debug --output-on-failure
-  cmake --preset windows-msvc-release
-  cmake --build --preset windows-msvc-release
-  ctest --preset windows-msvc-release --output-on-failure
+  cmake --build --preset windows-x64-debug
+  ctest --preset windows-x64-debug --output-on-failure
+  cmake --preset windows-x64-release
+  cmake --build --preset windows-x64-release
+  ctest --preset windows-x64-release --output-on-failure
   ```
 
   Expected: every native test passes in both configurations.
@@ -395,8 +395,8 @@
 
   ```powershell
   dotnet test DSR-Randomizer.sln -c Release
-  cmake --build --preset windows-msvc-release
-  ctest --preset windows-msvc-release --output-on-failure
+  cmake --build --preset windows-x64-release
+  ctest --preset windows-x64-release --output-on-failure
   & .\scripts\publish-rmm-bridge.ps1 -ExternalRoot 'D:\DSR MOD'
   & .\scripts\publish-rmm-bridge.ps1 -ExternalRoot 'D:\DSR MOD' -VerifyOnly
   git diff --check
@@ -436,7 +436,7 @@
 - [ ] **Step 2: Re-run focused safety verification**
 
   ```powershell
-  ctest --preset windows-msvc-release -R "RmmBridge|SaveHookIntegrationTests" --output-on-failure
+  ctest --preset windows-x64-release -R "RmmBridge|SaveHookIntegrationTests" --output-on-failure
   dotnet test tests/DSRRandomizer.RmmBridgeHost.Tests/DSRRandomizer.RmmBridgeHost.Tests.csproj -c Release
   & .\scripts\publish-rmm-bridge.ps1 -ExternalRoot 'D:\DSR MOD' -VerifyOnly
   ```
