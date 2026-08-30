@@ -8,6 +8,50 @@ public sealed class GameParamThreeWayMergerTests
 {
     private const int ParamFileId = 10;
     private const string ParamFileName = "param/TestParam.param";
+    private static readonly (int ID, string Name)[] ActualGameParamManifest =
+    [
+        (0, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\EquipParamWeapon.param"),
+        (1, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\EquipParamProtector.param"),
+        (2, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\EquipParamAccessory.param"),
+        (3, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\EquipParamGoods.param"),
+        (4, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\ReinforceParamWeapon.param"),
+        (5, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\ReinforceParamProtector.param"),
+        (6, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\EquipMtrlSetParam.param"),
+        (7, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\default_EnemyBehaviorBank.param"),
+        (8, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\default_AIStandardInfoBank.param"),
+        (9, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\ThrowParam.param"),
+        (10, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\BehaviorParam.param"),
+        (11, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\BehaviorParam_PC.param"),
+        (12, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\NpcParam.param"),
+        (13, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\AtkParam_Pc.param"),
+        (14, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\AtkParam_Npc.param"),
+        (15, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\Magic.param"),
+        (16, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\NpcThinkParam.param"),
+        (17, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\ObjectParam.param"),
+        (18, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\Bullet.param"),
+        (19, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\SpEffectParam.param"),
+        (20, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\SpEffectVfxParam.param"),
+        (21, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\TalkParam.param"),
+        (22, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\MenuColorTableParam.param"),
+        (23, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\ItemLotParam.param"),
+        (24, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\MoveParam.param"),
+        (25, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\CharaInitParam.param"),
+        (26, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\FaceGenParam.param"),
+        (27, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\RagdollParam.param"),
+        (28, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\ShopLineupParam.param"),
+        (29, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\QwcChange.param"),
+        (30, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\QwcJudge.param"),
+        (31, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\GameAreaParam.param"),
+        (32, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\SkeletonParam.param"),
+        (33, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\CalcCorrectGraph.param"),
+        (34, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\LockCamParam.param"),
+        (35, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\ObjActParam.param"),
+        (36, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\HitMtrlParam.param"),
+        (37, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\KnockBackParam.param"),
+        (38, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\CoolTimeParam.param"),
+        (39, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\WhiteCoolTimeParam.param"),
+        (40, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\LevelSyncParam.param"),
+    ];
 
     [Fact]
     public void Merge_applies_randomizer_row_deltas_and_preserves_unrelated_target_rows()
@@ -118,6 +162,118 @@ public sealed class GameParamThreeWayMergerTests
     }
 
     [Fact]
+    public void Merge_preserves_exact_target_param_bytes_and_order_when_only_randomized_row_names_differ()
+    {
+        PARAMDEF def = CreateDefinition();
+        BinderFile targetParam = CreateParamFile(def,
+            Row(1, "target-one", 11),
+            Row(2, "target-two", 20));
+        byte[] targetParamBytes = targetParam.Bytes;
+        BND3 targetBnd = CreateBinder(
+            new BinderFile(Binder.FileFlags.Flag1, 50, "target-only.bin", [50]),
+            targetParam);
+
+        GameParamMergeResult result = new GameParamThreeWayMerger().Merge(new GameParamMergeInputs(
+            CreateBinder(CreateParamFile(def, Row(1, "base-one", 10), Row(2, "base-two", 20))),
+            CreateBinder(CreateParamFile(def, Row(1, "renamed-one", 10), Row(2, "renamed-two", 20))),
+            targetBnd,
+            [def]));
+
+        Assert.Equal(0, result.ChangedEntries);
+        Assert.Same(targetParamBytes, targetParam.Bytes);
+        Assert.Equal([50, ParamFileId], targetBnd.Files.Select(file => file.ID));
+        BND3 output = BND3.Read(result.OutputBytes);
+        Assert.Equal([50, ParamFileId], output.Files.Select(file => file.ID));
+        Assert.Equal(targetParamBytes, output.Files.Single(file => file.ID == ParamFileId).Bytes);
+        PARAM outputParam = ReadParam(result.OutputBytes, ParamFileId, def);
+        AssertRow(outputParam, 1, "target-one", 11);
+    }
+
+    [Fact]
+    public void Merge_target_deleted_param_keeps_only_randomizer_changed_or_added_rows()
+    {
+        PARAMDEF def = CreateDefinition();
+        BND3 baseBnd = CreateBinder(CreateParamFile(def,
+            Row(1, "base-equal", 10),
+            Row(2, "base-change", 20),
+            Row(3, "base-delete", 30)));
+        BND3 randomBnd = CreateBinder(CreateParamFile(def,
+            Row(1, "random-name-only", 10),
+            Row(2, "random-change", 22),
+            Row(4, "random-add", 40)));
+
+        GameParamMergeResult result = new GameParamThreeWayMerger().Merge(
+            new GameParamMergeInputs(baseBnd, randomBnd, CreateBinder(), [def]));
+
+        PARAM output = ReadParam(result.OutputBytes, ParamFileId, def);
+        Assert.Equal([2, 4], output.Rows.Select(row => row.ID));
+        AssertRow(output, 2, "random-change", 22);
+        AssertRow(output, 4, "random-add", 40);
+        Assert.Null(output[1]);
+        Assert.Null(output[3]);
+        Assert.Equal(1, result.ChangedEntries);
+        Assert.Equal(1, result.AddedRows);
+        Assert.Equal(1, result.ChangedRows);
+        Assert.Equal(1, result.DeletedRows);
+        Assert.Equal(1, result.RandomizerWinsOverlaps);
+    }
+
+    [Fact]
+    public void Merge_rejects_malformed_added_param_when_base_and_target_are_absent()
+    {
+        BinderFile malformed = new(Binder.FileFlags.Flag1, ParamFileId, ParamFileName, [1, 2, 3]);
+
+        Assert.Throws<InvalidDataException>(() => new GameParamThreeWayMerger().Merge(
+            new GameParamMergeInputs(CreateBinder(), CreateBinder(malformed), CreateBinder(), [])));
+    }
+
+    [Fact]
+    public void Merge_rejects_duplicate_rows_in_added_param_when_base_and_target_are_absent()
+    {
+        PARAMDEF def = CreateDefinition();
+        BinderFile duplicate = CreateParamFile(def, Row(1, "first", 10), Row(1, "duplicate", 11));
+
+        InvalidDataException exception = Assert.Throws<InvalidDataException>(() =>
+            new GameParamThreeWayMerger().Merge(new GameParamMergeInputs(
+                CreateBinder(), CreateBinder(duplicate), CreateBinder(), [def])));
+
+        Assert.Contains("duplicate row ID", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Merge_rejects_malformed_changed_param_when_target_is_absent()
+    {
+        PARAMDEF def = CreateDefinition();
+        BinderFile malformed = new(Binder.FileFlags.Flag1, ParamFileId, ParamFileName, [1, 2, 3]);
+
+        Assert.Throws<InvalidDataException>(() => new GameParamThreeWayMerger().Merge(
+            new GameParamMergeInputs(
+                CreateBinder(CreateParamFile(def, Row(1, "base", 10), Row(2, "sentinel", 20))),
+                CreateBinder(malformed),
+                CreateBinder(),
+                [def])));
+    }
+
+    [Fact]
+    public void Merge_rejects_duplicate_rows_in_changed_param_when_target_is_absent()
+    {
+        PARAMDEF def = CreateDefinition();
+        BinderFile duplicate = CreateParamFile(def,
+            Row(1, "first", 11),
+            Row(1, "duplicate", 12),
+            Row(2, "sentinel", 20));
+
+        InvalidDataException exception = Assert.Throws<InvalidDataException>(() =>
+            new GameParamThreeWayMerger().Merge(new GameParamMergeInputs(
+                CreateBinder(CreateParamFile(def, Row(1, "base", 10), Row(2, "sentinel", 20))),
+                CreateBinder(duplicate),
+                CreateBinder(),
+                [def])));
+
+        Assert.Contains("duplicate row ID", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Merge_applies_randomizer_binder_additions_changes_and_deletions()
     {
         BND3 baseBnd = CreateBinder(
@@ -213,17 +369,22 @@ public sealed class GameParamThreeWayMergerTests
     }
 
     [Fact]
-    public void Merge_preserves_target_bnd3_dcx_format_and_41_entry_layout()
+    public void Merge_preserves_target_bnd3_dcx_format_and_actual_41_param_entry_manifest()
     {
-        BinderFile[] baseFiles = Enumerable.Range(0, 41)
-            .Select(id => new BinderFile(Binder.FileFlags.Flag1, id, $"entry-{id:D2}.bin", [(byte)id]))
+        PARAMDEF def = CreateDefinition();
+        BinderFile[] baseFiles = ActualGameParamManifest
+            .Select(entry => CreateParamFile(def, entry.ID, entry.Name,
+                Row(1, $"base-{entry.ID}", entry.ID), Row(99, "sentinel", 99)))
             .ToArray();
-        BinderFile[] randomFiles = baseFiles
-            .Select(file => new BinderFile(file.Flags, file.ID, file.Name, [.. file.Bytes]))
+        BinderFile[] randomFiles = ActualGameParamManifest
+            .Select(entry => CreateParamFile(def, entry.ID, entry.Name,
+                Row(1, $"random-name-{entry.ID}", entry.ID), Row(99, "sentinel", 99)))
             .ToArray();
-        BinderFile[] targetFiles = baseFiles
-            .Select(file => new BinderFile(file.Flags, file.ID, file.Name, [(byte)(file.ID + 41)]))
+        BinderFile[] targetFiles = ActualGameParamManifest
+            .Select(entry => CreateParamFile(def, entry.ID, entry.Name,
+                Row(1, $"target-{entry.ID}", entry.ID + 100), Row(99, "sentinel", 99)))
             .ToArray();
+        byte[][] targetPayloads = targetFiles.Select(file => file.Bytes).ToArray();
         BND3 targetBnd = CreateBinder(targetFiles);
         targetBnd.Version = "TARGET";
         targetBnd.Compression = new DCX.DcxDfltCompressionInfo(
@@ -233,16 +394,22 @@ public sealed class GameParamThreeWayMergerTests
             CreateBinder(baseFiles),
             CreateBinder(randomFiles),
             targetBnd,
-            []));
+            [def]));
 
+        Assert.Equal(0, result.ChangedEntries);
         Assert.True(DCX.Is(result.OutputBytes));
         Assert.True(BND3.Is(result.OutputBytes));
         BND3 output = BND3.Read(result.OutputBytes);
         Assert.Equal(DCX.Type.DCX_DFLT, output.Compression.Type);
         Assert.Equal("TARGET", output.Version);
         Assert.Equal(41, output.Files.Count);
-        Assert.All(output.Files, file =>
-            Assert.Equal(new byte[] { (byte)(file.ID + 41) }, file.Bytes));
+        Assert.Equal(ActualGameParamManifest.Select(entry => entry.ID), output.Files.Select(file => file.ID));
+        Assert.Equal(ActualGameParamManifest.Select(entry => entry.Name), output.Files.Select(file => file.Name));
+        for (int index = 0; index < targetFiles.Length; index++)
+        {
+            Assert.Same(targetPayloads[index], targetFiles[index].Bytes);
+            Assert.Equal(targetPayloads[index], output.Files[index].Bytes);
+        }
     }
 
     private static PARAMDEF CreateDefinition(
@@ -270,9 +437,24 @@ public sealed class GameParamThreeWayMergerTests
         new(id, name, value, 1.25f, 2.5d, [1, 2, 3], "Text");
 
     private static BinderFile CreateParamFile(PARAMDEF def, params RowData[] rows) =>
-        CreateParamFile(def, def.DataVersion, rows);
+        CreateParamFile(def, ParamFileId, ParamFileName, def.DataVersion, rows);
 
     private static BinderFile CreateParamFile(PARAMDEF def, short headerDataVersion, params RowData[] rows)
+        => CreateParamFile(def, ParamFileId, ParamFileName, headerDataVersion, rows);
+
+    private static BinderFile CreateParamFile(
+        PARAMDEF def,
+        int fileId,
+        string fileName,
+        params RowData[] rows)
+        => CreateParamFile(def, fileId, fileName, def.DataVersion, rows);
+
+    private static BinderFile CreateParamFile(
+        PARAMDEF def,
+        int fileId,
+        string fileName,
+        short headerDataVersion,
+        params RowData[] rows)
     {
         var param = new PARAM
         {
@@ -295,7 +477,7 @@ public sealed class GameParamThreeWayMergerTests
             param.Rows.Add(row);
         }
 
-        return new BinderFile(Binder.FileFlags.Flag1, ParamFileId, ParamFileName, param.Write());
+        return new BinderFile(Binder.FileFlags.Flag1, fileId, fileName, param.Write());
     }
 
     private static BND3 CreateBinder(params BinderFile[] files) => new()

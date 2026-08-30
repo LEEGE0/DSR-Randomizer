@@ -23,6 +23,18 @@ public sealed class GameParamThreeWayMerger
         {
             if (!randomFiles.TryGetValue(id, out BinderFile? randomFile))
             {
+                targetFiles.TryGetValue(id, out BinderFile? deletionTarget);
+                if (HasParamExtension(baseFile) || deletionTarget is not null && HasParamExtension(deletionTarget))
+                {
+                    (BinderFile File, string Source)[] deletedParams = deletionTarget is null
+                        ? [(baseFile, "base")]
+                        : [(baseFile, "base"), (deletionTarget, "target")];
+                    ValidateCompatibleParams(
+                        deletedParams,
+                        inputs.Paramdefs,
+                        id);
+                }
+
                 counts.ChangedEntries++;
                 if (targetFiles.TryGetValue(id, out BinderFile? targetFile))
                 {
@@ -36,22 +48,50 @@ public sealed class GameParamThreeWayMerger
             if (baseFile.Bytes.AsSpan().SequenceEqual(randomFile.Bytes))
                 continue;
 
-            counts.ChangedEntries++;
             if (targetFiles.TryGetValue(id, out BinderFile? existingTarget))
             {
-                existingTarget.Bytes = MergeChangedEntry(
-                    baseFile,
-                    randomFile,
-                    existingTarget,
-                    inputs.Paramdefs,
-                    counts);
+                if (IsParamEntry(baseFile, randomFile, existingTarget))
+                {
+                    ParamMergeOutcome outcome = MergeChangedParamEntry(
+                        baseFile, randomFile, existingTarget, inputs.Paramdefs, counts);
+                    if (!outcome.HasFunctionalChange)
+                        continue;
+
+                    counts.ChangedEntries++;
+                    existingTarget.Bytes = outcome.OutputBytes!;
+                }
+                else
+                {
+                    counts.ChangedEntries++;
+                    existingTarget.Bytes = [.. randomFile.Bytes];
+                }
             }
             else
             {
-                BinderFile added = CloneBinderFile(randomFile);
-                inputs.TargetBnd.Files.Add(added);
-                targetFiles.Add(id, added);
-                changedTargetLayout = true;
+                if (IsParamEntry(baseFile, randomFile))
+                {
+                    ParamMergeOutcome outcome = MergeChangedParamEntry(
+                        baseFile, randomFile, null, inputs.Paramdefs, counts);
+                    if (!outcome.HasFunctionalChange)
+                        continue;
+
+                    counts.ChangedEntries++;
+                    if (outcome.ShouldCreateEntry)
+                    {
+                        BinderFile added = CloneBinderFile(randomFile, outcome.OutputBytes!);
+                        inputs.TargetBnd.Files.Add(added);
+                        targetFiles.Add(id, added);
+                        changedTargetLayout = true;
+                    }
+                }
+                else
+                {
+                    counts.ChangedEntries++;
+                    BinderFile added = CloneBinderFile(randomFile);
+                    inputs.TargetBnd.Files.Add(added);
+                    targetFiles.Add(id, added);
+                    changedTargetLayout = true;
+                }
             }
         }
 
@@ -60,13 +100,32 @@ public sealed class GameParamThreeWayMerger
             if (baseFiles.ContainsKey(id))
                 continue;
 
-            counts.ChangedEntries++;
             if (targetFiles.TryGetValue(id, out BinderFile? targetFile))
             {
+                if (HasParamExtension(randomFile) || HasParamExtension(targetFile))
+                {
+                    Dictionary<int, PARAM.Row>[] rows = ValidateCompatibleParams(
+                        [(randomFile, "randomized"), (targetFile, "target")],
+                        inputs.Paramdefs,
+                        id);
+                    counts.AddedRows += rows[0].Count;
+                }
+
+                counts.ChangedEntries++;
                 targetFile.Bytes = [.. randomFile.Bytes];
             }
             else
             {
+                if (HasParamExtension(randomFile))
+                {
+                    Dictionary<int, PARAM.Row>[] rows = ValidateCompatibleParams(
+                        [(randomFile, "randomized")],
+                        inputs.Paramdefs,
+                        id);
+                    counts.AddedRows += rows[0].Count;
+                }
+
+                counts.ChangedEntries++;
                 BinderFile added = CloneBinderFile(randomFile);
                 inputs.TargetBnd.Files.Add(added);
                 targetFiles.Add(id, added);
@@ -87,35 +146,52 @@ public sealed class GameParamThreeWayMerger
             counts.RandomizerWinsOverlaps);
     }
 
-    private static byte[] MergeChangedEntry(
+    private static ParamMergeOutcome MergeChangedParamEntry(
         BinderFile baseFile,
         BinderFile randomFile,
-        BinderFile targetFile,
+        BinderFile? targetFile,
         IReadOnlyCollection<PARAMDEF> paramdefs,
         MergeCounts counts)
     {
-        bool baseIsParam = HasParamExtension(baseFile);
-        bool randomIsParam = HasParamExtension(randomFile);
-        bool targetIsParam = HasParamExtension(targetFile);
-
-        if (!baseIsParam && !randomIsParam && !targetIsParam)
-            return [.. randomFile.Bytes];
-
-        if (!baseIsParam || !randomIsParam || !targetIsParam)
-            throw new InvalidDataException($"Binder entry {baseFile.ID} does not have a compatible PARAMDEF/PARAM payload across all inputs.");
-
         PARAM baseParam = ReadParam(baseFile, "base");
         PARAM randomParam = ReadParam(randomFile, "randomized");
-        PARAM targetParam = ReadParam(targetFile, "target");
-        PARAMDEF def = ResolveCommonDefinition(baseParam, randomParam, targetParam, paramdefs, baseFile.ID);
+        PARAM? targetParam = targetFile is null ? null : ReadParam(targetFile, "target");
+        (PARAM Param, string Source)[] parsed = targetParam is null
+            ? [(baseParam, "base"), (randomParam, "randomized")]
+            : [(baseParam, "base"), (randomParam, "randomized"), (targetParam, "target")];
+        PARAMDEF def = ResolveCommonDefinition(parsed, paramdefs, baseFile.ID);
         baseParam.ApplyParamdef(def);
         randomParam.ApplyParamdef(def);
-        targetParam.ApplyParamdef(def);
+        targetParam?.ApplyParamdef(def);
 
         Dictionary<int, PARAM.Row> baseRows = IndexRows(baseParam, "base", baseFile.ID);
         Dictionary<int, PARAM.Row> randomRows = IndexRows(randomParam, "randomized", baseFile.ID);
-        Dictionary<int, PARAM.Row> targetRows = IndexRows(targetParam, "target", baseFile.ID);
+        Dictionary<int, PARAM.Row> targetRows = targetParam is null
+            ? []
+            : IndexRows(targetParam, "target", baseFile.ID);
 
+        if (RowSetsEqual(baseRows, randomRows))
+            return new ParamMergeOutcome(false, false, null);
+
+        if (targetParam is null)
+        {
+            targetParam = ReadParam(randomFile, "randomized output");
+            targetParam.ApplyParamdef(def);
+            targetParam.Rows = [];
+        }
+
+        byte[] outputBytes = MergeParamRows(targetParam, baseRows, randomRows, targetRows, def, counts);
+        return new ParamMergeOutcome(true, targetFile is not null || targetParam.Rows.Count > 0, outputBytes);
+    }
+
+    private static byte[] MergeParamRows(
+        PARAM targetParam,
+        Dictionary<int, PARAM.Row> baseRows,
+        Dictionary<int, PARAM.Row> randomRows,
+        Dictionary<int, PARAM.Row> targetRows,
+        PARAMDEF def,
+        MergeCounts counts)
+    {
         foreach ((int id, PARAM.Row baseRow) in baseRows)
         {
             if (!randomRows.TryGetValue(id, out PARAM.Row? randomRow))
@@ -186,30 +262,50 @@ public sealed class GameParamThreeWayMerger
     }
 
     private static PARAMDEF ResolveCommonDefinition(
-        PARAM baseParam,
-        PARAM randomParam,
-        PARAM targetParam,
+        IReadOnlyCollection<(PARAM Param, string Source)> parsed,
         IReadOnlyCollection<PARAMDEF> paramdefs,
         int binderId)
     {
         PARAMDEF[] matches = paramdefs.Where(def =>
-                string.Equals(def.ParamType, baseParam.ParamType, StringComparison.Ordinal) &&
-                string.Equals(def.ParamType, randomParam.ParamType, StringComparison.Ordinal) &&
-                string.Equals(def.ParamType, targetParam.ParamType, StringComparison.Ordinal) &&
-                def.GetRowSize() == baseParam.DetectedSize &&
-                def.GetRowSize() == randomParam.DetectedSize &&
-                def.GetRowSize() == targetParam.DetectedSize)
+                parsed.All(item =>
+                    string.Equals(def.ParamType, item.Param.ParamType, StringComparison.Ordinal) &&
+                    def.GetRowSize() == item.Param.DetectedSize))
             .ToArray();
 
         if (matches.Length != 1)
         {
+            string layouts = string.Join(", ", parsed.Select(item =>
+                $"{item.Source} {item.Param.ParamType}/{item.Param.DetectedSize}"));
             throw new InvalidDataException(
                 $"Binder entry {binderId} requires exactly one compatible PARAMDEF selected by exact ParamType and detected row size; " +
-                $"found {matches.Length} for base {baseParam.ParamType}/{baseParam.DetectedSize}, " +
-                $"randomized {randomParam.ParamType}/{randomParam.DetectedSize}, and target {targetParam.ParamType}/{targetParam.DetectedSize}.");
+                $"found {matches.Length} for {layouts}.");
         }
 
         return matches[0];
+    }
+
+    private static Dictionary<int, PARAM.Row>[] ValidateCompatibleParams(
+        IReadOnlyList<(BinderFile File, string Source)> files,
+        IReadOnlyCollection<PARAMDEF> paramdefs,
+        int binderId)
+    {
+        if (files.Any(item => !HasParamExtension(item.File)))
+        {
+            throw new InvalidDataException(
+                $"Binder entry {binderId} does not have compatible PARAM names across all available inputs.");
+        }
+
+        (PARAM Param, string Source)[] parsed = files
+            .Select(item => (ReadParam(item.File, item.Source), item.Source))
+            .ToArray();
+        PARAMDEF def = ResolveCommonDefinition(parsed, paramdefs, binderId);
+        var indexed = new Dictionary<int, PARAM.Row>[parsed.Length];
+        for (int index = 0; index < parsed.Length; index++)
+        {
+            parsed[index].Param.ApplyParamdef(def);
+            indexed[index] = IndexRows(parsed[index].Param, parsed[index].Source, binderId);
+        }
+        return indexed;
     }
 
     private static Dictionary<int, BinderFile> IndexBinder(BND3 binder, string source)
@@ -250,6 +346,17 @@ public sealed class GameParamThreeWayMerger
         return true;
     }
 
+    private static bool RowSetsEqual(
+        IReadOnlyDictionary<int, PARAM.Row> left,
+        IReadOnlyDictionary<int, PARAM.Row> right)
+    {
+        if (left.Count != right.Count)
+            return false;
+
+        return left.All(item =>
+            right.TryGetValue(item.Key, out PARAM.Row? rightRow) && RowsEqual(item.Value, rightRow));
+    }
+
     private static bool CellValuesEqual(object left, object right) => (left, right) switch
     {
         (byte[] leftBytes, byte[] rightBytes) => leftBytes.AsSpan().SequenceEqual(rightBytes),
@@ -274,11 +381,11 @@ public sealed class GameParamThreeWayMerger
         return clone;
     }
 
-    private static BinderFile CloneBinderFile(BinderFile source) => new(
+    private static BinderFile CloneBinderFile(BinderFile source, byte[]? bytes = null) => new(
         source.Flags,
         source.ID,
         source.Name,
-        [.. source.Bytes])
+        bytes ?? [.. source.Bytes])
     {
         CompressionInfo = source.CompressionInfo,
     };
@@ -295,6 +402,20 @@ public sealed class GameParamThreeWayMerger
         }
     }
 
+    private static bool IsParamEntry(params BinderFile[] files)
+    {
+        if (files.Any(HasParamExtension))
+        {
+            if (files.Any(file => !HasParamExtension(file)))
+            {
+                throw new InvalidDataException(
+                    $"Binder entry {files[0].ID} does not have compatible PARAM names across all available inputs.");
+            }
+            return true;
+        }
+        return false;
+    }
+
     private static bool HasParamExtension(BinderFile file) =>
         file.Name?.EndsWith(".param", StringComparison.OrdinalIgnoreCase) == true;
 
@@ -307,4 +428,9 @@ public sealed class GameParamThreeWayMerger
         public int PreservedTargetRows { get; set; }
         public int RandomizerWinsOverlaps { get; set; }
     }
+
+    private sealed record ParamMergeOutcome(
+        bool HasFunctionalChange,
+        bool ShouldCreateEntry,
+        byte[]? OutputBytes);
 }
