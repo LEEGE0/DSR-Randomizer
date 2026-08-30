@@ -143,9 +143,7 @@ public sealed class GameParamPublisher : IGameParamPublisher
         {
             throw;
         }
-        catch (Exception exception) when (
-            exception is IOException or UnauthorizedAccessException or JsonException
-                or InvalidDataException or FormatException or EndOfStreamException)
+        catch
         {
             return false;
         }
@@ -220,17 +218,83 @@ public sealed class GameParamPublisher : IGameParamPublisher
         RequireObjectProperties(
             document.RootElement,
             ["schemaVersion", "dependencyCommit", "sources", "outputSha256", "counts"]);
+        int schemaVersion = RequireInt32(document.RootElement, "schemaVersion");
+        string dependencyCommit = RequireString(document.RootElement, "dependencyCommit");
+        if (!IsHex(dependencyCommit, 40))
+            throw new JsonException("Manifest dependencyCommit must be a 40-character hexadecimal commit.");
+        string outputSha256 = RequireSha256(document.RootElement, "outputSha256");
         JsonElement sources = document.RootElement.GetProperty("sources");
         if (sources.ValueKind != JsonValueKind.Array)
             throw new JsonException("Manifest sources must be an array.");
+        var sourceRecords = new List<SourceHash>();
         foreach (JsonElement source in sources.EnumerateArray())
+        {
             RequireObjectProperties(source, ["kind", "path", "sha256"]);
+            string kind = RequireString(source, "kind");
+            string sourcePath = RequireString(source, "path");
+            if (kind.Length == 0 || sourcePath.Length == 0)
+                throw new JsonException("Manifest source kind and path must be nonempty strings.");
+            sourceRecords.Add(new SourceHash(kind, sourcePath, RequireSha256(source, "sha256")));
+        }
+        if (sourceRecords.Count == 0)
+            throw new JsonException("Manifest sources must not be empty.");
+
+        JsonElement counts = document.RootElement.GetProperty("counts");
         RequireObjectProperties(
-            document.RootElement.GetProperty("counts"),
+            counts,
             ["changedEntries", "addedRows", "changedRows", "deletedRows", "preservedTargetRows", "randomizerWinsOverlaps"]);
-        return JsonSerializer.Deserialize<MergeManifest>(bytes, JsonOptions)
-            ?? throw new JsonException("The GameParam manifest is empty.");
+        var countRecord = new MergeCountManifest(
+            RequireNonnegativeInt32(counts, "changedEntries"),
+            RequireNonnegativeInt32(counts, "addedRows"),
+            RequireNonnegativeInt32(counts, "changedRows"),
+            RequireNonnegativeInt32(counts, "deletedRows"),
+            RequireNonnegativeInt32(counts, "preservedTargetRows"),
+            RequireNonnegativeInt32(counts, "randomizerWinsOverlaps"));
+        return new MergeManifest(
+            schemaVersion,
+            dependencyCommit,
+            sourceRecords,
+            outputSha256,
+            countRecord);
     }
+
+    private static string RequireSha256(JsonElement element, string propertyName)
+    {
+        string value = RequireString(element, propertyName);
+        if (!IsHex(value, 64))
+            throw new JsonException($"Manifest {propertyName} must be a 64-character hexadecimal SHA-256 hash.");
+        return value;
+    }
+
+    private static string RequireString(JsonElement element, string propertyName)
+    {
+        JsonElement property = element.GetProperty(propertyName);
+        if (property.ValueKind != JsonValueKind.String || property.GetString() is not { } value)
+            throw new JsonException($"Manifest {propertyName} must be a non-null string.");
+        return value;
+    }
+
+    private static int RequireInt32(JsonElement element, string propertyName)
+    {
+        JsonElement property = element.GetProperty(propertyName);
+        if (property.ValueKind != JsonValueKind.Number || !property.TryGetInt32(out int value))
+            throw new JsonException($"Manifest {propertyName} must be a 32-bit integer.");
+        return value;
+    }
+
+    private static int RequireNonnegativeInt32(JsonElement element, string propertyName)
+    {
+        int value = RequireInt32(element, propertyName);
+        if (value < 0)
+            throw new JsonException($"Manifest {propertyName} must be nonnegative.");
+        return value;
+    }
+
+    private static bool IsHex(string value, int expectedLength) =>
+        value.Length == expectedLength && value.All(static character =>
+            character is >= '0' and <= '9'
+                or >= 'a' and <= 'f'
+                or >= 'A' and <= 'F');
 
     private static void RequireObjectProperties(JsonElement element, IReadOnlyCollection<string> expected)
     {

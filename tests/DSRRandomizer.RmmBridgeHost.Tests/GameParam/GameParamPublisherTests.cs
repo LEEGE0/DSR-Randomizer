@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using DSRRandomizer.Foundation.Paths;
 using DSRRandomizer.RmmBridgeHost.GameParam;
 using SoulsFormats;
@@ -80,6 +81,50 @@ public sealed class GameParamPublisherTests(ITestOutputHelper output) : IDisposa
             new GameParamThreeWayMerger(), fixture.Sources, events.Add);
         await publisher.PublishAsync(CancellationToken.None);
         File.WriteAllBytes(fixture.Sources.OutputPath, [1, 2, 3]);
+
+        await publisher.PublishAsync(CancellationToken.None);
+
+        Assert.Equal(20, ReadValue(fixture.Sources.OutputPath, 1, fixture.Definition));
+        Assert.Equal(2, events.Count(entry => entry.Contains("cache=miss", StringComparison.Ordinal)));
+    }
+
+    [Theory]
+    [InlineData("dependencyCommit", "null")]
+    [InlineData("outputSha256", "null")]
+    [InlineData("schemaVersion", "\"1\"")]
+    [InlineData("sources", "null")]
+    [InlineData("outputSha256", "\"not-a-sha256\"")]
+    public async Task PublishAsync_NullWrongTypeOrMalformedManifestField_RebuildsCache(
+        string propertyName,
+        string replacementJson)
+    {
+        Fixture fixture = CreateFixture(randomValue: 20);
+        var events = new List<string>();
+        var publisher = new GameParamPublisher(
+            new GameParamThreeWayMerger(), fixture.Sources, events.Add);
+        await publisher.PublishAsync(CancellationToken.None);
+        JsonObject manifest = JsonNode.Parse(File.ReadAllText(fixture.Sources.ManifestPath))!.AsObject();
+        manifest[propertyName] = JsonNode.Parse(replacementJson);
+        File.WriteAllText(fixture.Sources.ManifestPath, manifest.ToJsonString());
+
+        await publisher.PublishAsync(CancellationToken.None);
+
+        Assert.Equal(20, ReadValue(fixture.Sources.OutputPath, 1, fixture.Definition));
+        Assert.Equal(2, events.Count(entry => entry.Contains("cache=miss", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public async Task PublishAsync_HashMatchingUnparsableCachedBinder_RebuildsCache()
+    {
+        Fixture fixture = CreateFixture(randomValue: 20);
+        var events = new List<string>();
+        var publisher = new GameParamPublisher(
+            new GameParamThreeWayMerger(), fixture.Sources, events.Add);
+        await publisher.PublishAsync(CancellationToken.None);
+        File.WriteAllBytes(fixture.Sources.OutputPath, [1, 2, 3]);
+        JsonObject manifest = JsonNode.Parse(File.ReadAllText(fixture.Sources.ManifestPath))!.AsObject();
+        manifest["outputSha256"] = Sha256(fixture.Sources.OutputPath);
+        File.WriteAllText(fixture.Sources.ManifestPath, manifest.ToJsonString());
 
         await publisher.PublishAsync(CancellationToken.None);
 
