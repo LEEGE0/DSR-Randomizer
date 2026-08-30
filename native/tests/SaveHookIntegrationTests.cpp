@@ -624,6 +624,124 @@ bool RequestWasNotRedirected(
         error);
 }
 
+bool FileTimesEqual(const FILETIME& left, const FILETIME& right) {
+    return left.dwLowDateTime == right.dwLowDateTime
+        && left.dwHighDateTime == right.dwHighDateTime;
+}
+
+bool AttributeDataMatches(
+    const WIN32_FILE_ATTRIBUTE_DATA& observed,
+    const WIN32_FILE_ATTRIBUTE_DATA& expected) {
+    return observed.dwFileAttributes == expected.dwFileAttributes
+        && FileTimesEqual(observed.ftCreationTime, expected.ftCreationTime)
+        && FileTimesEqual(observed.ftLastWriteTime, expected.ftLastWriteTime)
+        && observed.nFileSizeHigh == expected.nFileSizeHigh
+        && observed.nFileSizeLow == expected.nFileSizeLow;
+}
+
+bool AllGameParamApisMatchTarget(
+    const std::wstring_view request,
+    const BY_HANDLE_FILE_INFORMATION& targetIdentity,
+    const WIN32_FILE_ATTRIBUTE_DATA& targetMetadata) {
+    DWORD wideOpenError = ERROR_SUCCESS;
+    DWORD ansiOpenError = ERROR_SUCCESS;
+    const bool wideOpen = OpenMatchesTarget(
+        request,
+        false,
+        GENERIC_READ,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        targetIdentity,
+        wideOpenError);
+    const bool ansiOpen = OpenMatchesTarget(
+        request,
+        true,
+        GENERIC_READ,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        targetIdentity,
+        ansiOpenError);
+    const std::wstring wideRequest(request);
+    const auto ansiRequest = NarrowPath(request);
+    WIN32_FILE_ATTRIBUTE_DATA wideMetadata{};
+    WIN32_FILE_ATTRIBUTE_DATA ansiMetadata{};
+    const auto wideAttributes = GetFileAttributesW(wideRequest.c_str());
+    const auto ansiAttributes = GetFileAttributesA(ansiRequest.c_str());
+    const bool wideExtended = GetFileAttributesExW(
+        wideRequest.c_str(),
+        GetFileExInfoStandard,
+        &wideMetadata) != FALSE;
+    const bool ansiExtended = GetFileAttributesExA(
+        ansiRequest.c_str(),
+        GetFileExInfoStandard,
+        &ansiMetadata) != FALSE;
+    return wideOpen
+        && ansiOpen
+        && wideAttributes == targetMetadata.dwFileAttributes
+        && ansiAttributes == targetMetadata.dwFileAttributes
+        && wideExtended
+        && ansiExtended
+        && AttributeDataMatches(wideMetadata, targetMetadata)
+        && AttributeDataMatches(ansiMetadata, targetMetadata);
+}
+
+bool AllGameParamApisAreAccessDenied(
+    const std::wstring_view request,
+    const BY_HANDLE_FILE_INFORMATION& targetIdentity) {
+    DWORD wideOpenError = ERROR_SUCCESS;
+    DWORD ansiOpenError = ERROR_SUCCESS;
+    const bool wideOpenMatched = OpenMatchesTarget(
+        request,
+        false,
+        GENERIC_READ,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        targetIdentity,
+        wideOpenError);
+    const bool ansiOpenMatched = OpenMatchesTarget(
+        request,
+        true,
+        GENERIC_READ,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        targetIdentity,
+        ansiOpenError);
+
+    const std::wstring wideRequest(request);
+    const auto ansiRequest = NarrowPath(request);
+    SetLastError(ERROR_SUCCESS);
+    const auto wideAttributes = GetFileAttributesW(wideRequest.c_str());
+    const auto wideAttributesError = GetLastError();
+    SetLastError(ERROR_SUCCESS);
+    const auto ansiAttributes = GetFileAttributesA(ansiRequest.c_str());
+    const auto ansiAttributesError = GetLastError();
+    WIN32_FILE_ATTRIBUTE_DATA metadata{};
+    SetLastError(ERROR_SUCCESS);
+    const bool wideExtended = GetFileAttributesExW(
+        wideRequest.c_str(),
+        GetFileExInfoStandard,
+        &metadata) != FALSE;
+    const auto wideExtendedError = GetLastError();
+    SetLastError(ERROR_SUCCESS);
+    const bool ansiExtended = GetFileAttributesExA(
+        ansiRequest.c_str(),
+        GetFileExInfoStandard,
+        &metadata) != FALSE;
+    const auto ansiExtendedError = GetLastError();
+    return !wideOpenMatched
+        && wideOpenError == ERROR_ACCESS_DENIED
+        && !ansiOpenMatched
+        && ansiOpenError == ERROR_ACCESS_DENIED
+        && wideAttributes == INVALID_FILE_ATTRIBUTES
+        && wideAttributesError == ERROR_ACCESS_DENIED
+        && ansiAttributes == INVALID_FILE_ATTRIBUTES
+        && ansiAttributesError == ERROR_ACCESS_DENIED
+        && !wideExtended
+        && wideExtendedError == ERROR_ACCESS_DENIED
+        && !ansiExtended
+        && ansiExtendedError == ERROR_ACCESS_DENIED;
+}
+
 int VerifyGameParamRedirect(const fs::path& root) {
     const auto testRoot = root / L"game-param-redirect";
     fs::path gameRoot;
@@ -638,18 +756,25 @@ int VerifyGameParamRedirect(const fs::path& root) {
         / L"GameParam.parambnd.dcx";
     const auto attacker = target.parent_path() / L"attacker.dcx";
     const auto savedTarget = target.parent_path() / L"saved-target.dcx";
+    const auto sourceAttacker = source.parent_path() / L"source-attacker.dcx";
+    const auto savedSource = source.parent_path() / L"saved-source.dcx";
+    const auto sourceHardLink = source.parent_path() / L"source-hard-link.dcx";
     if (!PrepareGameParamFixture(configuration, source, target)
         || !CreateDirectories(alternateSource.parent_path())
         || !WriteFixtureFile(alternateSource, "alternate-source")
-        || !WriteFixtureFile(attacker, "attacker-content")) {
+        || !WriteFixtureFile(attacker, "attacker-content")
+        || !WriteFixtureFile(sourceAttacker, "source-attacker-content")) {
         return Fail("GameParam redirect fixture setup failed");
     }
 
     BY_HANDLE_FILE_INFORMATION targetIdentity{};
-    const auto targetAttributes = GetFileAttributesW(target.c_str());
+    WIN32_FILE_ATTRIBUTE_DATA targetMetadata{};
     if (!CaptureFileIdentity(target, targetIdentity)
-        || targetAttributes == INVALID_FILE_ATTRIBUTES) {
-        return Fail("GameParam target identity could not be captured");
+        || !GetFileAttributesExW(
+            target.c_str(),
+            GetFileExInfoStandard,
+            &targetMetadata)) {
+        return Fail("GameParam target identity or metadata could not be captured");
     }
     CurrentDirectoryLease currentDirectory(gameRoot);
     if (!currentDirectory.Active()) {
@@ -674,27 +799,29 @@ int VerifyGameParamRedirect(const fs::path& root) {
             L"/OvErHaUl/"),
     };
     for (std::size_t index = 0; index < accepted.size(); ++index) {
-        DWORD error = ERROR_SUCCESS;
-        const bool matched = OpenMatchesTarget(
-                accepted[index],
-                index % 2 != 0,
-                GENERIC_READ,
-                OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL,
-                targetIdentity,
-                error);
-        if (!matched) {
+        const auto countBeforePath =
+            DSRRandomizer::Save::CurrentGameParamRedirectCount();
+        const bool matched = AllGameParamApisMatchTarget(
+            accepted[index],
+            targetIdentity,
+            targetMetadata);
+        const auto countAfterPath =
+            DSRRandomizer::Save::CurrentGameParamRedirectCount();
+        if (!matched || countAfterPath != countBeforePath + 6) {
             std::wcerr << L"accepted path failed at " << index
-                       << L" error=" << error << L" path="
+                       << L" countDelta=" << (countAfterPath - countBeforePath)
+                       << L" path="
                        << accepted[index] << L'\n';
         }
-        passed = matched && passed;
+        passed = matched
+            && countAfterPath == countBeforePath + 6
+            && passed;
     }
 
     constexpr DWORD allowedAccess = GENERIC_READ | GENERIC_EXECUTE
         | READ_CONTROL | SYNCHRONIZE | FILE_READ_DATA | FILE_READ_EA
         | FILE_READ_ATTRIBUTES | FILE_EXECUTE;
-    const std::array<DWORD, 9> acceptedAccess{
+    const std::array<DWORD, 10> acceptedAccess{
         0,
         GENERIC_READ,
         GENERIC_EXECUTE,
@@ -703,6 +830,7 @@ int VerifyGameParamRedirect(const fs::path& root) {
         FILE_READ_DATA,
         FILE_READ_EA,
         FILE_READ_ATTRIBUTES,
+        FILE_EXECUTE,
         allowedAccess,
     };
     for (const auto access : acceptedAccess) {
@@ -854,8 +982,8 @@ int VerifyGameParamRedirect(const fs::path& root) {
             GetFileExInfoStandard,
             &ansiAttributes) != FALSE;
     const auto attributesExAError = GetLastError();
-    const bool attributesPassed = attributesW == targetAttributes
-        && attributesA == targetAttributes
+    const bool attributesPassed = attributesW == targetMetadata.dwFileAttributes
+        && attributesA == targetMetadata.dwFileAttributes
         && attributesExW
         && attributesExA
         && wideAttributes.nFileSizeHigh == 0
@@ -890,11 +1018,12 @@ int VerifyGameParamRedirect(const fs::path& root) {
         switch (api) {
         case 0:
             succeeded = GetFileAttributesW(
-                LR"(overhaul\GameParam.parambnd.dcx)") == targetAttributes;
+                LR"(overhaul\GameParam.parambnd.dcx)")
+                == targetMetadata.dwFileAttributes;
             break;
         case 1:
             succeeded = GetFileAttributesA(relativeAnsi.c_str())
-                == targetAttributes;
+                == targetMetadata.dwFileAttributes;
             break;
         case 2:
             succeeded = GetFileAttributesExW(
@@ -953,7 +1082,7 @@ int VerifyGameParamRedirect(const fs::path& root) {
 
     const auto countAfterSuccessful =
         DSRRandomizer::Save::CurrentGameParamRedirectCount();
-    passed = countAfterSuccessful == countBefore + accepted.size()
+    passed = countAfterSuccessful == countBefore + accepted.size() * 6
             + acceptedAccess.size() + 4 + 4 + 1
         && passed;
 
@@ -964,34 +1093,102 @@ int VerifyGameParamRedirect(const fs::path& root) {
     }
     const auto countBeforeIdentityFailure =
         DSRRandomizer::Save::CurrentGameParamRedirectCount();
-    DWORD swappedError = ERROR_SUCCESS;
-    const bool swappedMatched = OpenMatchesTarget(
+    const bool targetSwapDenied = AllGameParamApisAreAccessDenied(
         LR"(overhaul\GameParam.parambnd.dcx)",
-        false,
-        GENERIC_READ,
-        OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL,
-        targetIdentity,
-        swappedError);
-    WIN32_FILE_ATTRIBUTE_DATA swappedAttributes{};
-    SetLastError(ERROR_SUCCESS);
-    const bool swappedAttributesSucceeded = GetFileAttributesExA(
-        NarrowPath(LR"(overhaul\GameParam.parambnd.dcx)").c_str(),
-        GetFileExInfoStandard,
-        &swappedAttributes) != FALSE;
-    passed = !swappedMatched
-        && swappedError == ERROR_ACCESS_DENIED
-        && !swappedAttributesSucceeded
-        && GetLastError() == ERROR_ACCESS_DENIED
+        targetIdentity);
+    passed = targetSwapDenied
         && DSRRandomizer::Save::CurrentGameParamRedirectCount()
             == countBeforeIdentityFailure
         && passed;
-    if (swappedMatched || swappedError != ERROR_ACCESS_DENIED
-        || swappedAttributesSucceeded || GetLastError() != ERROR_ACCESS_DENIED) {
-        std::cerr << "identity revalidation failed: matched=" << swappedMatched
-                  << " openError=" << swappedError
-                  << " attributes=" << swappedAttributesSucceeded
-                  << " attributesError=" << GetLastError() << '\n';
+    if (!targetSwapDenied) {
+        std::cerr << "target identity replacement did not deny all APIs\n";
+    }
+
+    if (!MoveFileW(target.c_str(), attacker.c_str())
+        || !MoveFileW(savedTarget.c_str(), target.c_str())) {
+        std::cerr << "target identity restore failed: " << GetLastError() << '\n';
+        passed = false;
+    }
+    const auto countBeforeRestoredTarget =
+        DSRRandomizer::Save::CurrentGameParamRedirectCount();
+    const bool targetRestored = AllGameParamApisMatchTarget(
+        source.native(),
+        targetIdentity,
+        targetMetadata);
+    passed = targetRestored
+        && DSRRandomizer::Save::CurrentGameParamRedirectCount()
+            == countBeforeRestoredTarget + 6
+        && passed;
+
+    if (!MoveFileW(source.c_str(), savedSource.c_str())) {
+        std::cerr << "source removal setup failed: " << GetLastError() << '\n';
+        passed = false;
+    }
+    const auto countBeforeMissingSource =
+        DSRRandomizer::Save::CurrentGameParamRedirectCount();
+    const bool missingSourceDenied = AllGameParamApisAreAccessDenied(
+        LR"(.\overhaul\GameParam.parambnd.dcx)",
+        targetIdentity);
+    passed = missingSourceDenied
+        && DSRRandomizer::Save::CurrentGameParamRedirectCount()
+            == countBeforeMissingSource
+        && passed;
+
+    if (!MoveFileW(sourceAttacker.c_str(), source.c_str())) {
+        std::cerr << "source replacement setup failed: " << GetLastError() << '\n';
+        passed = false;
+    }
+    const auto countBeforeReplacedSource =
+        DSRRandomizer::Save::CurrentGameParamRedirectCount();
+    const bool replacedSourceDenied = AllGameParamApisAreAccessDenied(
+        source.native(),
+        targetIdentity);
+    passed = replacedSourceDenied
+        && DSRRandomizer::Save::CurrentGameParamRedirectCount()
+            == countBeforeReplacedSource
+        && passed;
+
+    if (!MoveFileW(source.c_str(), sourceAttacker.c_str())
+        || !MoveFileW(savedSource.c_str(), source.c_str())) {
+        std::cerr << "source identity restore failed: " << GetLastError() << '\n';
+        passed = false;
+    }
+    if (!CreateHardLinkW(sourceHardLink.c_str(), source.c_str(), nullptr)) {
+        std::cerr << "source hard-link setup failed: " << GetLastError() << '\n';
+        passed = false;
+    }
+    const auto countBeforeHardLinkedSource =
+        DSRRandomizer::Save::CurrentGameParamRedirectCount();
+    const bool hardLinkedSourceDenied = AllGameParamApisAreAccessDenied(
+        LR"(OvErHaUl/GameParam.parambnd.dcx)",
+        targetIdentity);
+    passed = hardLinkedSourceDenied
+        && DSRRandomizer::Save::CurrentGameParamRedirectCount()
+            == countBeforeHardLinkedSource
+        && passed;
+    if (!DeleteFileW(sourceHardLink.c_str())) {
+        std::cerr << "source hard-link cleanup failed: " << GetLastError() << '\n';
+        passed = false;
+    }
+
+    const auto countBeforeRestoredSource =
+        DSRRandomizer::Save::CurrentGameParamRedirectCount();
+    const bool sourceRestored = AllGameParamApisMatchTarget(
+        LR"(overhaul\GameParam.parambnd.dcx)",
+        targetIdentity,
+        targetMetadata);
+    passed = sourceRestored
+        && DSRRandomizer::Save::CurrentGameParamRedirectCount()
+            == countBeforeRestoredSource + 6
+        && passed;
+    if (!missingSourceDenied || !replacedSourceDenied
+        || !hardLinkedSourceDenied || !targetRestored || !sourceRestored) {
+        std::cerr << "source identity fail-closed matrix failed: missing="
+                  << missingSourceDenied
+                  << " replaced=" << replacedSourceDenied
+                  << " hardLinked=" << hardLinkedSourceDenied
+                  << " targetRestored=" << targetRestored
+                  << " sourceRestored=" << sourceRestored << '\n';
     }
 
     DSRRandomizer::Save::Testing::SetBeforeOriginalApiCallback(nullptr, nullptr);
@@ -1001,7 +1198,7 @@ int VerifyGameParamRedirect(const fs::path& root) {
     passed = uninstallStatus == SaveHookCleanupStatus::Success
         && ReadFixtureFile(source, sourceContents)
         && sourceContents == "steam-source"
-        && ReadFixtureFile(savedTarget, originalTargetContents)
+        && ReadFixtureFile(target, originalTargetContents)
         && originalTargetContents == "generated-target-content"
         && passed;
     currentDirectory.Restore();
