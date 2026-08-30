@@ -158,27 +158,29 @@ public sealed class GameParamPublisherTests(ITestOutputHelper output) : IDisposa
             BND3 randomBnd = BND3.Read(sources.RandomizedPath);
             BND3 targetBnd = BND3.Read(sources.OverhaulPath);
             BND3 outputBnd = BND3.Read(sources.OutputPath);
-            Dictionary<int, BinderFile> baseFiles = baseBnd.Files.ToDictionary(static file => file.ID);
-            Dictionary<int, BinderFile> randomFiles = randomBnd.Files.ToDictionary(static file => file.ID);
-            Dictionary<int, BinderFile> targetFiles = targetBnd.Files.ToDictionary(static file => file.ID);
-            Dictionary<int, BinderFile> outputFiles = outputBnd.Files.ToDictionary(static file => file.ID);
-            int[] byteChangedEntries = baseFiles.Keys.Union(randomFiles.Keys)
-                .Where(id => !baseFiles.TryGetValue(id, out BinderFile? baseFile)
-                    || !randomFiles.TryGetValue(id, out BinderFile? randomFile)
+            Assert.Equal(41, outputBnd.Files.Count);
+            Assert.Equal(DCX.Type.DCX_DFLT, outputBnd.Compression.Type);
+            Dictionary<string, BinderFile> baseFiles = IndexParamFiles(baseBnd, "base");
+            Dictionary<string, BinderFile> randomFiles = IndexParamFiles(randomBnd, "randomized");
+            Dictionary<string, BinderFile> targetFiles = IndexParamFiles(targetBnd, "target");
+            Dictionary<string, BinderFile> outputFiles = IndexParamFiles(outputBnd, "output");
+            string[] byteChangedEntries = baseFiles.Keys.Union(randomFiles.Keys, StringComparer.OrdinalIgnoreCase)
+                .Where(name => !baseFiles.TryGetValue(name, out BinderFile? baseFile)
+                    || !randomFiles.TryGetValue(name, out BinderFile? randomFile)
                     || !baseFile.Bytes.AsSpan().SequenceEqual(randomFile.Bytes))
-                .Order()
+                .Order(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
-            int[] changedEntries = byteChangedEntries
-                .Where(id => HasFunctionalParamChange(baseFiles[id], randomFiles[id], definitions))
+            string[] changedEntries = byteChangedEntries
+                .Where(name => HasFunctionalParamChange(baseFiles[name], randomFiles[name], definitions))
                 .ToArray();
             Assert.Equal(8, changedEntries.Length);
 
-            foreach (int id in changedEntries)
+            foreach (string name in changedEntries)
             {
-                BinderFile baseFile = baseFiles[id];
-                BinderFile randomFile = randomFiles[id];
-                BinderFile targetFile = targetFiles[id];
-                BinderFile outputFile = outputFiles[id];
+                BinderFile baseFile = baseFiles[name];
+                BinderFile randomFile = randomFiles[name];
+                BinderFile targetFile = targetFiles[name];
+                BinderFile outputFile = outputFiles[name];
                 (PARAM Base, PARAM Random, PARAM Target, PARAM Output) parsed =
                     ReadCompatibleParams(baseFile, randomFile, targetFile, outputFile, definitions);
                 Dictionary<int, PARAM.Row> baseRows = parsed.Base.Rows.ToDictionary(static row => row.ID);
@@ -196,50 +198,87 @@ public sealed class GameParamPublisherTests(ITestOutputHelper output) : IDisposa
                     Assert.DoesNotContain(deletedId, outputRows.Keys);
             }
 
-            int overhaulOnlyRows = 0;
-            foreach (int id in baseFiles.Keys.Intersect(randomFiles.Keys).Intersect(targetFiles.Keys))
+            var targetOnlyRows = new HashSet<ParamRowIdentity>();
+            var baseOnlyTargetDeletions = new HashSet<ParamRowIdentity>();
+            foreach (string name in baseFiles.Keys
+                         .Intersect(randomFiles.Keys, StringComparer.OrdinalIgnoreCase)
+                         .Intersect(targetFiles.Keys, StringComparer.OrdinalIgnoreCase))
             {
-                BinderFile baseFile = baseFiles[id];
-                BinderFile randomFile = randomFiles[id];
-                BinderFile targetFile = targetFiles[id];
-                if (!baseFile.Name.EndsWith(".param", StringComparison.OrdinalIgnoreCase)
-                    || !randomFile.Name.EndsWith(".param", StringComparison.OrdinalIgnoreCase)
-                    || !targetFile.Name.EndsWith(".param", StringComparison.OrdinalIgnoreCase))
-                    continue;
+                BinderFile baseFile = baseFiles[name];
+                BinderFile randomFile = randomFiles[name];
+                BinderFile targetFile = targetFiles[name];
                 PARAM baseParam = PARAM.Read(baseFile.Bytes);
                 PARAM randomParam = PARAM.Read(randomFile.Bytes);
                 PARAM targetParam = PARAM.Read(targetFile.Bytes);
+                PARAM outputParam = PARAM.Read(outputFiles[name].Bytes);
+                Assert.Equal(baseParam.ParamType, randomParam.ParamType);
+                Assert.Equal(baseParam.ParamType, targetParam.ParamType);
+                Assert.Equal(baseParam.ParamType, outputParam.ParamType);
                 HashSet<int> baseIds = baseParam.Rows.Select(static row => row.ID).ToHashSet();
                 HashSet<int> randomIds = randomParam.Rows.Select(static row => row.ID).ToHashSet();
                 int[] targetOnlyIds = targetParam.Rows
                     .Select(static row => row.ID)
                     .Where(rowId => !baseIds.Contains(rowId) && !randomIds.Contains(rowId))
                     .ToArray();
-                overhaulOnlyRows += targetOnlyIds.Length;
+                targetOnlyRows.UnionWith(targetOnlyIds.Select(rowId => new ParamRowIdentity(name, rowId)));
+                baseOnlyTargetDeletions.UnionWith(baseIds
+                    .Except(targetParam.Rows.Select(static row => row.ID))
+                    .Select(rowId => new ParamRowIdentity(name, rowId)));
 
-                if (!changedEntries.Contains(id))
+                if (!changedEntries.Contains(name, StringComparer.OrdinalIgnoreCase))
                 {
-                    Assert.Equal(targetFile.Bytes, outputFiles[id].Bytes);
+                    Assert.Equal(targetFile.Bytes, outputFiles[name].Bytes);
                     continue;
                 }
 
                 (PARAM Base, PARAM Random, PARAM Target, PARAM Output) parsed = ReadCompatibleParams(
-                    baseFile, randomFile, targetFile, outputFiles[id], definitions);
+                    baseFile, randomFile, targetFile, outputFiles[name], definitions);
                 Dictionary<int, PARAM.Row> targetRows = parsed.Target.Rows.ToDictionary(static row => row.ID);
                 Dictionary<int, PARAM.Row> outputRows = parsed.Output.Rows.ToDictionary(static row => row.ID);
                 foreach (int rowId in targetOnlyIds)
                     Assert.True(RowsEqual(targetRows[rowId], outputRows[rowId]));
             }
-            Assert.Equal(20, overhaulOnlyRows);
+            ParamRowIdentity[] expectedTargetOnlyRows =
+            [
+                new("EquipParamGoods", 104),
+                new("EquipParamGoods", 105),
+                new("EquipParamGoods", 107),
+                new("EquipParamGoods", 150),
+                new("EquipParamGoods", 151),
+                new("EquipParamGoods", 152),
+                new("ShopLineupParam", 2110),
+                new("ShopLineupParam", 2111),
+                new("ShopLineupParam", 2112),
+                new("ShopLineupParam", 2113),
+                new("ShopLineupParam", 2114),
+                new("ShopLineupParam", 2115),
+                new("SpEffectParam", 18),
+                new("SpEffectParam", 19),
+                new("SpEffectParam", 90),
+                new("SpEffectParam", 91),
+                new("SpEffectParam", 92),
+                new("SpEffectParam", 93),
+                new("SpEffectParam", 9700),
+                new("SpEffectParam", 9701),
+            ];
+            Assert.Equal(
+                expectedTargetOnlyRows.OrderBy(static row => row.ParamName).ThenBy(static row => row.RowId),
+                targetOnlyRows.OrderBy(static row => row.ParamName).ThenBy(static row => row.RowId));
+            Assert.Empty(baseOnlyTargetDeletions);
 
             using JsonDocument manifest = JsonDocument.Parse(File.ReadAllBytes(sources.ManifestPath));
+            string outputHash = Sha256(sources.OutputPath);
             output.WriteLine(
-                $"changedParams={changedEntries.Length}; overhaulOnlyRows={overhaulOnlyRows}; " +
+                $"changedParams={changedEntries.Length}; overhaulOnlyRows={targetOnlyRows.Count}; " +
+                $"baseOnlyTargetDeletions={baseOnlyTargetDeletions.Count}; " +
                 $"changedEntries={string.Join(',', changedEntries)}; outputSha256={Sha256(sources.OutputPath)}; " +
+                $"outputEntries={outputBnd.Files.Count}; dcxType={outputBnd.Compression.Type}; " +
+                $"targetOnlyRows={string.Join(',', targetOnlyRows.OrderBy(static row => row.ParamName).ThenBy(static row => row.RowId))}; " +
                 $"baseSha256={before[sources.BasePath]}; randomizedSha256={before[sources.RandomizedPath]}; " +
                 $"overhaulSha256={before[sources.OverhaulPath]}; defs={sources.DefinitionPaths.Count}; " +
                 $"rmmSha256={before[rmmPath]}; rmmLength={new FileInfo(rmmPath).Length}; " +
                 $"manifestOutputSha256={manifest.RootElement.GetProperty("outputSha256").GetString()}");
+            Assert.Equal(outputHash, manifest.RootElement.GetProperty("outputSha256").GetString());
         }
         finally
         {
@@ -393,6 +432,29 @@ public sealed class GameParamPublisherTests(ITestOutputHelper output) : IDisposa
                 || !RowsEqual(item.Value, randomRow));
     }
 
+    private static Dictionary<string, BinderFile> IndexParamFiles(BND3 binder, string source)
+    {
+        var files = new Dictionary<string, BinderFile>(StringComparer.OrdinalIgnoreCase);
+        var numericIds = new HashSet<int>();
+        foreach (BinderFile file in binder.Files)
+        {
+            Assert.True(numericIds.Add(file.ID), $"The {source} binder has duplicate ID {file.ID}.");
+            Assert.EndsWith(".param", file.Name, StringComparison.OrdinalIgnoreCase);
+            string name = GetParamBasename(file);
+            Assert.True(files.TryAdd(name, file), $"The {source} binder has duplicate PARAM basename {name}.");
+        }
+        return files;
+    }
+
+    private static string GetParamBasename(BinderFile file)
+    {
+        string normalizedName = file.Name.Replace('\\', '/');
+        string fileName = normalizedName[(normalizedName.LastIndexOf('/') + 1)..];
+        string basename = fileName[..^".param".Length];
+        Assert.NotEmpty(basename);
+        return basename;
+    }
+
     private static bool RowsEqual(PARAM.Row left, PARAM.Row right)
     {
         if (left.Cells.Count != right.Cells.Count)
@@ -419,4 +481,9 @@ public sealed class GameParamPublisherTests(ITestOutputHelper output) : IDisposa
     }
 
     private sealed record Fixture(GameParamSourceSet Sources, PARAMDEF Definition);
+
+    private sealed record ParamRowIdentity(string ParamName, int RowId)
+    {
+        public override string ToString() => $"{ParamName}:{RowId}";
+    }
 }
