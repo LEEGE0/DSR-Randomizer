@@ -13,17 +13,17 @@ public sealed class GameParamThreeWayMerger
         ArgumentNullException.ThrowIfNull(inputs.TargetBnd);
         ArgumentNullException.ThrowIfNull(inputs.Paramdefs);
 
-        Dictionary<int, BinderFile> baseFiles = IndexBinder(inputs.BaseBnd, "base");
-        Dictionary<int, BinderFile> randomFiles = IndexBinder(inputs.RandomizedBnd, "randomized");
-        Dictionary<int, BinderFile> targetFiles = IndexBinder(inputs.TargetBnd, "target");
+        Dictionary<string, BinderFile> baseFiles = IndexBinder(inputs.BaseBnd, "base");
+        Dictionary<string, BinderFile> randomFiles = IndexBinder(inputs.RandomizedBnd, "randomized");
+        Dictionary<string, BinderFile> targetFiles = IndexBinder(inputs.TargetBnd, "target");
         var counts = new MergeCounts();
         bool changedTargetLayout = false;
 
-        foreach ((int id, BinderFile baseFile) in baseFiles)
+        foreach ((string identity, BinderFile baseFile) in baseFiles)
         {
-            if (!randomFiles.TryGetValue(id, out BinderFile? randomFile))
+            if (!randomFiles.TryGetValue(identity, out BinderFile? randomFile))
             {
-                targetFiles.TryGetValue(id, out BinderFile? deletionTarget);
+                targetFiles.TryGetValue(identity, out BinderFile? deletionTarget);
                 if (HasParamExtension(baseFile) || deletionTarget is not null && HasParamExtension(deletionTarget))
                 {
                     (BinderFile File, string Source)[] deletedParams = deletionTarget is null
@@ -32,14 +32,14 @@ public sealed class GameParamThreeWayMerger
                     ValidateCompatibleParams(
                         deletedParams,
                         inputs.Paramdefs,
-                        id);
+                        baseFile.ID);
                 }
 
                 counts.ChangedEntries++;
-                if (targetFiles.TryGetValue(id, out BinderFile? targetFile))
+                if (targetFiles.TryGetValue(identity, out BinderFile? targetFile))
                 {
                     inputs.TargetBnd.Files.Remove(targetFile);
-                    targetFiles.Remove(id);
+                    targetFiles.Remove(identity);
                     changedTargetLayout = true;
                 }
                 continue;
@@ -48,7 +48,7 @@ public sealed class GameParamThreeWayMerger
             if (baseFile.Bytes.AsSpan().SequenceEqual(randomFile.Bytes))
                 continue;
 
-            if (targetFiles.TryGetValue(id, out BinderFile? existingTarget))
+            if (targetFiles.TryGetValue(identity, out BinderFile? existingTarget))
             {
                 if (IsParamEntry(baseFile, randomFile, existingTarget))
                 {
@@ -79,8 +79,8 @@ public sealed class GameParamThreeWayMerger
                     if (outcome.ShouldCreateEntry)
                     {
                         BinderFile added = CloneBinderFile(randomFile, outcome.OutputBytes!);
-                        inputs.TargetBnd.Files.Add(added);
-                        targetFiles.Add(id, added);
+                        AddBinderFile(inputs.TargetBnd, added);
+                        targetFiles.Add(identity, added);
                         changedTargetLayout = true;
                     }
                 }
@@ -88,26 +88,26 @@ public sealed class GameParamThreeWayMerger
                 {
                     counts.ChangedEntries++;
                     BinderFile added = CloneBinderFile(randomFile);
-                    inputs.TargetBnd.Files.Add(added);
-                    targetFiles.Add(id, added);
+                    AddBinderFile(inputs.TargetBnd, added);
+                    targetFiles.Add(identity, added);
                     changedTargetLayout = true;
                 }
             }
         }
 
-        foreach ((int id, BinderFile randomFile) in randomFiles)
+        foreach ((string identity, BinderFile randomFile) in randomFiles)
         {
-            if (baseFiles.ContainsKey(id))
+            if (baseFiles.ContainsKey(identity))
                 continue;
 
-            if (targetFiles.TryGetValue(id, out BinderFile? targetFile))
+            if (targetFiles.TryGetValue(identity, out BinderFile? targetFile))
             {
                 if (HasParamExtension(randomFile) || HasParamExtension(targetFile))
                 {
                     Dictionary<int, PARAM.Row>[] rows = ValidateCompatibleParams(
                         [(randomFile, "randomized"), (targetFile, "target")],
                         inputs.Paramdefs,
-                        id);
+                        randomFile.ID);
                     counts.AddedRows += rows[0].Count;
                 }
 
@@ -121,14 +121,14 @@ public sealed class GameParamThreeWayMerger
                     Dictionary<int, PARAM.Row>[] rows = ValidateCompatibleParams(
                         [(randomFile, "randomized")],
                         inputs.Paramdefs,
-                        id);
+                        randomFile.ID);
                     counts.AddedRows += rows[0].Count;
                 }
 
                 counts.ChangedEntries++;
                 BinderFile added = CloneBinderFile(randomFile);
-                inputs.TargetBnd.Files.Add(added);
-                targetFiles.Add(id, added);
+                AddBinderFile(inputs.TargetBnd, added);
+                targetFiles.Add(identity, added);
                 changedTargetLayout = true;
             }
         }
@@ -308,15 +308,46 @@ public sealed class GameParamThreeWayMerger
         return indexed;
     }
 
-    private static Dictionary<int, BinderFile> IndexBinder(BND3 binder, string source)
+    private static Dictionary<string, BinderFile> IndexBinder(BND3 binder, string source)
     {
-        var indexed = new Dictionary<int, BinderFile>();
+        var indexed = new Dictionary<string, BinderFile>(StringComparer.OrdinalIgnoreCase);
+        var numericIds = new HashSet<int>();
         foreach (BinderFile file in binder.Files)
         {
-            if (!indexed.TryAdd(file.ID, file))
+            if (!numericIds.Add(file.ID))
                 throw new InvalidDataException($"The {source} binder contains duplicate binder entry ID {file.ID}.");
+
+            string identity = GetBinderIdentity(file);
+            if (!indexed.TryAdd(identity, file))
+            {
+                if (HasParamExtension(file))
+                {
+                    throw new InvalidDataException(
+                        $"The {source} binder contains duplicate logical PARAM basename '{GetParamBasename(file)}'.");
+                }
+
+                throw new InvalidDataException($"The {source} binder contains duplicate binder entry ID {file.ID}.");
+            }
         }
         return indexed;
+    }
+
+    private static string GetBinderIdentity(BinderFile file) => HasParamExtension(file)
+        ? $"param:{GetParamBasename(file)}"
+        : $"raw:{file.ID}";
+
+    private static string GetParamBasename(BinderFile file)
+    {
+        string normalizedName = file.Name!.Replace('\\', '/');
+        int fileNameStart = normalizedName.LastIndexOf('/') + 1;
+        string fileName = normalizedName[fileNameStart..];
+        string basename = fileName[..^".param".Length];
+        if (basename.Length == 0)
+        {
+            throw new InvalidDataException(
+                $"Binder entry {file.ID} has an empty logical PARAM basename.");
+        }
+        return basename;
     }
 
     private static Dictionary<int, PARAM.Row> IndexRows(PARAM param, string source, int binderId)
@@ -389,6 +420,16 @@ public sealed class GameParamThreeWayMerger
     {
         CompressionInfo = source.CompressionInfo,
     };
+
+    private static void AddBinderFile(BND3 targetBnd, BinderFile added)
+    {
+        if (targetBnd.Files.Any(file => file.ID == added.ID))
+        {
+            throw new InvalidDataException(
+                $"Cannot add logical binder entry '{added.Name}' because target binder ID {added.ID} is already in use.");
+        }
+        targetBnd.Files.Add(added);
+    }
 
     private static PARAM ReadParam(BinderFile file, string source)
     {

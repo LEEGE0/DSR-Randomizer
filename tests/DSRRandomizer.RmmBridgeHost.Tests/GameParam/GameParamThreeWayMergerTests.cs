@@ -8,7 +8,7 @@ public sealed class GameParamThreeWayMergerTests
 {
     private const int ParamFileId = 10;
     private const string ParamFileName = "param/TestParam.param";
-    private static readonly (int ID, string Name)[] ActualGameParamManifest =
+    private static readonly (int ID, string Name)[] ActualOverhaulGameParamManifest =
     [
         (0, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\EquipParamWeapon.param"),
         (1, @"N:\FRPG\data\INTERROOT_x64\param\GameParam\EquipParamProtector.param"),
@@ -187,6 +187,117 @@ public sealed class GameParamThreeWayMergerTests
         Assert.Equal(targetParamBytes, output.Files.Single(file => file.ID == ParamFileId).Bytes);
         PARAM outputParam = ReadParam(result.OutputBytes, ParamFileId, def);
         AssertRow(outputParam, 1, "target-one", 11);
+    }
+
+    [Fact]
+    public void Merge_matches_name_only_param_delta_by_normalized_basename_and_preserves_target_layout()
+    {
+        PARAMDEF lockCamDef = CreateDefinition(paramType: "LockCamParam");
+        PARAMDEF hitMtrlDef = CreateDefinition(paramType: "HitMtrlParam");
+        BinderFile targetHitMtrl = CreateParamFile(hitMtrlDef, 36,
+            @"N:\FRPG\data\INTERROOT_x64\param\GameParam\HitMtrlParam.param",
+            Row(1, "target-hit", 70), Row(99, "sentinel", 99));
+        BinderFile targetLockCam = CreateParamFile(lockCamDef, 34,
+            @"N:\FRPG\data\INTERROOT_x64\param\GameParam\LOCKCAMPARAM.PARAM",
+            Row(1, "target-lock", 15), Row(99, "sentinel", 99));
+        byte[] targetHitMtrlBytes = targetHitMtrl.Bytes;
+        byte[] targetLockCamBytes = targetLockCam.Bytes;
+        BND3 targetBnd = CreateBinder(targetHitMtrl, targetLockCam);
+
+        GameParamMergeResult result = new GameParamThreeWayMerger().Merge(new GameParamMergeInputs(
+            CreateBinder(CreateParamFile(lockCamDef, 36, "param/LockCamParam.param",
+                Row(1, "base-lock", 10), Row(99, "sentinel", 99))),
+            CreateBinder(CreateParamFile(lockCamDef, 36, @"other\lockcamparam.param",
+                Row(1, "renamed-lock", 10), Row(99, "sentinel", 99))),
+            targetBnd,
+            [lockCamDef, hitMtrlDef]));
+
+        Assert.Equal(0, result.ChangedEntries);
+        Assert.Equal([36, 34], targetBnd.Files.Select(file => file.ID));
+        Assert.Same(targetHitMtrlBytes, targetHitMtrl.Bytes);
+        Assert.Same(targetLockCamBytes, targetLockCam.Bytes);
+        BND3 output = BND3.Read(result.OutputBytes);
+        Assert.Equal([36, 34], output.Files.Select(file => file.ID));
+        Assert.Equal(targetHitMtrlBytes, output.Files[0].Bytes);
+        Assert.Equal(targetLockCamBytes, output.Files[1].Bytes);
+    }
+
+    [Fact]
+    public void Merge_applies_changed_param_by_basename_and_retains_target_entry_metadata()
+    {
+        PARAMDEF lockCamDef = CreateDefinition(paramType: "LockCamParam");
+        PARAMDEF hitMtrlDef = CreateDefinition(paramType: "HitMtrlParam");
+        const string targetLockCamName = @"N:\FRPG\data\INTERROOT_x64\param\GameParam\LockCamParam.param";
+        BinderFile targetLockCam = CreateParamFile(lockCamDef, 34, targetLockCamName,
+            Row(1, "target-lock", 15), Row(99, "sentinel", 99));
+        BinderFile targetHitMtrl = CreateParamFile(hitMtrlDef, 36,
+            @"N:\FRPG\data\INTERROOT_x64\param\GameParam\HitMtrlParam.param",
+            Row(1, "target-hit", 70), Row(99, "sentinel", 99));
+        byte[] targetHitMtrlBytes = targetHitMtrl.Bytes;
+
+        GameParamMergeResult result = new GameParamThreeWayMerger().Merge(new GameParamMergeInputs(
+            CreateBinder(CreateParamFile(lockCamDef, 36, "param/LockCamParam.param",
+                Row(1, "base-lock", 10), Row(99, "sentinel", 99))),
+            CreateBinder(CreateParamFile(lockCamDef, 36, "param/lockcamparam.PARAM",
+                Row(1, "random-lock", 12), Row(99, "sentinel", 99))),
+            CreateBinder(targetLockCam, targetHitMtrl),
+            [lockCamDef, hitMtrlDef]));
+
+        BND3 output = BND3.Read(result.OutputBytes);
+        BinderFile outputLockCam = Assert.Single(output.Files, file => file.ID == 34);
+        Assert.Equal(targetLockCamName, outputLockCam.Name);
+        PARAM lockCam = PARAM.Read(outputLockCam.Bytes);
+        lockCam.ApplyParamdef(lockCamDef);
+        AssertRow(lockCam, 1, "target-lock", 12);
+        Assert.Equal(targetHitMtrlBytes, Assert.Single(output.Files, file => file.ID == 36).Bytes);
+        Assert.Equal(1, result.ChangedEntries);
+        Assert.Equal(1, result.ChangedRows);
+    }
+
+    [Fact]
+    public void Merge_applies_param_addition_and_deletion_by_basename_not_numeric_id()
+    {
+        PARAMDEF def = CreateDefinition();
+        BinderFile retainedSameId = CreateParamFile(def, 41, "param/RetainedParam.param",
+            Row(1, "retained", 71), Row(99, "sentinel", 99));
+        byte[] retainedBytes = retainedSameId.Bytes;
+
+        GameParamMergeResult result = new GameParamThreeWayMerger().Merge(new GameParamMergeInputs(
+            CreateBinder(CreateParamFile(def, 41, "param/DeletedParam.param",
+                Row(1, "base-delete", 10), Row(99, "sentinel", 99))),
+            CreateBinder(CreateParamFile(def, 42, "param/AddedParam.param",
+                Row(2, "random-add", 20), Row(99, "sentinel", 99))),
+            CreateBinder(
+                CreateParamFile(def, 39, @"target\DELETEDPARAM.PARAM",
+                    Row(1, "target-delete", 11), Row(99, "sentinel", 99)),
+                retainedSameId),
+            [def]));
+
+        BND3 output = BND3.Read(result.OutputBytes);
+        Assert.DoesNotContain(output.Files, file =>
+            file.Name!.EndsWith("DeletedParam.param", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(retainedBytes, Assert.Single(output.Files, file => file.ID == 41).Bytes);
+        BinderFile added = Assert.Single(output.Files, file => file.ID == 42);
+        Assert.Equal("param/AddedParam.param", added.Name);
+        PARAM addedParam = PARAM.Read(added.Bytes);
+        addedParam.ApplyParamdef(def);
+        AssertRow(addedParam, 2, "random-add", 20);
+        Assert.Equal(2, result.ChangedEntries);
+    }
+
+    [Fact]
+    public void Merge_rejects_case_insensitive_duplicate_param_basenames_with_different_ids()
+    {
+        PARAMDEF def = CreateDefinition();
+        BND3 duplicateBase = CreateBinder(
+            CreateParamFile(def, 1, @"one\DuplicateParam.param", Row(1, "one", 10)),
+            CreateParamFile(def, 2, "two/duplicateparam.PARAM", Row(1, "two", 20)));
+
+        InvalidDataException exception = Assert.Throws<InvalidDataException>(() =>
+            new GameParamThreeWayMerger().Merge(new GameParamMergeInputs(
+                duplicateBase, CreateBinder(), CreateBinder(), [def])));
+
+        Assert.Contains("duplicate logical PARAM", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -369,18 +480,20 @@ public sealed class GameParamThreeWayMergerTests
     }
 
     [Fact]
-    public void Merge_preserves_target_bnd3_dcx_format_and_actual_41_param_entry_manifest()
+    public void Merge_preserves_target_bnd3_dcx_format_and_actual_cross_numbered_41_param_manifest()
     {
         PARAMDEF def = CreateDefinition();
-        BinderFile[] baseFiles = ActualGameParamManifest
-            .Select(entry => CreateParamFile(def, entry.ID, entry.Name,
+        BinderFile[] baseFiles = ActualOverhaulGameParamManifest
+            .Select(entry => CreateParamFile(def, GetBaseRandomBinderId(entry), entry.Name,
                 Row(1, $"base-{entry.ID}", entry.ID), Row(99, "sentinel", 99)))
             .ToArray();
-        BinderFile[] randomFiles = ActualGameParamManifest
-            .Select(entry => CreateParamFile(def, entry.ID, entry.Name,
-                Row(1, $"random-name-{entry.ID}", entry.ID), Row(99, "sentinel", 99)))
+        BinderFile[] randomFiles = ActualOverhaulGameParamManifest
+            .Select(entry => CreateParamFile(def, GetBaseRandomBinderId(entry), entry.Name,
+                Row(1, $"random-name-{entry.ID}",
+                    entry.ID == 34 ? 434 : entry.ID),
+                Row(99, "sentinel", 99)))
             .ToArray();
-        BinderFile[] targetFiles = ActualGameParamManifest
+        BinderFile[] targetFiles = ActualOverhaulGameParamManifest
             .Select(entry => CreateParamFile(def, entry.ID, entry.Name,
                 Row(1, $"target-{entry.ID}", entry.ID + 100), Row(99, "sentinel", 99)))
             .ToArray();
@@ -396,21 +509,43 @@ public sealed class GameParamThreeWayMergerTests
             targetBnd,
             [def]));
 
-        Assert.Equal(0, result.ChangedEntries);
+        Assert.Equal(1, result.ChangedEntries);
         Assert.True(DCX.Is(result.OutputBytes));
         Assert.True(BND3.Is(result.OutputBytes));
         BND3 output = BND3.Read(result.OutputBytes);
         Assert.Equal(DCX.Type.DCX_DFLT, output.Compression.Type);
         Assert.Equal("TARGET", output.Version);
         Assert.Equal(41, output.Files.Count);
-        Assert.Equal(ActualGameParamManifest.Select(entry => entry.ID), output.Files.Select(file => file.ID));
-        Assert.Equal(ActualGameParamManifest.Select(entry => entry.Name), output.Files.Select(file => file.Name));
+        Assert.Equal(ActualOverhaulGameParamManifest.Select(entry => entry.ID), output.Files.Select(file => file.ID));
+        Assert.Equal(ActualOverhaulGameParamManifest.Select(entry => entry.Name), output.Files.Select(file => file.Name));
         for (int index = 0; index < targetFiles.Length; index++)
         {
-            Assert.Same(targetPayloads[index], targetFiles[index].Bytes);
-            Assert.Equal(targetPayloads[index], output.Files[index].Bytes);
+            if (targetFiles[index].ID == 34)
+            {
+                PARAM lockCam = PARAM.Read(output.Files[index].Bytes);
+                lockCam.ApplyParamdef(def);
+                AssertRow(lockCam, 1, "target-34", 434);
+            }
+            else
+            {
+                Assert.Same(targetPayloads[index], targetFiles[index].Bytes);
+                Assert.Equal(targetPayloads[index], output.Files[index].Bytes);
+            }
         }
     }
+
+    private static int GetBaseRandomBinderId((int ID, string Name) entry) =>
+        Path.GetFileNameWithoutExtension(entry.Name) switch
+        {
+            "LockCamParam" => 36,
+            "ObjActParam" => 37,
+            "HitMtrlParam" => 38,
+            "KnockBackParam" => 39,
+            "LevelSyncParam" => 40,
+            "CoolTimeParam" => 41,
+            "WhiteCoolTimeParam" => 42,
+            _ => entry.ID,
+        };
 
     private static PARAMDEF CreateDefinition(
         string paramType = "TestParam",
