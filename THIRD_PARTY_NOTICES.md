@@ -6,6 +6,10 @@ The launcher uses the .NET runtime and Windows Desktop runtime under the MIT Lic
 
 xUnit, Microsoft.NET.Test.Sdk, and coverlet are development/test dependencies and are not included in the release archive. Their respective license terms remain available from their official package repositories.
 
+SoulsFormatsNEXT, from https://github.com/soulsmods/SoulsFormatsNEXT.git, is used by the managed RMM bridge host from source at commit `55b08a3c02a03777cf19958d8f6aa18d7af59da1`. It is copyright Joseph Anderson and contributors and is licensed under the GNU General Public License, version 3. The complete corresponding source and GPL-3.0 license text are present in `third_party/SoulsFormatsNEXT`.
+
+For the selected `netstandard2.1` target, the pinned SoulsFormatsNEXT restore graph resolves these runtime NuGet dependencies: BouncyCastle.Cryptography 2.4.0, DrSwizzler 1.1.1, System.Text.Encoding.CodePages 4.7.0, System.ValueTuple 4.5.0, and ZstdNet 1.4.5, plus transitive System.Runtime.CompilerServices.Unsafe 4.7.0. Their respective license terms remain available in their NuGet packages and official package repositories.
+
 MinHook v1.3.4, pinned at commit `c3fcafdc10146beb5919319d0683e44e3c30d537`, is used by the native runtime under the BSD 2-Clause License:
 
 Copyright (C) 2009-2017 Tsuda Kageyu. All rights reserved.

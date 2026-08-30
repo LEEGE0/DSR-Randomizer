@@ -12,6 +12,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\DSRRandomizer.Foundation\DSRRandomizer.Foundation.csproj" />
+    <ProjectReference Include="..\..\third_party\SoulsFormatsNEXT\SoulsFormats\SoulsFormats.csproj"
+                      SetTargetFramework="TargetFramework=netstandard2.1" />
   </ItemGroup>
 
 </Project>
