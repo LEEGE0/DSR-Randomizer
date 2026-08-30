@@ -10,15 +10,21 @@ $runtimeId = 'runtime-0123456789abcdef'
 $steamId = '146808034'
 $runtimeRoot = Join-Path $testRoot "runtimes\$runtimeId"
 $componentRoot = Join-Path $testRoot 'components\rmm-bridge'
+$deployedBridge = Join-Path $componentRoot 'DSRRandomizer.RmmBridge.dll'
 $saveRoot = Join-Path $testRoot "saves\$steamId"
 $gamePath = Join-Path $runtimeRoot 'DarkSoulsRemastered.exe'
 $rmmPath = Join-Path $saveRoot 'DRAKS0005.rmm'
+$overhaulSource = Join-Path $runtimeRoot 'overhaul\GameParam.parambnd.dcx'
+$overhaulTarget = Join-Path $componentRoot 'content\overhaul\GameParam.parambnd.dcx'
 
 try {
     $virtualSaveRoot = Join-Path $testRoot "profile\NBGI\DARK SOULS REMASTERED\$steamId"
-    New-Item -ItemType Directory -Path $runtimeRoot,$componentRoot,$saveRoot,(Join-Path $testRoot 'config'),$virtualSaveRoot,(Join-Path $testRoot 'logs') | Out-Null
+    New-Item -ItemType Directory -Path $runtimeRoot,$componentRoot,$saveRoot,(Join-Path $testRoot 'config'),$virtualSaveRoot,(Join-Path $testRoot 'logs'),(Split-Path -Parent $overhaulSource),(Split-Path -Parent $overhaulTarget) | Out-Null
     Copy-Item -LiteralPath $LoaderFixture -Destination $gamePath
     Copy-Item -LiteralPath $HostFixture -Destination (Join-Path $componentRoot 'DSRRandomizer.RmmBridgeHost.exe')
+    Copy-Item -LiteralPath $BridgeDll -Destination $deployedBridge
+    [IO.File]::WriteAllBytes($overhaulSource, [byte[]](0x53, 0x52, 0x43))
+    [IO.File]::WriteAllBytes($overhaulTarget, [byte[]](0x47, 0x45, 0x4e))
 
     $stream = [IO.File]::Open($rmmPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
     try {
@@ -58,7 +64,7 @@ try {
     $start = [Diagnostics.ProcessStartInfo]::new()
     $start.FileName = $gamePath
     $start.UseShellExecute = $false
-    $start.ArgumentList.Add($BridgeDll)
+    $start.ArgumentList.Add($deployedBridge)
     $process = [Diagnostics.Process]::Start($start)
     if (-not $process.WaitForExit(30000)) {
         $process.Kill($true)
