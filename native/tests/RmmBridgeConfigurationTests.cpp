@@ -32,6 +32,8 @@ public:
                                        L"save-metadata.json");
         const auto savePath = Join(Join(Join(kRoot, L"saves"), L"146808034"),
                                    L"DRAKS0005.rmm");
+        hashes[processImage] =
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
         files[pointerPath] =
             R"({"runtimeId":"runtime-a39cb5e0","relativeRuntimePath":"runtimes/runtime-a39cb5e0","manifestSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})";
         files[selectionPath] =
@@ -44,6 +46,7 @@ public:
     }
 
     std::wstring ProcessImagePath() const override { return processImage; }
+    std::wstring ExternalRootPath() const override { return kRoot; }
     std::wstring DocumentsPath() const override { return documents; }
 
     bool ReadBoundedUtf8(const std::wstring& path,
@@ -109,8 +112,40 @@ int main() {
         || valid.value.runtimeId != kRuntimeId
         || valid.value.steamId != L"146808034"
         || valid.value.dedicatedRmm
-            != LR"(D:\DSR MOD\saves\146808034\DRAKS0005.rmm)") {
+            != LR"(D:\DSR MOD\saves\146808034\DRAKS0005.rmm)"
+        || valid.value.overhaulGameParamSource
+            != LR"(D:\DSR MOD\runtimes\runtime-a39cb5e0\overhaul\GameParam.parambnd.dcx)"
+        || valid.value.overhaulGameParamTarget
+            != LR"(D:\DSR MOD\components\rmm-bridge\content\overhaul\GameParam.parambnd.dcx)") {
         return Fail("resolved configuration does not match the canonical layout");
+    }
+
+    FakePlatform hardlinkedRuntime;
+    const auto launchedRuntimeImage = hardlinkedRuntime.processImage;
+    hardlinkedRuntime.processImage =
+        LR"(C:\Program Files (x86)\Steam\steamapps\common\DARK SOULS REMASTERED\DarkSoulsRemastered.exe)";
+    hardlinkedRuntime.canonicalPaths[launchedRuntimeImage] =
+        hardlinkedRuntime.processImage;
+    hardlinkedRuntime.hashes[hardlinkedRuntime.processImage] =
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    const auto hardlinked = ResolveBridgeConfiguration(hardlinkedRuntime);
+    if (!hardlinked.ok || hardlinked.value.externalRoot != kRoot
+        || hardlinked.value.runtimeId != kRuntimeId
+        || hardlinked.value.overhaulGameParamSource
+            != LR"(C:\Program Files (x86)\Steam\steamapps\common\DARK SOULS REMASTERED\overhaul\GameParam.parambnd.dcx)"
+        || hardlinked.value.overhaulGameParamTarget
+            != LR"(D:\DSR MOD\components\rmm-bridge\content\overhaul\GameParam.parambnd.dcx)") {
+        return Fail("hard-linked runtime image did not preserve the live Steam GameParam source");
+    }
+
+    FakePlatform differentGameBinary;
+    differentGameBinary.processImage =
+        LR"(C:\Different Game\DarkSoulsRemastered.exe)";
+    differentGameBinary.hashes[differentGameBinary.processImage] =
+        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    if (ResolveBridgeConfiguration(differentGameBinary).error
+        != BridgeConfigurationError::RuntimeMismatch) {
+        return Fail("different live game binary was not rejected");
     }
 
     FakePlatform wrongExecutable;

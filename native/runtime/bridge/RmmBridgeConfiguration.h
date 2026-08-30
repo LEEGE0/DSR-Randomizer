@@ -42,6 +42,8 @@ struct BridgeConfiguration {
     std::wstring hostExecutable;
     std::string saveIdentity;
     std::string metadataIdentity;
+    std::wstring overhaulGameParamSource;
+    std::wstring overhaulGameParamTarget;
 };
 
 struct BridgeConfigurationResult {
@@ -55,6 +57,7 @@ class BridgeConfigurationPlatform {
 public:
     virtual ~BridgeConfigurationPlatform() = default;
     [[nodiscard]] virtual std::wstring ProcessImagePath() const = 0;
+    [[nodiscard]] virtual std::wstring ExternalRootPath() const = 0;
     [[nodiscard]] virtual std::wstring DocumentsPath() const = 0;
     [[nodiscard]] virtual bool ReadBoundedUtf8(
         const std::wstring& path,

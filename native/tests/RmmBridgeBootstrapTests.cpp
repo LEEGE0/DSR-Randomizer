@@ -5,6 +5,7 @@
 
 #include "bridge/RmmBridgeBootstrap.h"
 #include "bridge/RmmBridgeHostClient.h"
+#include "bridge/WindowsBridgePlatform.h"
 
 namespace {
 
@@ -14,6 +15,7 @@ using DSRRandomizer::Bridge::BridgeConfigurationError;
 using DSRRandomizer::Bridge::BridgeConfigurationResult;
 using DSRRandomizer::Bridge::BootstrapRmmBridge;
 using DSRRandomizer::Bridge::BuildHostCommandLine;
+using DSRRandomizer::Bridge::DeriveExternalRootFromBridgeModulePath;
 using DSRRandomizer::Save::SaveHookConfiguration;
 
 class FakePlatform final : public BridgeBootstrapPlatform {
@@ -32,7 +34,9 @@ public:
                     LR"(D:\root\saves\146808034)",
                     LR"(D:\root\saves\146808034\DRAKS0005.rmm)",
                     LR"(D:\root\components\rmm-bridge\DSRRandomizer.RmmBridgeHost.exe)",
-                    "save-id", "metadata-id"},
+                    "save-id", "metadata-id",
+                    LR"(C:\Steam\DARK SOULS REMASTERED\overhaul\GameParam.parambnd.dcx)",
+                    LR"(D:\root\components\rmm-bridge\content\overhaul\GameParam.parambnd.dcx)"},
                 BridgeConfigurationError::None,
                 L""};
     }
@@ -70,6 +74,14 @@ int Fail(std::string_view message) {
 }  // namespace
 
 int main() {
+    if (DeriveExternalRootFromBridgeModulePath(
+            LR"(D:\root\components\rmm-bridge\DSRRandomizer.RmmBridge.dll)")
+            != LR"(D:\root)"
+        || !DeriveExternalRootFromBridgeModulePath(
+                LR"(D:\root\rmm-bridge\DSRRandomizer.RmmBridge.dll)").empty()) {
+        return Fail("bridge module path did not derive the bounded external root");
+    }
+
     const BridgeConfiguration commandConfiguration{
         LR"(D:\root with spaces\runtimes\runtime-id)", LR"(D:\root with spaces)",
         L"runtime-id", L"146808034", L"", L"", L"", L"", L"",
@@ -96,8 +108,20 @@ int main() {
     if (!success.installedConfiguration.protectFileIo
         || success.installedConfiguration.diagnosticMode
         || success.installedConfiguration.dedicatedRmm
-            != LR"(D:\root\saves\146808034\DRAKS0005.rmm)") {
+            != LR"(D:\root\saves\146808034\DRAKS0005.rmm)"
+        || success.installedConfiguration.overhaulGameParamSource
+            != LR"(C:\Steam\DARK SOULS REMASTERED\overhaul\GameParam.parambnd.dcx)"
+        || success.installedConfiguration.overhaulGameParamTarget
+            != LR"(D:\root\components\rmm-bridge\content\overhaul\GameParam.parambnd.dcx)") {
         return Fail("bootstrap installed the wrong save-hook configuration");
+    }
+
+    const SaveHookConfiguration normalGuardedLaunch{
+        L"virtual-documents", L"virtual-save", L"real-save-root",
+        L"external-save-root", L"dedicated.rmm", true, false};
+    if (!normalGuardedLaunch.overhaulGameParamSource.empty()
+        || !normalGuardedLaunch.overhaulGameParamTarget.empty()) {
+        return Fail("normal guarded launch did not keep GameParam redirect disabled");
     }
 
     FakePlatform hostFailure;

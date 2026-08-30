@@ -33,6 +33,8 @@ BridgeBootstrapResult BootstrapRmmBridge(BridgeBootstrapPlatform& platform) noex
             resolved.value.dedicatedRmm,
             true,
             false,
+            resolved.value.overhaulGameParamSource,
+            resolved.value.overhaulGameParamTarget,
         };
         if (!platform.InstallHooks(hooks, message)) {
             platform.WriteFailureLog(&resolved.value, message);

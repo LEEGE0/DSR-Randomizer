@@ -269,25 +269,24 @@ std::optional<JsonObject> ReadObject(const BridgeConfigurationPlatform& platform
 
 BridgeConfigurationResult ResolveBridgeConfiguration(
     const BridgeConfigurationPlatform& platform) {
-    std::wstring processImage;
-    if (!platform.CanonicalizeExisting(platform.ProcessImagePath(), processImage)) {
-        return Failure(BridgeConfigurationError::ProcessImageInvalid,
-                       L"The live process image could not be resolved.");
-    }
-    processImage = NormalizeSeparators(std::move(processImage));
+    auto processImage = NormalizeSeparators(platform.ProcessImagePath());
     if (!EqualsInsensitive(Leaf(processImage), L"DarkSoulsRemastered.exe")) {
         return Failure(BridgeConfigurationError::ProcessImageInvalid,
                        L"The bridge is not loaded in DarkSoulsRemastered.exe.");
     }
+    std::wstring resolvedProcessImage;
+    if (!platform.CanonicalizeExisting(processImage, resolvedProcessImage)
+        || !EqualsInsensitive(
+            Leaf(NormalizeSeparators(resolvedProcessImage)),
+            L"DarkSoulsRemastered.exe")) {
+        return Failure(BridgeConfigurationError::ProcessImageInvalid,
+                       L"The live process image could not be resolved.");
+    }
 
-    const auto runtimeRoot = Parent(processImage);
-    const auto runtimesRoot = Parent(runtimeRoot);
-    const auto externalRoot = Parent(runtimesRoot);
-    const auto runtimeId = Leaf(runtimeRoot);
-    if (externalRoot.empty() || runtimeId.empty()
-        || !EqualsInsensitive(Leaf(runtimesRoot), L"runtimes")) {
+    const auto externalRoot = NormalizeSeparators(platform.ExternalRootPath());
+    if (externalRoot.empty()) {
         return Failure(BridgeConfigurationError::LayoutInvalid,
-                       L"The copied runtime is not below the external runtimes directory.");
+                       L"The bridge DLL is not below the external components directory.");
     }
 
     const auto pointerPath = Join(externalRoot, L"runtime-current.json");
@@ -309,10 +308,22 @@ BridgeConfigurationResult ResolveBridgeConfiguration(
         return Failure(BridgeConfigurationError::ConfigurationMalformed,
                        L"The active runtime pointer contains invalid values.");
     }
+    const auto runtimeRoot = Join(
+        externalRoot, NormalizeSeparators(*relativeRuntimePath));
+    const auto runtimeId = Leaf(runtimeRoot);
+    const auto configuredProcessImage = Join(runtimeRoot, L"DarkSoulsRemastered.exe");
     std::wstring configuredRuntime;
-    if (!platform.CanonicalizeExisting(
-            Join(externalRoot, NormalizeSeparators(*relativeRuntimePath)), configuredRuntime)
-        || !EqualsInsensitive(NormalizeSeparators(configuredRuntime), runtimeRoot)
+    std::wstring resolvedConfiguredProcessImage;
+    std::string liveProcessHash;
+    std::string configuredProcessHash;
+    if (runtimeId.empty()
+        || !EqualsInsensitive(Leaf(Parent(runtimeRoot)), L"runtimes")
+        || !platform.CanonicalizeExisting(runtimeRoot, configuredRuntime)
+        || !platform.CanonicalizeExisting(
+            configuredProcessImage, resolvedConfiguredProcessImage)
+        || !platform.Sha256File(processImage, liveProcessHash)
+        || !platform.Sha256File(configuredProcessImage, configuredProcessHash)
+        || liveProcessHash != configuredProcessHash
         || !EqualsInsensitive(*configuredRuntimeId, runtimeId)) {
         return Failure(BridgeConfigurationError::RuntimeMismatch,
                        L"The live process does not match the active runtime pointer.");
@@ -391,6 +402,11 @@ BridgeConfigurationResult ResolveBridgeConfiguration(
     const auto hostExecutable = Join(
         Join(Join(externalRoot, L"components"), L"rmm-bridge"),
         L"DSRRandomizer.RmmBridgeHost.exe");
+    const auto overhaulGameParamSource = Join(
+        Parent(processImage), L"overhaul\\GameParam.parambnd.dcx");
+    const auto overhaulGameParamTarget = Join(
+        Join(Join(Join(externalRoot, L"components"), L"rmm-bridge"), L"content"),
+        L"overhaul\\GameParam.parambnd.dcx");
 
     BridgeConfiguration result{
         runtimeRoot,
@@ -405,6 +421,8 @@ BridgeConfigurationResult ResolveBridgeConfiguration(
         hostExecutable,
         actualHash,
         *expectedHash,
+        overhaulGameParamSource,
+        overhaulGameParamTarget,
     };
     return BridgeConfigurationResult{true, std::move(result),
                                      BridgeConfigurationError::None, L""};

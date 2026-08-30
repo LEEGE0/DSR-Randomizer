@@ -38,6 +38,8 @@ struct SaveHookConfiguration {
     std::wstring dedicatedRmm;
     bool protectFileIo;
     bool diagnosticMode;
+    std::wstring overhaulGameParamSource;
+    std::wstring overhaulGameParamTarget;
 };
 
 class HookPlatform {
