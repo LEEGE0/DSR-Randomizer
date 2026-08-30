@@ -72,6 +72,7 @@ public:
 [[nodiscard]] SaveHookCleanupStatus UninstallSaveHooks() noexcept;
 [[nodiscard]] bool SaveHooksAreInstalled() noexcept;
 [[nodiscard]] SaveAuditCounters CurrentSaveAuditCounters() noexcept;
+[[nodiscard]] std::uint64_t CurrentGameParamRedirectCount() noexcept;
 
 namespace Testing {
 
