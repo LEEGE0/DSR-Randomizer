@@ -1,4 +1,5 @@
 using DSRRandomizer.Foundation.Saves;
+using DSRRandomizer.RmmBridgeHost.GameParam;
 
 namespace DSRRandomizer.RmmBridgeHost;
 
@@ -44,6 +45,7 @@ public sealed class DedicatedBridgeSaveSession(DedicatedSaveService service)
 
 public sealed class BridgeSessionCoordinator(
     IBridgeHostPlatform platform,
+    IGameParamPublisher publisher,
     IBridgeSaveSession sessions)
 {
     public async Task<int> RunAsync(
@@ -55,6 +57,15 @@ public sealed class BridgeSessionCoordinator(
         if (!binding.Valid)
         {
             return 10;
+        }
+
+        try
+        {
+            await publisher.PublishAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            return 15;
         }
 
         var prepared = await sessions.PrepareAsync(arguments.SteamId, cancellationToken)

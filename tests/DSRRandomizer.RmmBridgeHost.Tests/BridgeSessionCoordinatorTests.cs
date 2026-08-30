@@ -1,5 +1,6 @@
 using DSRRandomizer.Foundation.Saves;
 using DSRRandomizer.RmmBridgeHost;
+using DSRRandomizer.RmmBridgeHost.GameParam;
 
 namespace DSRRandomizer.RmmBridgeHost.Tests;
 
@@ -11,13 +12,13 @@ public sealed class BridgeSessionCoordinatorTests
         var calls = new List<string>();
         var platform = new FakePlatform(calls) { ExitCode = 0 };
         var sessions = new FakeSessions(calls);
-        var coordinator = new BridgeSessionCoordinator(platform, sessions);
+        var coordinator = new BridgeSessionCoordinator(platform, new FakePublisher(calls), sessions);
 
         var exitCode = await coordinator.RunAsync(Arguments(), CancellationToken.None);
 
         Assert.Equal(0, exitCode);
         Assert.Equal(
-            ["validate", "prepare", "begin", "signal", "wait", "complete:true"],
+            ["validate", "publish", "prepare", "begin", "signal", "wait", "complete:true"],
             calls);
     }
 
@@ -26,7 +27,8 @@ public sealed class BridgeSessionCoordinatorTests
     {
         var calls = new List<string>();
         var platform = new FakePlatform(calls) { BindingValid = false };
-        var coordinator = new BridgeSessionCoordinator(platform, new FakeSessions(calls));
+        var coordinator = new BridgeSessionCoordinator(
+            platform, new FakePublisher(calls), new FakeSessions(calls));
 
         var exitCode = await coordinator.RunAsync(Arguments(), CancellationToken.None);
 
@@ -39,7 +41,8 @@ public sealed class BridgeSessionCoordinatorTests
     {
         var calls = new List<string>();
         var platform = new FakePlatform(calls) { ExitCode = 17 };
-        var coordinator = new BridgeSessionCoordinator(platform, new FakeSessions(calls));
+        var coordinator = new BridgeSessionCoordinator(
+            platform, new FakePublisher(calls), new FakeSessions(calls));
 
         var exitCode = await coordinator.RunAsync(Arguments(), CancellationToken.None);
 
@@ -52,12 +55,27 @@ public sealed class BridgeSessionCoordinatorTests
     {
         var calls = new List<string>();
         var platform = new FakePlatform(calls) { ThrowOnSignal = true };
-        var coordinator = new BridgeSessionCoordinator(platform, new FakeSessions(calls));
+        var coordinator = new BridgeSessionCoordinator(
+            platform, new FakePublisher(calls), new FakeSessions(calls));
 
         var exitCode = await coordinator.RunAsync(Arguments(), CancellationToken.None);
 
         Assert.NotEqual(0, exitCode);
         Assert.Equal("complete:false", calls[^1]);
+    }
+
+    [Fact]
+    public async Task RunAsync_PublicationFailure_ReturnsDistinctCodeBeforeSaveMutationOrReadiness()
+    {
+        var calls = new List<string>();
+        var publisher = new FakePublisher(calls) { Throw = true };
+        var coordinator = new BridgeSessionCoordinator(
+            new FakePlatform(calls), publisher, new FakeSessions(calls));
+
+        var exitCode = await coordinator.RunAsync(Arguments(), CancellationToken.None);
+
+        Assert.Equal(15, exitCode);
+        Assert.Equal(["validate", "publish"], calls);
     }
 
     private static BridgeHostArguments Arguments() => new(
@@ -136,6 +154,19 @@ public sealed class BridgeSessionCoordinatorTests
                 normalGuardedExit, true, @"D:\save.rmm",
                 normalGuardedExit ? SaveErrorCode.None : SaveErrorCode.ExistingSaveInvalid,
                 ""));
+        }
+    }
+
+    private sealed class FakePublisher(List<string> calls) : IGameParamPublisher
+    {
+        public bool Throw { get; init; }
+
+        public Task PublishAsync(CancellationToken cancellationToken)
+        {
+            calls.Add("publish");
+            if (Throw)
+                throw new InvalidDataException("publisher failed");
+            return Task.CompletedTask;
         }
     }
 }

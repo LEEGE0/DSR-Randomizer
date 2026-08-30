@@ -2,6 +2,7 @@ using DSRRandomizer.Foundation.Installation;
 using DSRRandomizer.Foundation.Paths;
 using DSRRandomizer.Foundation.Saves;
 using DSRRandomizer.RmmBridgeHost;
+using DSRRandomizer.RmmBridgeHost.GameParam;
 
 try
 {
@@ -21,10 +22,18 @@ try
         new SystemFileAccess());
     var coordinator = new BridgeSessionCoordinator(
         new WindowsBridgeHostPlatform(),
+        new GameParamPublisher(
+            new GameParamThreeWayMerger(),
+            new GameParamSourceResolver(canonicalizer),
+            arguments.ExternalRoot,
+            arguments.RuntimeId,
+            sourceInstallation,
+            entry => BridgeHostFailureLog.WriteGameParamEvent(arguments.ExternalRoot, entry)),
         new DedicatedBridgeSaveSession(service));
     return await coordinator.RunAsync(arguments, CancellationToken.None);
 }
-catch
+catch (Exception exception)
 {
+    BridgeHostFailureLog.Write(args, exception);
     return 20;
 }
