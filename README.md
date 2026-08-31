@@ -6,7 +6,7 @@ DSR for MOD creates an isolated Dark Souls Remastered mod runtime beneath a reci
 
 ## Redistribution boundary
 
-The release ZIP contains exactly 12 allowlisted paths: the project launcher; native offline/save guard and checksum; pinned compatibility profile; project-owned RMM bridge DLL and self-contained bridge host; a strict bridge deployment manifest; and the license, notices, changelog, overview, and Korean guide. Package validation rejects any extra or missing path and any mismatched pinned artifact.
+The binary release ZIP contains exactly 12 allowlisted paths: the project launcher; native offline/save guard and checksum; pinned compatibility profile; project-owned RMM bridge DLL and self-contained bridge host; a strict bridge deployment manifest; and the license, notices, changelog, overview, and Korean guide. Package validation rejects any extra or missing path and any mismatched pinned artifact. A separate deterministic `DSR-for-MOD-v0.1.0-alpha.2-source.zip` contains the committed corresponding source, including the actual pinned SoulsFormatsNEXT tree.
 
 The archive does **not** contain, download, or install:
 
@@ -42,7 +42,7 @@ DSRForMod.Launcher.exe --validate-package <directory>
 
 ## Release verification
 
-The `0.1.0-alpha.2` release path builds in unique, reparse-safe work directories, cleans only verified work descendants, validates staging and a fresh ZIP extraction, and emits a SHA-256 sidecar. The bridge-host Release publish omits debug records so a local build path is not embedded in the shipped executable. The final gate covers 436 managed tests and 15 native tests. Native integration uses a distinct test-only callsite profile; production pinned executable verification remains strict. Generated archives and checksums remain build artifacts and are not source-controlled.
+The `0.1.0-alpha.2` release path builds in unique, reparse-safe work directories, cleans only verified work descendants, validates staging and a fresh binary-ZIP extraction, and emits SHA-256 sidecars for the binary and source archives. The source archive is generated from committed `HEAD`, overlays the exact pinned submodule contents, uses sorted fixed-timestamp entries, and excludes Git metadata, build outputs, artifacts, and private working data. The Release host contains no private absolute PDB path. Its parsed .NET v6 bundle manifest and embedded dependency manifest contain neither DrSwizzler nor BouncyCastle; the retained ZstdNet/libzstd notices are reproduced in full. The final gate covers 438 managed tests and 15 native tests. Native integration uses a distinct test-only callsite profile; production pinned executable verification remains strict. Generated archives and checksums remain build artifacts and are not source-controlled.
 
 ## License
 
@@ -50,4 +50,4 @@ SPDX-License-Identifier: GPL-3.0-only
 
 Copyright (C) 2026 DSR for MOD contributors.
 
-Dark Souls and Dark Souls Remastered are trademarks of their respective owners. See [`LICENSE`](LICENSE) and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). Binary redistribution must also satisfy the corresponding-source obligations described in the notices.
+Dark Souls and Dark Souls Remastered are trademarks of their respective owners. See [`LICENSE`](LICENSE) and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). Convey the binary ZIP/checksum together with the exact source ZIP/checksum, or provide equivalent same-place gratis source access, unless another GPL-3.0-compliant distribution method is used.

@@ -16,7 +16,7 @@
 
 - Never write to the Steam installation, normal/Overhaul save roots, or the enemy-randomizer directory.
 - All generated/staging/log output must remain under the recipient-selected `<external-root>`.
-- Preserve the existing enemy-randomizer `Launch DS1` workflow and dedicated `.rmm` save isolation.
+- Preserve dedicated `.rmm` save isolation. Enemy Randomizer only prepares the copied runtime; the user then closes it, returns to DSR for MOD, and uses `Launch modded copy` rather than Enemy Randomizer's `Launch DS1`.
 - Use the active Steam Overhaul binder as a read-only merge target; use the enemy-randomizer bundled vanilla binder as the base and its final binder as the randomizer side.
 - Resolve exactly one `DS1EnemyRandomizer` directory below the active runtime `Mods`; ambiguity fails closed.
 - Perform functional three-way merge by binder entry and PARAM row ID. Randomizer row additions/changes/deletions win; unchanged randomizer rows preserve Overhaul state.

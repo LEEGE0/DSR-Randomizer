@@ -421,7 +421,7 @@
 
 **Interfaces:**
 - Consumes: complete bridge implementation and local deployment.
-- Produces: evidence-backed handoff for the user's one manual Steam Offline Mode `Launch DS1` smoke test.
+- Produces: evidence-backed handoff for one manual Steam Offline Mode smoke test in which Enemy Randomizer prepares the copied runtime, then the user returns to DSR for MOD and selects `Launch modded copy`.
 
 - [ ] **Step 1: Run clean-tree and artifact audit**
 

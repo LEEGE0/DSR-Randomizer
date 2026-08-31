@@ -10,7 +10,7 @@ Produce a redistributable Windows x64 ZIP that lets another Steam owner set up D
 
 ## Chosen Distribution Model
 
-The release bundles only project-owned or already-compliance-reviewed artifacts:
+The binary release bundles only project-owned or already-compliance-reviewed artifacts:
 
 - `DSRForMod.Launcher.exe`
 - the native offline/save guard and its SHA-256 sidecar
@@ -23,6 +23,8 @@ The release bundles only project-owned or already-compliance-reviewed artifacts:
 Recipients must own Dark Souls Remastered on Steam and obtain the Item Randomizer and Enemy Randomizer from their official distribution pages. The Enemy Randomizer download remains intact and supplies its compatible Mod Engine fork and `DS1HeapPatch.dll`.
 
 The release must not download, mirror, extract, or redistribute those third-party programs. This is required because the Enemy Randomizer explicitly forbids re-uploading, the Item Randomizer repository has no explicit redistribution grant, and the exact compatible Mod Engine/heap-patch binaries are distributed as part of the Enemy Randomizer package.
+
+The binary bridge host compiles a project-owned subset of SoulsFormatsNEXT commit `55b08a3c02a03777cf19958d8f6aa18d7af59da1`. Modified by DSR for MOD on 2026-09-01 to omit TPF/DrSwizzler support for the bridge-host build. The subset also avoids the unused BouncyCastle runtime, retains BND3/PARAM/DCX_DFLT and required Zstd support, and leaves the pinned upstream checkout clean. Release tests parse the .NET v6 single-file bundle manifest and embedded deps JSON to prove both excluded dependencies are absent.
 
 ## Exact Package Layout
 
@@ -44,6 +46,19 @@ components/rmm-bridge/deployment-manifest.json
 ```
 
 No PDB is included. No additional path is accepted by package validation.
+
+## Corresponding-Source Archive
+
+The exact 12-path binary layout remains unchanged. The official build also emits:
+
+```text
+DSR-for-MOD-v0.1.0-alpha.2-source.zip
+DSR-for-MOD-v0.1.0-alpha.2-source.zip.sha256
+```
+
+The source archive is generated from committed `HEAD`, then overlays the actual pinned SoulsFormatsNEXT commit contents rather than a gitlink alone. It uses one versioned root prefix, ordinally sorted unique entries, and a fixed 1980 timestamp. It contains the main solution, subset project and modification notice, build/release scripts, project license files, and complete pinned SoulsFormatsNEXT source/license. It excludes `.git`, `bin`, `obj`, `artifacts`, `.superpowers`, private/generated working data, traversal, rooted paths, aliases, and duplicates.
+
+The binary ZIP/checksum must be conveyed with this exact source ZIP/checksum, or equivalent same-place gratis access to the exact source must be maintained under GPL-3.0. A tracked document must not embed the source ZIP's own hash because that would make the archive identity self-referential.
 
 The bridge manifest uses UTF-8 without a byte-order mark and this schema:
 
@@ -179,6 +194,9 @@ A release is deliverable only after fresh evidence for all of the following:
 - the published package validator accepts the staged directory and the freshly extracted ZIP.
 - ZIP inspection confirms the exact allowlist and no local game/personal artifacts.
 - the SHA-256 sidecar matches a fresh hash of the final ZIP.
+- the official host's parsed .NET v6 bundle manifest and embedded deps JSON contain neither DrSwizzler nor BouncyCastle, while every retained non-runtime dependency has a complete shipped notice.
+- the source archive has deterministic safe entries, contains the committed project and actual pinned SoulsFormatsNEXT contents, excludes repository/build/private state, and its checksum matches.
+- the extracted source can restore and build the bridge-host project.
 
 If any verification is red, the release must be reported as incomplete; no “all tests pass” claim is allowed.
 
@@ -189,6 +207,8 @@ The first completed redistributable revision uses version `0.1.0-alpha.2` and pr
 ```text
 artifacts/DSR-for-MOD-v0.1.0-alpha.2-win-x64.zip
 artifacts/DSR-for-MOD-v0.1.0-alpha.2-win-x64.zip.sha256
+artifacts/DSR-for-MOD-v0.1.0-alpha.2-source.zip
+artifacts/DSR-for-MOD-v0.1.0-alpha.2-source.zip.sha256
 ```
 
 The worktree's pre-existing modifications remain part of the feature branch. No reset, checkout-based rollback, bulk deletion, or copying from a private local runtime is permitted.

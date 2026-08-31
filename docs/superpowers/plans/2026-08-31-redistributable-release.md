@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build and verify `DSR-for-MOD-v0.1.0-alpha.2-win-x64.zip` containing the project-owned launcher, guard, RMM bridge, bridge host, notices, and Korean installation guide without game files, personal data, or third-party randomizer executables.
+**Goal:** Build and verify the exact 12-path `DSR-for-MOD-v0.1.0-alpha.2-win-x64.zip` plus its deterministic corresponding-source ZIP, containing the project-owned launcher, guard, RMM bridge, bridge host, notices, Korean installation guide, and GPL-required committed source without game files, personal data, or third-party randomizer executables.
 
-**Architecture:** The official publish pins the guard, compatibility profile, bridge DLL, and self-contained bridge host identities into the launcher. A focused installer copies the packaged bridge pair into a selected external root and verifies it before launch. An exact allowlist, deterministic ZIP builder, extracted-ZIP revalidation, and clean-root tests enforce the redistribution boundary.
+**Architecture:** The official publish pins the guard, compatibility profile, bridge DLL, and self-contained bridge host identities into the launcher. A focused installer copies the packaged bridge pair into a selected external root and verifies it before launch. An exact allowlist, deterministic binary ZIP builder, extracted-ZIP revalidation, and clean-root tests enforce the executable boundary. A second deterministic builder archives committed `HEAD` plus the actual pinned SoulsFormatsNEXT tree and excludes repository/build/private state.
 
 **Tech Stack:** .NET 8 / C# / WPF / xUnit, C++20 / CMake / CTest, PowerShell 7, Windows x64
 
@@ -18,8 +18,8 @@
 - Package exactly the 12 paths listed in the spec; PDB files are prohibited.
 - Production pinned executable verification must not gain an environment, command-line, or external-file bypass.
 - Bridge installation must not require a runtime pointer, save/profile state, Steam ID, or third-party randomizer installation.
-- Use version `0.1.0-alpha.2` and output `artifacts/DSR-for-MOD-v0.1.0-alpha.2-win-x64.zip` plus `.sha256`.
-- Do not claim full success unless all 435 managed tests, all 15 native tests, clean-root tests, staged-package validation, extracted-ZIP validation, privacy scan, and checksum verification pass freshly.
+- Use version `0.1.0-alpha.2` and output binary and source ZIPs under `artifacts`, each with a matching `.sha256`.
+- Do not claim full success unless all 438 managed tests, all 15 native tests, clean-root tests, staged-package validation, extracted binary/source validation, privacy scan, dependency/notice compliance, extracted-source build, and both checksum verifications pass freshly.
 
 ---
 
@@ -396,10 +396,12 @@ git commit -m "build: package verified redistributable release"
 - Modify: `HANDOFF_DISTRIBUTION_2026-08-31.md`
 - Output: `artifacts/DSR-for-MOD-v0.1.0-alpha.2-win-x64.zip`
 - Output: `artifacts/DSR-for-MOD-v0.1.0-alpha.2-win-x64.zip.sha256`
+- Output: `artifacts/DSR-for-MOD-v0.1.0-alpha.2-source.zip`
+- Output: `artifacts/DSR-for-MOD-v0.1.0-alpha.2-source.zip.sha256`
 
 **Interfaces:**
 - Consumes: official Item/Enemy Randomizer URLs and the verified pipeline from Task 5.
-- Produces: recipient-facing Korean setup instructions, truthful release notes, final ZIP, and matching checksum.
+- Produces: recipient-facing Korean setup instructions, truthful release notes, exact binary/source ZIP pair, and matching checksums.
 
 - [ ] **Step 1: Write the Korean installation guide with official sources and exact exclusions**
 
@@ -414,7 +416,7 @@ State that neither tool, the Enemy Randomizer's Mod Engine fork, nor `DS1HeapPat
 
 - [ ] **Step 2: Update notices, README, changelog, and handoff truthfully**
 
-Document the bundled project-owned bridge/host and SoulsFormatsNEXT obligations. Record `0.1.0-alpha.2`, bridge auto-install/verification, third-party user-supply boundary, clean-root verification, and native test fixture repair. Do not state that the ZIP includes or installs third-party tools.
+Document the bundled project-owned bridge/host, the dated TPF/DrSwizzler exclusion, the absence of the unused BouncyCastle runtime, complete ZstdNet/libzstd notices, and SoulsFormatsNEXT obligations. Record `0.1.0-alpha.2`, bridge auto-install/verification, third-party user-supply boundary, clean-root verification, and native test fixture repair. Do not state that the binary ZIP includes or installs recipient-supplied third-party tools.
 
 - [ ] **Step 3: Run documentation and privacy preflight**
 
@@ -434,11 +436,11 @@ Expected: no personal path/ID matches, no placeholders, and no whitespace errors
 pwsh -NoProfile -File packaging/build-release.ps1 -Version 0.1.0-alpha.2 -OutputPath artifacts
 ```
 
-Expected: the exact ZIP and `.sha256` paths from the spec.
+Expected: the exact binary/source ZIP and `.sha256` paths from the spec.
 
 - [ ] **Step 5: Independently inspect the final ZIP and checksum**
 
-List every ZIP entry and compare it byte-for-byte with the 12-path allowlist. Extract to a new temporary directory, run the packaged launcher `--validate-package`, and scan all extracted bytes for the out-of-band private-root, private-worktree, and Steam-ID sentinels. Recompute the ZIP SHA-256 and compare it with the sidecar.
+List every binary ZIP entry and compare it byte-for-byte with the 12-path allowlist. Extract to a new temporary directory, run the packaged launcher `--validate-package`, parse the official host's .NET v6 bundle manifest and embedded deps JSON, verify bundled dependencies have complete notices, and scan all extracted bytes for the out-of-band private-root, private-worktree, and Steam-ID sentinels. Independently inspect the source ZIP for a single prefix, sorted unique safe paths, fixed timestamps, committed subset/main solution/build scripts, full pinned SoulsFormatsNEXT source/license, and absence of Git/build/artifact/private state. Extract it and restore/build the bridge host. Recompute both ZIP SHA-256 values and compare them with their sidecars.
 
 - [ ] **Step 6: Run the final full verification gate**
 
@@ -447,7 +449,7 @@ dotnet test DSR-Randomizer.sln -c Release --no-restore
 pwsh -NoProfile -File scripts/build-native.ps1 -Configuration Release -Test
 ```
 
-Expected: 435/435 managed tests and 15/15 native tests pass, plus successful package and checksum checks from Steps 4-5.
+Expected: 438/438 managed tests and 15/15 native tests pass, plus successful binary/source package and checksum checks from Steps 4-5.
 
 - [ ] **Step 7: Commit documentation and release metadata without committing generated ZIPs unless repository policy already tracks them**
 

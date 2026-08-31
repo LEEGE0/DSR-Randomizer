@@ -10,6 +10,7 @@ All notable changes to DSR Randomizer are documented here.
 - Recipient-controlled bridge installation beneath the selected external root, with strict four-property manifest validation, embedded SHA-256 identities, safe replacement, final re-verification, and matching no-op behavior.
 - Korean recipient guide covering official third-party download sources, the copied-runtime layout, Steam Offline Mode, save isolation, validation, rollback, and redistribution exclusions.
 - Exact 12-path package allowlist, staged and freshly extracted package validation, deterministic ZIP construction, and SHA-256 sidecar generation.
+- Deterministic corresponding-source ZIP and checksum containing the committed project tree plus the actual pinned SoulsFormatsNEXT contents.
 
 ### Changed
 
@@ -17,13 +18,13 @@ All notable changes to DSR Randomizer are documented here.
 - Item Randomizer, Enemy Randomizer, the Enemy package's compatible Mod Engine fork, and `DS1HeapPatch.dll` remain recipient-supplied and are neither bundled nor installed by this release.
 - The native integration fixture now uses a separate test-only callsite profile while production pinned executable verification remains unchanged.
 - The release builder uses unique fail-if-exists work, staging, and extraction directories; rejects reparse/alias escapes; cleans only verified descendants; and preserves final ZIP/checksum outputs on successful cleanup.
-- The bridge-host Release publish omits debug symbols after the byte-level privacy gate detected and rejected an embedded local PDB path.
-- SoulsFormatsNEXT licensing and complete-corresponding-source obligations are documented for the bundled bridge host.
+- The bridge-host Release publish contains no private absolute PDB path after the byte-level privacy gate rejected an earlier local-path disclosure.
+- The project-owned SoulsFormats subset omits TPF/DrSwizzler support and the unused BouncyCastle runtime while retaining the BND3/PARAM/DCX merge path; full ZstdNet/libzstd notices and SoulsFormatsNEXT corresponding-source obligations are included.
 
 ### Verification
 
-- 436/436 managed Release tests and 15/15 native Release tests pass.
-- Clean-root bridge installation, tamper repair, extracted-ZIP validation, strict manifest/hash validation, prohibited-content scans, exact-entry inspection, and checksum recomputation are part of the release gate.
+- 438/438 managed Release tests and 15/15 native Release tests pass.
+- Clean-root bridge installation, tamper repair, extracted-binary-ZIP validation, parsed host bundle/dependency inspection, deterministic source-archive validation, strict manifest/hash validation, prohibited-content scans, exact-entry inspection, and checksum recomputation are part of the release gate.
 
 ## [0.1.0-alpha.1] - 2026-08-24
 

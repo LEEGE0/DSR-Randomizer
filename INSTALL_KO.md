@@ -1,6 +1,6 @@
 # DSR for MOD v0.1.0-alpha.2 설치 안내
 
-이 문서는 배포 ZIP을 받은 사람이 자신의 Steam 정품 Dark Souls Remastered와 자신이 직접 받은 Randomizer를 사용해 별도의 모드 런타임을 만드는 절차입니다.
+이 문서는 배포 ZIP을 받은 사람이 자신의 Steam 정품 Dark Souls Remastered와 자신이 직접 받은 Randomizer를 사용해 별도의 모드 런타임을 만드는 절차입니다. 배포자는 12경로 바이너리 ZIP/체크섬과 함께 같은 버전의 `-source.zip`/체크섬도 제공해야 합니다. 소스 ZIP은 GPL corresponding source이며 런처 실행을 위해 풀 필요는 없습니다.
 
 ## 이 ZIP에 포함된 것과 포함되지 않은 것
 
@@ -25,11 +25,13 @@ Enemy Randomizer 압축은 받은 구조 그대로 보관하십시오. 그 패�
 1. Windows x64 PC에서 Steam 정품 Dark Souls Remastered를 설치하고 Steam의 파일 무결성 검사를 완료합니다.
 2. 게임 복사본을 둘 새 로컬 폴더를 만듭니다. 이 폴더가 `<external-root>`이며, Steam 설치 폴더와 서로 겹치지 않아야 합니다. 네트워크/UNC 경로, 심볼릭 링크, 정션, 재분석 지점은 사용하지 마십시오.
 3. `<external-root>`에는 약 9 GB 이상의 여유 공간을 준비합니다. 세이브, 로그, 생성 결과도 모두 이 루트 아래에 쌓입니다.
-4. 배포 ZIP과 같은 위치의 `.sha256` 파일이 있다면 압축을 풀기 전에 PowerShell에서 해시를 비교합니다.
+4. 바이너리 ZIP과 소스 ZIP 각각에 같은 위치의 `.sha256` 파일이 있어야 합니다. 압축을 풀기 전에 PowerShell에서 두 해시를 비교합니다.
 
    ```powershell
    Get-FileHash .\DSR-for-MOD-v0.1.0-alpha.2-win-x64.zip -Algorithm SHA256
    Get-Content .\DSR-for-MOD-v0.1.0-alpha.2-win-x64.zip.sha256
+   Get-FileHash .\DSR-for-MOD-v0.1.0-alpha.2-source.zip -Algorithm SHA256
+   Get-Content .\DSR-for-MOD-v0.1.0-alpha.2-source.zip.sha256
    ```
 
 ## 런처와 복사 런타임 초기화
@@ -126,4 +128,4 @@ Steam의 Dark Souls Remastered 설치 폴더와 정상 세이브 폴더는 제�
 - `DarkSoulsRemastered.exe`와 Steam 게임 데이터/에셋, 복사 런타임 전체
 - Item Randomizer, Enemy Randomizer, 호환 Mod Engine 포크, `DS1HeapPatch.dll`
 
-공유할 수 있는 것은 프로젝트가 만든 원본 배포 ZIP과 그 체크섬뿐입니다. 자신의 외부 루트나 초기화된 런타임을 다시 압축해 전달하지 마십시오.
+공유할 수 있는 것은 프로젝트가 만든 원본 바이너리 ZIP/체크섬과 그 바이너리에 대응하는 정확한 소스 ZIP/체크섬뿐입니다. 바이너리는 이 소스 묶음과 함께 전달하거나 GPL이 허용하는 동일 장소의 무료 소스 제공 방법을 갖춰야 합니다. 자신의 외부 루트나 초기화된 런타임을 다시 압축해 전달하지 마십시오.
