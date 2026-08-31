@@ -60,4 +60,31 @@ function Resolve-RmmBridgeDeploymentSaveState {
     }
 }
 
-Export-ModuleMember -Function Read-StrictJson, Read-SaveMetadataState, Resolve-RmmBridgeDeploymentSaveState
+function New-RmmBridgeDeploymentManifest {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Debug', 'Release')]
+        [string]$Configuration,
+
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[0-9a-f]{64}$')]
+        [string]$BridgeSha256,
+
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[0-9a-f]{64}$')]
+        [string]$HostSha256
+    )
+
+    [ordered]@{
+        schemaVersion = 1
+        configuration = $Configuration
+        bridgeSha256 = $BridgeSha256
+        hostSha256 = $HostSha256
+    } | ConvertTo-Json -Compress
+}
+
+Export-ModuleMember -Function `
+    Read-StrictJson, `
+    Read-SaveMetadataState, `
+    Resolve-RmmBridgeDeploymentSaveState, `
+    New-RmmBridgeDeploymentManifest

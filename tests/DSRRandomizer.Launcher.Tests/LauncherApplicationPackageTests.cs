@@ -207,7 +207,7 @@ public sealed class LauncherApplicationPackageTests : IDisposable
         await CreateCompletePackageAsync();
         await File.WriteAllTextAsync(
             PackagePath("components/rmm-bridge/deployment-manifest.json"),
-            "{\"schemaVersion\":1,\"configuration\":\"Release\",\"runtimeId\":\"win-x64\",\"bridgeSha256\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"hostSha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"}");
+            "{\"schemaVersion\":1,\"configuration\":\"Release\",\"bridgeSha256\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"hostSha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"}");
 
         var (exitCode, output) = await ValidatePackageAsync();
 

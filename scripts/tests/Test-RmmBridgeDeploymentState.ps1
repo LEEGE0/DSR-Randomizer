@@ -75,6 +75,23 @@ try {
         Resolve-RmmBridgeDeploymentSaveState `
             -RmmPath $rmmPath -MetadataPath $metadataPath -SteamId '100000001'
     }
+
+    # Production break: a deployment producer adds runtime-specific state and
+    # no longer satisfies the exact redistributable four-property schema.
+    $manifest = New-RmmBridgeDeploymentManifest `
+        -Configuration Release `
+        -BridgeSha256 ('a' * 64) `
+        -HostSha256 ('b' * 64)
+    $manifestObject = $manifest | ConvertFrom-Json
+    $propertyNames = @($manifestObject.PSObject.Properties.Name)
+    if (($propertyNames -join ',') -cne
+        'schemaVersion,configuration,bridgeSha256,hostSha256' `
+        -or $manifestObject.schemaVersion -ne 1 `
+        -or [string]$manifestObject.configuration -cne 'Release' `
+        -or [string]$manifestObject.bridgeSha256 -cne ('a' * 64) `
+        -or [string]$manifestObject.hostSha256 -cne ('b' * 64)) {
+        throw 'The deployment manifest does not match the exact four-property schema.'
+    }
 }
 finally {
     if (Test-Path -LiteralPath $testRoot) {

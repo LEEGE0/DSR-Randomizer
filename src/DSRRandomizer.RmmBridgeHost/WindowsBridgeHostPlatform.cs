@@ -23,9 +23,7 @@ public sealed class WindowsBridgeHostPlatform : IBridgeHostPlatform
                 ?? throw new InvalidOperationException("The game image path is unavailable.");
             var expectedImage = Path.Combine(
                 externalRoot, "runtimes", arguments.RuntimeId, "DarkSoulsRemastered.exe");
-            if (!_canonicalizer.Canonicalize(imagePath).Equals(
-                    _canonicalizer.Canonicalize(expectedImage),
-                    StringComparison.OrdinalIgnoreCase))
+            if (!FileContentIdentity.AreEqual(imagePath, expectedImage))
             {
                 return BridgeBindingResult.Failure("The live process is not the selected copied runtime.");
             }
@@ -40,7 +38,7 @@ public sealed class WindowsBridgeHostPlatform : IBridgeHostPlatform
             if (!runtimeDocument.RootElement.GetProperty("runtimeId").GetString()!
                     .Equals(arguments.RuntimeId, StringComparison.Ordinal)
                 || !_canonicalizer.Canonicalize(runtimeRoot).Equals(
-                    Path.GetDirectoryName(_canonicalizer.Canonicalize(expectedImage)),
+                    _canonicalizer.Canonicalize(Path.GetDirectoryName(expectedImage)!),
                     StringComparison.OrdinalIgnoreCase))
             {
                 return BridgeBindingResult.Failure("The runtime pointer does not match the game process.");

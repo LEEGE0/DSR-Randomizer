@@ -1,18 +1,39 @@
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Package')]
 param(
-    [Parameter(Mandatory = $true)]
-    [ValidatePattern('^[0-9A-Za-z][0-9A-Za-z.-]*$')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'Package')]
+    [ValidatePattern('^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?$')]
     [string]$Version,
 
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $true, ParameterSetName = 'Package')]
     [string]$PublishPath,
 
-    [Parameter(Mandatory = $true)]
-    [string]$OutputPath
+    [Parameter(Mandatory = $true, ParameterSetName = 'Package')]
+    [string]$DependencyManifestPath,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'Package')]
+    [string]$OutputPath,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'ValidateArchive')]
+    [string]$ValidateArchivePath
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+$ExpectedPackagePaths = @(
+    'CHANGELOG.md',
+    'DSRForMod.Launcher.exe',
+    'INSTALL_KO.md',
+    'LICENSE',
+    'README.md',
+    'THIRD_PARTY_NOTICES.md',
+    'components/rmm-bridge/DSRRandomizer.RmmBridge.dll',
+    'components/rmm-bridge/DSRRandomizer.RmmBridgeHost.exe',
+    'components/rmm-bridge/deployment-manifest.json',
+    'config/compatibility-profiles.json',
+    'native/DSRRandomizer.Runtime.dll',
+    'native/DSRRandomizer.Runtime.dll.sha256'
+)
 
 function Assert-StrictDescendant {
     param(
@@ -26,6 +47,101 @@ function Assert-StrictDescendant {
         $normalizedRoot + [IO.Path]::DirectorySeparatorChar,
         [StringComparison]::OrdinalIgnoreCase)) {
         throw "Package path escaped the output root: $normalizedCandidate"
+    }
+}
+
+function Remove-ValidatedPackageDirectory {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$OutputRoot,
+        [Parameter(Mandatory = $true)][string]$RequiredLeafPrefix
+    )
+
+    Assert-StrictDescendant -Candidate $Path -Root $OutputRoot
+    $leaf = [IO.Path]::GetFileName([IO.Path]::TrimEndingDirectorySeparator($Path))
+    if (-not $leaf.StartsWith($RequiredLeafPrefix, [StringComparison]::Ordinal)) {
+        throw "Refusing to clean an unexpected package directory: $Path"
+    }
+    if (Test-Path -LiteralPath $Path) {
+        Remove-Item -LiteralPath $Path -Recurse -Force
+    }
+}
+
+function Assert-ExactFileSet {
+    param([Parameter(Mandatory = $true)][string]$Root)
+
+    $actual = @(Get-ChildItem -LiteralPath $Root -File -Recurse | ForEach-Object {
+        [IO.Path]::GetRelativePath($Root, $_.FullName).Replace('\', '/')
+    })
+    $actualSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($path in $actual) {
+        if (-not $actualSet.Add($path)) {
+            throw "The staged package contains a duplicate path: $path"
+        }
+    }
+    $expectedSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($path in $ExpectedPackagePaths) {
+        $expectedSet.Add($path) | Out-Null
+    }
+    if (-not $actualSet.SetEquals($expectedSet)) {
+        $unexpected = @($actual | Where-Object { -not $expectedSet.Contains($_) })
+        $missing = @($ExpectedPackagePaths | Where-Object { -not $actualSet.Contains($_) })
+        throw "The staged package does not match the exact allowlist. Unexpected=[$($unexpected -join ',')] Missing=[$($missing -join ',')]"
+    }
+}
+
+function Assert-ReleaseArchiveEntries {
+    param([Parameter(Mandatory = $true)][string]$ArchivePath)
+
+    Add-Type -AssemblyName System.IO.Compression
+    $resolvedArchive = (Resolve-Path -LiteralPath $ArchivePath).Path
+    $stream = [IO.File]::Open(
+        $resolvedArchive,
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::Read,
+        [IO.FileShare]::Read)
+    try {
+        $archive = [IO.Compression.ZipArchive]::new(
+            $stream,
+            [IO.Compression.ZipArchiveMode]::Read,
+            $true)
+        try {
+            $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+            $names = [Collections.Generic.List[string]]::new()
+            foreach ($entry in $archive.Entries) {
+                $entryName = [string]$entry.FullName
+                $segments = $entryName.Split(
+                    [char[]]@('/'),
+                    [StringSplitOptions]::None)
+                $hasUnsafeSegment = @($segments | Where-Object {
+                    [string]::IsNullOrEmpty($_) -or $_ -ceq '.' -or $_ -ceq '..'
+                }).Count -ne 0
+                $unsafe = [string]::IsNullOrWhiteSpace($entryName) `
+                    -or $entryName.Contains('\', [StringComparison]::Ordinal) `
+                    -or $entryName.StartsWith('/', [StringComparison]::Ordinal) `
+                    -or [IO.Path]::IsPathRooted($entryName) `
+                    -or $hasUnsafeSegment
+                if ($unsafe -or -not $seen.Add($entryName)) {
+                    throw "Release archive entry validation failed: $entryName"
+                }
+                $names.Add($entryName)
+            }
+
+            if ($names.Count -ne $ExpectedPackagePaths.Count) {
+                throw 'Release archive entry validation failed: entry count does not match the allowlist.'
+            }
+            for ($index = 0; $index -lt $ExpectedPackagePaths.Count; $index++) {
+                if ($names[$index] -cne $ExpectedPackagePaths[$index]) {
+                    throw "Release archive entry validation failed: unexpected or unsorted entry $($names[$index])"
+                }
+            }
+        }
+        finally {
+            $archive.Dispose()
+        }
+    }
+    finally {
+        $stream.Dispose()
     }
 }
 
@@ -57,79 +173,109 @@ function Get-RuntimePackage {
         Where-Object { $_ -like "runtimepack.$PackageName/*" } |
         Select-Object -First 1
     if ([string]::IsNullOrWhiteSpace($library)) {
-        throw "Runtime package is missing from the publish dependency manifest: $PackageName"
+        throw "Runtime package is missing from the supplied dependency manifest: $PackageName"
     }
     $library.Substring('runtimepack.'.Length).Split('/', 2)
 }
 
+if ($PSCmdlet.ParameterSetName -eq 'ValidateArchive') {
+    Assert-ReleaseArchiveEntries -ArchivePath $ValidateArchivePath
+    Write-Output "Validated release archive entries: $ValidateArchivePath"
+    return
+}
+
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $publishRoot = (Resolve-Path -LiteralPath $PublishPath).Path
+$dependencyManifest = (Resolve-Path -LiteralPath $DependencyManifestPath).Path
 $outputRoot = [IO.Path]::GetFullPath($OutputPath)
 [IO.Directory]::CreateDirectory($outputRoot) | Out-Null
-$stagingRoot = Join-Path $outputRoot "package-staging-$Version"
-$zipName = "DSR-Randomizer-v$Version-win-x64.zip"
+$uniqueSuffix = [Guid]::NewGuid().ToString('N')
+$stagingRoot = Join-Path $outputRoot "package-staging-$Version-$uniqueSuffix"
+$extractedRoot = Join-Path $outputRoot "package-extracted-$Version-$uniqueSuffix"
+$zipName = "DSR-for-MOD-v$Version-win-x64.zip"
 $zipPath = Join-Path $outputRoot $zipName
 $checksumPath = "$zipPath.sha256"
 Assert-StrictDescendant -Candidate $stagingRoot -Root $outputRoot
+Assert-StrictDescendant -Candidate $extractedRoot -Root $outputRoot
 Assert-StrictDescendant -Candidate $zipPath -Root $outputRoot
 Assert-StrictDescendant -Candidate $checksumPath -Root $outputRoot
+if ([IO.Path]::GetFileName($zipPath) -cne $zipName `
+    -or [IO.Path]::GetFileName($checksumPath) -cne "$zipName.sha256") {
+    throw 'The release output names are not the validated filenames.'
+}
 
 $publishedLauncher = Join-Path $publishRoot 'DSRForMod.Launcher.exe'
-if (-not (Test-Path -LiteralPath $publishedLauncher -PathType Leaf)) {
-    throw "Published launcher is missing: $publishedLauncher"
+$publishedGuard = Join-Path $publishRoot 'native/DSRRandomizer.Runtime.dll'
+$publishedProfile = Join-Path $publishRoot 'config/compatibility-profiles.json'
+$publishedBridge = Join-Path $publishRoot 'components/rmm-bridge/DSRRandomizer.RmmBridge.dll'
+$publishedHost = Join-Path $publishRoot 'components/rmm-bridge/DSRRandomizer.RmmBridgeHost.exe'
+foreach ($path in @(
+    $publishedLauncher,
+    $publishedGuard,
+    $publishedProfile,
+    $publishedBridge,
+    $publishedHost,
+    $dependencyManifest)) {
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw "A required publish input is missing: $path"
+    }
 }
 
-if (Test-Path -LiteralPath $stagingRoot) {
-    Remove-Item -LiteralPath $stagingRoot -Recurse -Force
-}
 [IO.Directory]::CreateDirectory($stagingRoot) | Out-Null
-
 try {
     Copy-Item -LiteralPath $publishedLauncher -Destination $stagingRoot
-    $publishedPdb = Join-Path $publishRoot 'DSRForMod.Launcher.pdb'
-    if (Test-Path -LiteralPath $publishedPdb -PathType Leaf) {
-        Copy-Item -LiteralPath $publishedPdb -Destination $stagingRoot
+    foreach ($notice in @('README.md', 'INSTALL_KO.md', 'LICENSE', 'CHANGELOG.md')) {
+        $source = Join-Path $repositoryRoot $notice
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+            throw "A required release document is missing: $source"
+        }
+        Copy-Item -LiteralPath $source -Destination $stagingRoot
     }
-    foreach ($notice in @('README.md', 'LICENSE', 'CHANGELOG.md')) {
-        Copy-Item -LiteralPath (Join-Path $repositoryRoot $notice) -Destination $stagingRoot
-    }
-    $publishedGuard = Join-Path $publishRoot 'native/DSRRandomizer.Runtime.dll'
-    $publishedProfile = Join-Path $publishRoot 'config/compatibility-profiles.json'
-    if (-not (Test-Path -LiteralPath $publishedGuard -PathType Leaf)) {
-        throw "Published native guard is missing: $publishedGuard"
-    }
-    if (-not (Test-Path -LiteralPath $publishedProfile -PathType Leaf)) {
-        throw "Published compatibility profile is missing: $publishedProfile"
-    }
+
     $stagedNative = Join-Path $stagingRoot 'native'
     $stagedConfig = Join-Path $stagingRoot 'config'
+    $stagedBridgeRoot = Join-Path $stagingRoot 'components/rmm-bridge'
     [IO.Directory]::CreateDirectory($stagedNative) | Out-Null
     [IO.Directory]::CreateDirectory($stagedConfig) | Out-Null
+    [IO.Directory]::CreateDirectory($stagedBridgeRoot) | Out-Null
+
     $stagedGuard = Join-Path $stagedNative 'DSRRandomizer.Runtime.dll'
+    $stagedBridge = Join-Path $stagedBridgeRoot 'DSRRandomizer.RmmBridge.dll'
+    $stagedHost = Join-Path $stagedBridgeRoot 'DSRRandomizer.RmmBridgeHost.exe'
     Copy-Item -LiteralPath $publishedGuard -Destination $stagedGuard
     Copy-Item -LiteralPath $publishedProfile -Destination $stagedConfig
+    Copy-Item -LiteralPath $publishedBridge -Destination $stagedBridge
+    Copy-Item -LiteralPath $publishedHost -Destination $stagedHost
+
     $guardHash = (Get-FileHash -LiteralPath $stagedGuard -Algorithm SHA256).Hash.ToLowerInvariant()
     [IO.File]::WriteAllText(
         "$stagedGuard.sha256",
         "$guardHash`n",
         [Text.UTF8Encoding]::new($false))
+    $bridgeHash = (Get-FileHash -LiteralPath $stagedBridge -Algorithm SHA256).Hash.ToLowerInvariant()
+    $hostHash = (Get-FileHash -LiteralPath $stagedHost -Algorithm SHA256).Hash.ToLowerInvariant()
+    $manifest = [ordered]@{
+        schemaVersion = 1
+        configuration = 'Release'
+        bridgeSha256 = $bridgeHash
+        hostSha256 = $hostHash
+    } | ConvertTo-Json -Compress
+    [IO.File]::WriteAllText(
+        (Join-Path $stagedBridgeRoot 'deployment-manifest.json'),
+        $manifest,
+        [Text.UTF8Encoding]::new($false))
 
-    $dependencyManifest = Get-ChildItem `
-        -LiteralPath (Join-Path $repositoryRoot 'src/DSRRandomizer.Launcher/obj/Release') `
-        -Filter 'DSRForMod.Launcher.deps.json' `
-        -File `
-        -Recurse |
-        Sort-Object LastWriteTimeUtc -Descending |
-        Select-Object -First 1
-    if ($null -eq $dependencyManifest) {
-        throw 'The publish dependency manifest was not generated.'
-    }
-    $dependencies = Get-Content -LiteralPath $dependencyManifest.FullName -Raw | ConvertFrom-Json
-    $corePackage = Get-RuntimePackage -Dependencies $dependencies -PackageName 'Microsoft.NETCore.App.Runtime.win-x64'
-    $desktopPackage = Get-RuntimePackage -Dependencies $dependencies -PackageName 'Microsoft.WindowsDesktop.App.Runtime.win-x64'
+    $dependencies = Get-Content -LiteralPath $dependencyManifest -Raw | ConvertFrom-Json
+    $corePackage = @(Get-RuntimePackage `
+        -Dependencies $dependencies `
+        -PackageName 'Microsoft.NETCore.App.Runtime.win-x64')
+    $desktopPackage = @(Get-RuntimePackage `
+        -Dependencies $dependencies `
+        -PackageName 'Microsoft.WindowsDesktop.App.Runtime.win-x64')
     $nugetRoot = if ([string]::IsNullOrWhiteSpace($env:NUGET_PACKAGES)) {
         Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)) '.nuget/packages'
-    } else {
+    }
+    else {
         [IO.Path]::GetFullPath($env:NUGET_PACKAGES)
     }
     $coreRoot = Join-Path $nugetRoot ("{0}/{1}" -f $corePackage[0].ToLowerInvariant(), $corePackage[1])
@@ -148,12 +294,17 @@ try {
         ($noticeParts -join "`n"),
         [Text.UTF8Encoding]::new($false))
 
+    Assert-ExactFileSet -Root $stagingRoot
     $stagedLauncher = Join-Path $stagingRoot 'DSRForMod.Launcher.exe'
     Invoke-PackageValidator -Launcher $stagedLauncher -Directory $stagingRoot
 
     if (Test-Path -LiteralPath $zipPath) {
         Remove-Item -LiteralPath $zipPath -Force
     }
+    if (Test-Path -LiteralPath $checksumPath) {
+        Remove-Item -LiteralPath $checksumPath -Force
+    }
+
     Add-Type -AssemblyName System.IO.Compression
     $zipStream = [IO.File]::Open($zipPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::ReadWrite)
     try {
@@ -162,26 +313,45 @@ try {
             [IO.Compression.ZipArchiveMode]::Create,
             $true)
         try {
-            foreach ($file in Get-ChildItem -LiteralPath $stagingRoot -File -Recurse |
-                     Sort-Object FullName) {
-                $entryName = [IO.Path]::GetRelativePath($stagingRoot, $file.FullName).Replace('\', '/')
-                $entry = $archive.CreateEntry($entryName, [IO.Compression.CompressionLevel]::Optimal)
-                $entry.LastWriteTime = [DateTimeOffset]::new(1980, 1, 1, 0, 0, 0, [TimeSpan]::Zero)
-                $input = [IO.File]::OpenRead($file.FullName)
+            foreach ($entryName in $ExpectedPackagePaths) {
+                $file = Join-Path $stagingRoot $entryName
+                $entry = $archive.CreateEntry(
+                    $entryName,
+                    [IO.Compression.CompressionLevel]::Optimal)
+                $entry.LastWriteTime = [DateTimeOffset]::new(
+                    1980,
+                    1,
+                    1,
+                    0,
+                    0,
+                    0,
+                    [TimeSpan]::Zero)
+                $input = [IO.File]::OpenRead($file)
                 $output = $entry.Open()
                 try {
                     $input.CopyTo($output)
-                } finally {
+                }
+                finally {
                     $output.Dispose()
                     $input.Dispose()
                 }
             }
-        } finally {
+        }
+        finally {
             $archive.Dispose()
         }
-    } finally {
+    }
+    finally {
         $zipStream.Dispose()
     }
+
+    Assert-ReleaseArchiveEntries -ArchivePath $zipPath
+    [IO.Directory]::CreateDirectory($extractedRoot) | Out-Null
+    [IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $extractedRoot)
+    Assert-ExactFileSet -Root $extractedRoot
+    Invoke-PackageValidator `
+        -Launcher (Join-Path $extractedRoot 'DSRForMod.Launcher.exe') `
+        -Directory $extractedRoot
 
     $hash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
     [IO.File]::WriteAllText(
@@ -193,8 +363,14 @@ try {
         checksum = $checksumPath
         sha256 = $hash
     } | ConvertTo-Json -Compress
-} finally {
-    if (Test-Path -LiteralPath $stagingRoot) {
-        Remove-Item -LiteralPath $stagingRoot -Recurse -Force
-    }
+}
+finally {
+    Remove-ValidatedPackageDirectory `
+        -Path $stagingRoot `
+        -OutputRoot $outputRoot `
+        -RequiredLeafPrefix "package-staging-$Version-"
+    Remove-ValidatedPackageDirectory `
+        -Path $extractedRoot `
+        -OutputRoot $outputRoot `
+        -RequiredLeafPrefix "package-extracted-$Version-"
 }

@@ -79,6 +79,13 @@ function Assert-Deployed([pscustomobject]$State) {
     }
     Assert-BridgeExport $dllPath
     $manifest = Read-StrictJson $manifestPath
+    $manifestProperties = @($manifest.PSObject.Properties.Name)
+    if (($manifestProperties -join ',') -cne
+        'schemaVersion,configuration,bridgeSha256,hostSha256' `
+        -or $manifest.schemaVersion -ne 1 `
+        -or [string]$manifest.configuration -cne $Configuration) {
+        throw 'deployment-manifest.json does not match the exact four-property schema.'
+    }
     $dllHash = (Get-FileHash -LiteralPath $dllPath -Algorithm SHA256).Hash.ToLowerInvariant()
     $hostHash = (Get-FileHash -LiteralPath $hostPath -Algorithm SHA256).Hash.ToLowerInvariant()
     $manifestMatches = [string]$manifest.bridgeSha256 -ceq $dllHash `
@@ -158,14 +165,14 @@ try {
     New-Item -ItemType Directory -Path $deploymentRoot -Force | Out-Null
     Copy-Item -LiteralPath $buildDll -Destination (Join-Path $deploymentRoot 'DSRRandomizer.RmmBridge.dll') -Force
     Copy-Item -LiteralPath $buildHost -Destination (Join-Path $deploymentRoot 'DSRRandomizer.RmmBridgeHost.exe') -Force
-    $manifest = [ordered]@{
-        schemaVersion = 1
-        configuration = $Configuration
-        runtimeId = $state.RuntimeId
-        bridgeSha256 = $bridgeHash
-        hostSha256 = $hostHash
-    } | ConvertTo-Json -Compress
-    [IO.File]::WriteAllText((Join-Path $deploymentRoot 'deployment-manifest.json'), $manifest)
+    $manifest = New-RmmBridgeDeploymentManifest `
+        -Configuration $Configuration `
+        -BridgeSha256 $bridgeHash `
+        -HostSha256 $hostHash
+    [IO.File]::WriteAllText(
+        (Join-Path $deploymentRoot 'deployment-manifest.json'),
+        $manifest,
+        [Text.UTF8Encoding]::new($false))
 
     $toml = [IO.File]::ReadAllText($state.TomlPath)
     $timestamp = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
