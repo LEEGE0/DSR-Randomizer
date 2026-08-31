@@ -16,6 +16,12 @@ public sealed class LaunchArtifactIdentitiesTests
         Assert.Equal(
             Hash(Path.Combine(AppContext.BaseDirectory, "config", "compatibility-profiles.json")),
             identities.ProfileSha256);
+        Assert.Equal(
+            Hash(Path.Combine(AppContext.BaseDirectory, "components", "rmm-bridge", "DSRRandomizer.RmmBridge.dll")),
+            identities.BridgeSha256);
+        Assert.Equal(
+            Hash(Path.Combine(AppContext.BaseDirectory, "components", "rmm-bridge", "DSRRandomizer.RmmBridgeHost.exe")),
+            identities.HostSha256);
     }
 
     private static string Hash(string path) => Convert.ToHexString(

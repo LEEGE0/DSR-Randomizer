@@ -61,6 +61,10 @@ public sealed class LauncherApplicationPackageTests : IDisposable
     [InlineData("config/compatibility-profiles.json")]
     [InlineData("native/DSRRandomizer.Runtime.dll")]
     [InlineData("native/DSRRandomizer.Runtime.dll.sha256")]
+    [InlineData("INSTALL_KO.md")]
+    [InlineData("components/rmm-bridge/DSRRandomizer.RmmBridge.dll")]
+    [InlineData("components/rmm-bridge/DSRRandomizer.RmmBridgeHost.exe")]
+    [InlineData("components/rmm-bridge/deployment-manifest.json")]
     public async Task RunAsync_ValidatePackageRejectsEachMissingRequiredArtifact(
         string missingPath)
     {
@@ -181,6 +185,39 @@ public sealed class LauncherApplicationPackageTests : IDisposable
             StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("components/rmm-bridge/DSRRandomizer.RmmBridge.dll", "mismatch:components/rmm-bridge/DSRRandomizer.RmmBridge.dll")]
+    [InlineData("components/rmm-bridge/DSRRandomizer.RmmBridgeHost.exe", "mismatch:components/rmm-bridge/DSRRandomizer.RmmBridgeHost.exe")]
+    public async Task RunAsync_ValidatePackageRejectsTamperedPinnedBridgeArtifacts(
+        string artifactPath,
+        string expectedFailure)
+    {
+        await CreateCompletePackageAsync();
+        await File.WriteAllTextAsync(PackagePath(artifactPath), "tampered bridge artifact");
+
+        var (exitCode, output) = await ValidatePackageAsync();
+
+        Assert.Equal(6, exitCode);
+        Assert.Contains(expectedFailure, output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RunAsync_ValidatePackageRejectsManifestThatDoesNotNamePinnedBridgeArtifacts()
+    {
+        await CreateCompletePackageAsync();
+        await File.WriteAllTextAsync(
+            PackagePath("components/rmm-bridge/deployment-manifest.json"),
+            "{\"schemaVersion\":1,\"configuration\":\"Release\",\"runtimeId\":\"win-x64\",\"bridgeSha256\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"hostSha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"}");
+
+        var (exitCode, output) = await ValidatePackageAsync();
+
+        Assert.Equal(6, exitCode);
+        Assert.Contains(
+            "mismatch:components/rmm-bridge/deployment-manifest.json",
+            output,
+            StringComparison.Ordinal);
+    }
+
     private async Task CreateCompletePackageAsync()
     {
         Directory.CreateDirectory(_packageRoot);
@@ -188,6 +225,7 @@ public sealed class LauncherApplicationPackageTests : IDisposable
                  {
                      "DSRForMod.Launcher.exe",
                      "README.md",
+                     "INSTALL_KO.md",
                      "LICENSE",
                      "THIRD_PARTY_NOTICES.md",
                      "CHANGELOG.md"
@@ -208,11 +246,27 @@ public sealed class LauncherApplicationPackageTests : IDisposable
         File.Copy(
             Path.Combine(AppContext.BaseDirectory, "config", "compatibility-profiles.json"),
             profilePath);
+        var bridgePath = PackagePath("components/rmm-bridge/DSRRandomizer.RmmBridge.dll");
+        var hostPath = PackagePath("components/rmm-bridge/DSRRandomizer.RmmBridgeHost.exe");
+        Directory.CreateDirectory(Path.GetDirectoryName(bridgePath)!);
+        File.Copy(
+            Path.Combine(AppContext.BaseDirectory, "components", "rmm-bridge", "DSRRandomizer.RmmBridge.dll"),
+            bridgePath);
+        File.Copy(
+            Path.Combine(AppContext.BaseDirectory, "components", "rmm-bridge", "DSRRandomizer.RmmBridgeHost.exe"),
+            hostPath);
         var guardHash = Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(guardPath)))
             .ToLowerInvariant();
         await File.WriteAllTextAsync(
             PackagePath("native/DSRRandomizer.Runtime.dll.sha256"),
             $"{guardHash}\n");
+        var bridgeHash = Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(bridgePath)))
+            .ToLowerInvariant();
+        var hostHash = Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(hostPath)))
+            .ToLowerInvariant();
+        await File.WriteAllTextAsync(
+            PackagePath("components/rmm-bridge/deployment-manifest.json"),
+            $"{{\"schemaVersion\":1,\"configuration\":\"Release\",\"runtimeId\":\"win-x64\",\"bridgeSha256\":\"{bridgeHash}\",\"hostSha256\":\"{hostHash}\"}}");
     }
 
     private async Task<(int ExitCode, string Output)> ValidatePackageAsync()
@@ -270,6 +324,14 @@ public sealed class LauncherApplicationPackageTests : IDisposable
 
         public Task<SafetyLaunchResult> LaunchModdedAsync(
             string steamId,
+            CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("Package validation must not launch a process.");
+
+        public Task<RandomizerToolLaunchResult> LaunchItemRandomizerAsync(
+            CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("Package validation must not launch a process.");
+
+        public Task<RandomizerToolLaunchResult> LaunchEnemyRandomizerAsync(
             CancellationToken cancellationToken) =>
             throw new InvalidOperationException("Package validation must not launch a process.");
     }

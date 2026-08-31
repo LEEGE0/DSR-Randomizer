@@ -6,6 +6,20 @@ public sealed class ReleaseContentGuardTests
 {
     [Theory]
     [InlineData("DarkSoulsRemastered.exe")]
+    [InlineData("DSRForMod.Launcher.pdb")]
+    [InlineData("components/rmm-bridge/trace.pdb")]
+    [InlineData("DRAKS0005.sl2")]
+    [InlineData("DRAKS0005.rmm")]
+    [InlineData("DS1EnemyRandomizer.exe")]
+    [InlineData("DarkSoulsItemRandomizer.exe")]
+    [InlineData("modengine2_launcher.exe")]
+    [InlineData("DS1HeapPatch.dll")]
+    [InlineData("seed/result.txt")]
+    [InlineData("spoiler/result.txt")]
+    [InlineData("logs/launcher.log")]
+    [InlineData("profile/player.json")]
+    [InlineData("saves/DRAKS0005.sl2")]
+    [InlineData("staging/package.zip")]
     [InlineData("runtime/map/m10_00_00_00.msb.dcx")]
     [InlineData("saves/DRAKS-RANDOM.rsl2")]
     [InlineData("local-data/game-catalog.json")]
@@ -24,19 +38,22 @@ public sealed class ReleaseContentGuardTests
     }
 
     [Fact]
-    public void Validate_AllowsOnlyPublishedLauncherProjectGuardProfileAndNotices()
+    public void Validate_AllowsOnlyTheTwelvePublishedReleaseArtifacts()
     {
         var paths = new[]
         {
             "DSRForMod.Launcher.exe",
-            "DSRForMod.Launcher.pdb",
             "README.md",
+            "INSTALL_KO.md",
             "LICENSE",
             "THIRD_PARTY_NOTICES.md",
             "CHANGELOG.md",
             "native/DSRRandomizer.Runtime.dll",
             "native/DSRRandomizer.Runtime.dll.sha256",
-            "config/compatibility-profiles.json"
+            "config/compatibility-profiles.json",
+            "components/rmm-bridge/DSRRandomizer.RmmBridge.dll",
+            "components/rmm-bridge/DSRRandomizer.RmmBridgeHost.exe",
+            "components/rmm-bridge/deployment-manifest.json"
         };
 
         Assert.Empty(new ReleaseContentGuard().Validate(paths));

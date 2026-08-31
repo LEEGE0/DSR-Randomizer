@@ -6,27 +6,20 @@ public sealed class ReleaseContentGuard
     [
         "DSRForMod.Launcher.exe",
         "README.md",
+        "INSTALL_KO.md",
         "LICENSE",
         "CHANGELOG.md",
         "THIRD_PARTY_NOTICES.md",
         "config/compatibility-profiles.json",
         "native/DSRRandomizer.Runtime.dll",
-        "native/DSRRandomizer.Runtime.dll.sha256"
+        "native/DSRRandomizer.Runtime.dll.sha256",
+        "components/rmm-bridge/DSRRandomizer.RmmBridge.dll",
+        "components/rmm-bridge/DSRRandomizer.RmmBridgeHost.exe",
+        "components/rmm-bridge/deployment-manifest.json"
     ];
 
     private static readonly HashSet<string> AllowedPaths = new(
-        new[]
-        {
-            "DSRForMod.Launcher.exe",
-            "DSRForMod.Launcher.pdb",
-            "README.md",
-            "LICENSE",
-            "THIRD_PARTY_NOTICES.md",
-            "CHANGELOG.md",
-            "native/DSRRandomizer.Runtime.dll",
-            "native/DSRRandomizer.Runtime.dll.sha256",
-            "config/compatibility-profiles.json"
-        },
+        RequiredPaths,
         StringComparer.OrdinalIgnoreCase);
 
     public IReadOnlyList<string> Validate(IEnumerable<string> relativePaths)
