@@ -12,6 +12,8 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x
@@ -32,7 +34,7 @@ jobs:
         run: ./packaging/build-release.ps1 -Version 0.1.0-alpha.2 -OutputPath artifacts
       - uses: actions/upload-artifact@v4
         with:
-          name: DSR-for-MOD-win-x64
+          name: DSR-for-MOD-binary-and-source
           path: |
             artifacts/DSR-for-MOD-*.zip
             artifacts/DSR-for-MOD-*.zip.sha256

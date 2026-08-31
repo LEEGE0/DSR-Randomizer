@@ -151,6 +151,19 @@ try {
             '-OutputPath',
             $outputDirectory.Path) `
         -FailureMessage 'Verified release packaging failed.'
+
+    $sourcePackageScript = Join-Path $repositoryRoot 'packaging/build-source-release.ps1'
+    Invoke-CheckedCommand `
+        -FilePath 'pwsh' `
+        -Arguments @(
+            '-NoProfile',
+            '-File',
+            $sourcePackageScript,
+            '-Version',
+            $Version,
+            '-OutputPath',
+            $outputDirectory.Path) `
+        -FailureMessage 'Corresponding-source packaging failed.'
 }
 finally {
     try {

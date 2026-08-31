@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.IO.Compression;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 
 namespace DSRRandomizer.Launcher.Tests;
@@ -104,6 +105,116 @@ public sealed class PinnedArtifactPublishTests : IDisposable
         Assert.Equal(
             $"{zipHash}  {Path.GetFileName(zipPath)}\n",
             (await File.ReadAllTextAsync(checksumPath)).Replace("\r\n", "\n", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ReleaseHostBundleExcludesDrSwizzlerAssemblyAndReferences()
+    {
+        var repositoryRoot = FindRepositoryRoot();
+        var publishRoot = Path.Combine(_packageOutputRoot, "bridge-host-publish");
+        var publish = await RunProcessAsync(
+            "dotnet.exe",
+            repositoryRoot,
+            "publish",
+            Path.Combine(
+                repositoryRoot,
+                "src",
+                "DSRRandomizer.RmmBridgeHost",
+                "DSRRandomizer.RmmBridgeHost.csproj"),
+            "-c",
+            "Release",
+            "--no-restore",
+            "-o",
+            publishRoot);
+        Assert.True(
+            publish.ExitCode == 0,
+            $"Bridge-host publish failed with exit code {publish.ExitCode}.\n{publish.Output}");
+
+        var hostPath = Path.Combine(publishRoot, "DSRRandomizer.RmmBridgeHost.exe");
+        Assert.True(File.Exists(hostPath), $"Published bridge host is missing: {hostPath}");
+
+        var bundle = ReadSingleFileBundle(hostPath);
+        Assert.Equal(6u, bundle.MajorVersion);
+        Assert.DoesNotContain(
+            bundle.Entries,
+            entry => string.Equals(entry.RelativePath, "DrSwizzler.dll", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(
+            bundle.Entries,
+            entry => string.Equals(
+                entry.RelativePath,
+                "BouncyCastle.Cryptography.dll",
+                StringComparison.OrdinalIgnoreCase));
+
+        var depsEntry = Assert.Single(bundle.Entries, entry => entry.Type == 3);
+        var depsJson = Encoding.UTF8.GetString(ReadBundleEntry(hostPath, depsEntry));
+        Assert.DoesNotContain("DrSwizzler", depsJson, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("BouncyCastle", depsJson, StringComparison.OrdinalIgnoreCase);
+
+        // Defense in depth: catch an accidental renamed/copy-local payload even if it is not
+        // represented as an assembly or dependency in the bundle manifest.
+        AssertBinaryDoesNotContainUtf8(hostPath, "DrSwizzler.dll");
+        AssertBinaryDoesNotContainUtf8(hostPath, "DrSwizzler");
+        AssertBinaryDoesNotContainUtf8(hostPath, "BouncyCastle.Cryptography.dll");
+    }
+
+    [Fact]
+    public async Task OfficialSourceReleaseBuildCreatesDeterministicCommittedTreeArchive()
+    {
+        var repositoryRoot = FindRepositoryRoot();
+        var firstOutput = Path.Combine(_packageOutputRoot, "source-first");
+        var secondOutput = Path.Combine(_packageOutputRoot, "source-second");
+
+        foreach (var output in new[] { firstOutput, secondOutput })
+        {
+            var build = await RunProcessAsync(
+                "pwsh.exe",
+                repositoryRoot,
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                Path.Combine(repositoryRoot, "packaging", "build-source-release.ps1"),
+                "-Version",
+                Version,
+                "-OutputPath",
+                output);
+            Assert.True(
+                build.ExitCode == 0,
+                $"build-source-release.ps1 failed with exit code {build.ExitCode}.\n{build.Output}");
+        }
+
+        var archiveName = $"DSR-for-MOD-v{Version}-source.zip";
+        var firstArchive = Path.Combine(firstOutput, archiveName);
+        var secondArchive = Path.Combine(secondOutput, archiveName);
+        Assert.True(File.Exists(firstArchive), $"Source archive is missing: {firstArchive}");
+        Assert.Equal(Sha256(firstArchive), Sha256(secondArchive));
+
+        var prefix = $"DSR-for-MOD-v{Version}-source/";
+        using (var archive = ZipFile.OpenRead(firstArchive))
+        {
+            var entries = archive.Entries.Select(entry => entry.FullName).ToArray();
+            Assert.NotEmpty(entries);
+            Assert.Equal(entries.Order(StringComparer.Ordinal), entries);
+            Assert.Equal(entries.Length, entries.Distinct(StringComparer.Ordinal).Count());
+            Assert.All(entries, entry => Assert.StartsWith(prefix, entry, StringComparison.Ordinal));
+            Assert.Contains($"{prefix}DSR-Randomizer.sln", entries);
+            Assert.Contains(
+                $"{prefix}src/DSRRandomizer.SoulsFormatsSubset/DSRRandomizer.SoulsFormatsSubset.csproj",
+                entries);
+            Assert.Contains($"{prefix}third_party/SoulsFormatsNEXT/LICENSE", entries);
+            Assert.Contains(
+                $"{prefix}third_party/SoulsFormatsNEXT/SoulsFormats/Formats/Binder/BND3/BND3.cs",
+                entries);
+            Assert.DoesNotContain(entries, IsProhibitedSourceArchivePath);
+            Assert.All(
+                archive.Entries,
+                entry => Assert.Equal(
+                    new DateTime(1980, 1, 1, 0, 0, 0, DateTimeKind.Unspecified),
+                    entry.LastWriteTime.DateTime));
+        }
+
+        AssertChecksumMatches(firstArchive);
+        AssertChecksumMatches(secondArchive);
     }
 
     [Fact]
@@ -292,6 +403,136 @@ public sealed class PinnedArtifactPublishTests : IDisposable
 
     private static string Sha256(string path) => Convert.ToHexString(
         SHA256.HashData(File.ReadAllBytes(path)));
+
+    private static bool IsProhibitedSourceArchivePath(string path)
+    {
+        var segments = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        return segments.Any(segment => segment.Equals(".git", StringComparison.OrdinalIgnoreCase)
+            || segment.Equals("bin", StringComparison.OrdinalIgnoreCase)
+            || segment.Equals("obj", StringComparison.OrdinalIgnoreCase)
+            || segment.Equals("artifacts", StringComparison.OrdinalIgnoreCase)
+            || segment.Equals("private", StringComparison.OrdinalIgnoreCase)
+            || segment.Equals("generated", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static void AssertChecksumMatches(string archivePath)
+    {
+        var expected = $"{Sha256(archivePath).ToLowerInvariant()}  {Path.GetFileName(archivePath)}\n";
+        var actual = File.ReadAllText($"{archivePath}.sha256")
+            .Replace("\r\n", "\n", StringComparison.Ordinal);
+        Assert.Equal(expected, actual);
+    }
+
+    private static void AssertBinaryDoesNotContainUtf8(string path, string value)
+    {
+        var bytes = File.ReadAllBytes(path);
+        var needle = Encoding.UTF8.GetBytes(value);
+        Assert.True(
+            bytes.AsSpan().IndexOf(needle) < 0,
+            $"Published binary unexpectedly contains UTF-8 marker '{value}'.");
+    }
+
+    private static SingleFileBundle ReadSingleFileBundle(string path)
+    {
+        // This is Bundler.BundleHeaderSignature from Microsoft.NET.HostModel 8.0.
+        // The Int64 immediately before it is the manifest header offset.
+        ReadOnlySpan<byte> signature =
+        [
+            0x8b, 0x12, 0x02, 0xb9, 0x6a, 0x61, 0x20, 0x38,
+            0x72, 0x7b, 0x93, 0x02, 0x14, 0xd7, 0xa0, 0x32,
+            0x13, 0xf5, 0xb9, 0xe6, 0xef, 0xae, 0x33, 0x18,
+            0xee, 0x3b, 0x2d, 0xce, 0x24, 0xb3, 0x6a, 0xae,
+        ];
+
+        var bytes = File.ReadAllBytes(path);
+        var signatureOffset = bytes.AsSpan().IndexOf(signature);
+        if (signatureOffset < sizeof(long))
+        {
+            throw new InvalidDataException("The .NET single-file bundle signature was not found.");
+        }
+
+        var headerOffset = BitConverter.ToInt64(bytes, signatureOffset - sizeof(long));
+        if (headerOffset <= 0 || headerOffset >= bytes.LongLength)
+        {
+            throw new InvalidDataException($"Invalid single-file bundle header offset: {headerOffset}.");
+        }
+
+        using var stream = new MemoryStream(bytes, writable: false);
+        using var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: false);
+        stream.Position = headerOffset;
+
+        var majorVersion = reader.ReadUInt32();
+        _ = reader.ReadUInt32(); // Minor version is currently zero.
+        var fileCount = reader.ReadInt32();
+        if (fileCount < 0)
+        {
+            throw new InvalidDataException($"Invalid single-file bundle entry count: {fileCount}.");
+        }
+
+        _ = reader.ReadString(); // Bundle ID.
+        if (majorVersion >= 2)
+        {
+            _ = reader.ReadInt64(); // Deps JSON offset.
+            _ = reader.ReadInt64(); // Deps JSON size.
+            _ = reader.ReadInt64(); // Runtimeconfig JSON offset.
+            _ = reader.ReadInt64(); // Runtimeconfig JSON size.
+            _ = reader.ReadUInt64(); // Header flags.
+        }
+
+        var entries = new List<SingleFileBundleEntry>(fileCount);
+        for (var index = 0; index < fileCount; index++)
+        {
+            var offset = reader.ReadInt64();
+            var size = reader.ReadInt64();
+            var compressedSize = majorVersion >= 6 ? reader.ReadInt64() : 0;
+            var type = reader.ReadByte();
+            var relativePath = reader.ReadString();
+            entries.Add(new SingleFileBundleEntry(offset, size, compressedSize, type, relativePath));
+        }
+
+        return new SingleFileBundle(majorVersion, entries);
+    }
+
+    private static byte[] ReadBundleEntry(string bundlePath, SingleFileBundleEntry entry)
+    {
+        using var bundle = File.OpenRead(bundlePath);
+        bundle.Position = entry.Offset;
+
+        var storedSize = entry.CompressedSize > 0 ? entry.CompressedSize : entry.Size;
+        if (storedSize < 0 || storedSize > int.MaxValue || entry.Offset + storedSize > bundle.Length)
+        {
+            throw new InvalidDataException(
+                $"Invalid bundle entry range for '{entry.RelativePath}': {entry.Offset}+{storedSize}.");
+        }
+
+        var stored = new byte[(int)storedSize];
+        bundle.ReadExactly(stored);
+        if (entry.CompressedSize == 0)
+        {
+            return stored;
+        }
+
+        using var input = new MemoryStream(stored, writable: false);
+        using var deflate = new DeflateStream(input, CompressionMode.Decompress);
+        using var output = new MemoryStream(entry.Size <= int.MaxValue ? (int)entry.Size : 0);
+        deflate.CopyTo(output);
+        if (output.Length != entry.Size)
+        {
+            throw new InvalidDataException(
+                $"Decompressed bundle entry '{entry.RelativePath}' has size {output.Length}, expected {entry.Size}.");
+        }
+
+        return output.ToArray();
+    }
+
+    private sealed record SingleFileBundle(uint MajorVersion, IReadOnlyList<SingleFileBundleEntry> Entries);
+
+    private sealed record SingleFileBundleEntry(
+        long Offset,
+        long Size,
+        long CompressedSize,
+        byte Type,
+        string RelativePath);
 
     private static string FindRepositoryRoot()
     {
