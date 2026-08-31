@@ -273,13 +273,39 @@ function Set-ReleaseTransactionState {
     )
 
     $statePath = Join-Path $TransactionRoot 'transaction-state.json'
-    $temporaryStatePath = Join-Path $TransactionRoot 'transaction-state.next'
+    $temporaryStatePath = Join-Path $TransactionRoot (
+        'transaction-state.' + [Guid]::NewGuid().ToString('N') + '.next')
     $json = $State | ConvertTo-Json -Compress -Depth 4
-    [IO.File]::WriteAllText(
-        $temporaryStatePath,
-        $json,
-        [Text.UTF8Encoding]::new($false))
-    [IO.File]::Move($temporaryStatePath, $statePath, $true)
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes($json)
+    try {
+        $stream = [IO.FileStream]::new(
+            $temporaryStatePath,
+            [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::Write,
+            [IO.FileShare]::None,
+            4096,
+            [IO.FileOptions]::WriteThrough)
+        try {
+            $stream.Write($bytes, 0, $bytes.Length)
+            $stream.Flush($true)
+        }
+        finally {
+            $stream.Dispose()
+        }
+        $journalLease = [DSRRandomizer.Packaging.ReleaseArtifactLease]::Acquire(
+            $temporaryStatePath,
+            'temporary release transaction journal')
+        $journalLease.Dispose()
+        [IO.File]::Move($temporaryStatePath, $statePath, $true)
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporaryStatePath -PathType Leaf) {
+            Assert-RegularArtifactFile `
+                -Path $temporaryStatePath `
+                -Description 'Temporary release transaction journal'
+            [IO.File]::Delete($temporaryStatePath)
+        }
+    }
 }
 
 function Invoke-PromotionHook {
@@ -372,6 +398,446 @@ function Assert-LeasedArtifactSet {
     return $blobHashes
 }
 
+function Assert-BlobHashesEqual {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Names,
+        [Parameter(Mandatory = $true)][Collections.IDictionary]$Actual,
+        [Parameter(Mandatory = $true)][Collections.IDictionary]$Expected,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    foreach ($name in $Names) {
+        if (-not $Expected.Contains($name) `
+                -or [string]$Actual[$name] -cne [string]$Expected[$name]) {
+            throw "$Description blob hash does not match for '$name'."
+        }
+    }
+}
+
+function Open-ReleaseArtifactSetLeases {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string[]]$Names,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    $leases = [Collections.Generic.List[object]]::new()
+    try {
+        foreach ($name in $Names) {
+            $leases.Add(
+                [DSRRandomizer.Packaging.ReleaseArtifactLease]::Acquire(
+                    (Join-Path $Root $name),
+                    $Description))
+        }
+        return ,$leases
+    }
+    catch {
+        Close-ReleaseArtifactLeases -Leases $leases
+        throw
+    }
+}
+
+function Get-ArchiveHashesFromLeases {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Names,
+        [Parameter(Mandatory = $true)][Collections.IList]$Leases
+    )
+
+    return [ordered]@{
+        $Names[0] = $Leases[0].ComputeSha256()
+        $Names[2] = $Leases[2].ComputeSha256()
+    }
+}
+
+function Convert-StateHashMap {
+    param(
+        [Parameter(Mandatory = $true)][object]$Map,
+        [Parameter(Mandatory = $true)][string[]]$ExpectedNames,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    $properties = @($Map.PSObject.Properties)
+    if ($properties.Count -ne $ExpectedNames.Count) {
+        throw "$Description must contain exactly $($ExpectedNames.Count) hashes."
+    }
+    $result = [ordered]@{}
+    foreach ($name in $ExpectedNames) {
+        $property = @($properties | Where-Object { $_.Name -ceq $name })
+        if ($property.Count -ne 1) {
+            throw "$Description is missing '$name'."
+        }
+        $value = [string]$property[0].Value
+        if ($value -cnotmatch '^[0-9a-f]{64}$') {
+            throw "$Description contains an invalid lowercase SHA-256 for '$name'."
+        }
+        $result[$name] = $value
+    }
+    return $result
+}
+
+function Read-ReleaseTransactionState {
+    param(
+        [Parameter(Mandatory = $true)][string]$TransactionRoot,
+        [Parameter(Mandatory = $true)][string[]]$Names
+    )
+
+    $statePath = Join-Path $TransactionRoot 'transaction-state.json'
+    $lease = [DSRRandomizer.Packaging.ReleaseArtifactLease]::Acquire(
+        $statePath,
+        'release transaction journal')
+    try {
+        $json = [Text.UTF8Encoding]::new($false, $true).GetString(
+            $lease.ReadAllBytes(65536))
+    }
+    finally {
+        $lease.Dispose()
+    }
+    try {
+        $state = $json | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        throw [IO.InvalidDataException]::new(
+            "Release transaction journal is not valid JSON: $statePath",
+            $_.Exception)
+    }
+
+    $expectedProperties = @(
+        'schemaVersion',
+        'phase',
+        'hadPriorSet',
+        'artifactNames',
+        'expectedArchiveHashes',
+        'expectedFinalBlobHashes',
+        'backupBlobHashes')
+    $actualProperties = @($state.PSObject.Properties.Name)
+    if ($actualProperties.Count -ne $expectedProperties.Count `
+            -or @(Compare-Object $expectedProperties $actualProperties -CaseSensitive).Count -ne 0) {
+        throw 'Release transaction journal has an unexpected schema.'
+    }
+    if ([int]$state.schemaVersion -ne 3 `
+            -or @('Prepared', 'Committed') -cnotcontains [string]$state.phase `
+            -or $state.hadPriorSet -isnot [bool]) {
+        throw 'Release transaction journal has invalid version, phase, or prior-set state.'
+    }
+    $journalNames = @($state.artifactNames)
+    if ($journalNames.Count -ne $Names.Count) {
+        throw 'Release transaction journal artifact names do not match this publication.'
+    }
+    for ($index = 0; $index -lt $Names.Count; $index++) {
+        if ([string]$journalNames[$index] -cne $Names[$index]) {
+            throw 'Release transaction journal artifact names do not match this publication.'
+        }
+    }
+
+    $archiveNames = @($Names[0], $Names[2])
+    $expectedArchiveHashes = Convert-StateHashMap `
+        -Map $state.expectedArchiveHashes `
+        -ExpectedNames $archiveNames `
+        -Description 'Journal expected archive hashes'
+    $expectedFinalBlobHashes = Convert-StateHashMap `
+        -Map $state.expectedFinalBlobHashes `
+        -ExpectedNames $Names `
+        -Description 'Journal expected final blob hashes'
+    $backupProperties = @($state.backupBlobHashes.PSObject.Properties)
+    if ([bool]$state.hadPriorSet) {
+        $backupBlobHashes = Convert-StateHashMap `
+            -Map $state.backupBlobHashes `
+            -ExpectedNames $Names `
+            -Description 'Journal backup blob hashes'
+    }
+    else {
+        if ($backupProperties.Count -ne 0) {
+            throw 'A no-prior-set transaction journal contains unexpected backup hashes.'
+        }
+        $backupBlobHashes = [ordered]@{}
+    }
+
+    return [pscustomobject]@{
+        Phase = [string]$state.phase
+        HadPriorSet = [bool]$state.hadPriorSet
+        ExpectedArchiveHashes = $expectedArchiveHashes
+        ExpectedFinalBlobHashes = $expectedFinalBlobHashes
+        BackupBlobHashes = $backupBlobHashes
+    }
+}
+
+function Open-ExistingReleaseTransaction {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$OutputRoot
+    )
+
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    $fullRoot = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($OutputRoot))
+    $leaf = [IO.Path]::GetFileName($fullPath)
+    if (-not $fullPath.StartsWith(
+            $fullRoot + [IO.Path]::DirectorySeparatorChar,
+            [StringComparison]::OrdinalIgnoreCase) `
+            -or $leaf -cnotmatch '^release-publish-(transaction|committed)-[0-9a-f]{32}$') {
+        throw "A stale release publication transaction requires manual recovery: $fullPath"
+    }
+    $prefix = if ($leaf.StartsWith('release-publish-committed-', [StringComparison]::Ordinal)) {
+        'release-publish-committed-'
+    }
+    else {
+        'release-publish-transaction-'
+    }
+    return [pscustomobject]@{
+        Path = $fullPath
+        Root = $fullRoot
+        LeafPrefix = $prefix
+        Lease = [DSRRandomizer.Packaging.SafeDirectoryLease]::Acquire($fullPath)
+    }
+}
+
+function Remove-ExactReleaseArtifacts {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string[]]$Names,
+        [Parameter(Mandatory = $false)][scriptblock]$OperationHook
+    )
+
+    for ($index = $Names.Count - 1; $index -ge 0; $index--) {
+        $name = $Names[$index]
+        $path = Join-Path $Root $name
+        if (Test-Path -LiteralPath $path) {
+            Invoke-PromotionHook `
+                -OperationHook $OperationHook `
+                -Phase 'RollbackRemove' `
+                -Index $index `
+                -Name $name
+            $lease = [DSRRandomizer.Packaging.ReleaseArtifactLease]::Acquire(
+                $path,
+                'release artifact selected for exact removal')
+            $lease.Dispose()
+            [IO.File]::Delete($path)
+        }
+    }
+}
+
+function Open-VerifiedBackupLeases {
+    param(
+        [Parameter(Mandatory = $true)][object]$Transaction,
+        [Parameter(Mandatory = $true)][string[]]$Names,
+        [Parameter(Mandatory = $true)][Collections.IDictionary]$BackupBlobHashes
+    )
+
+    $backupNames = @(for ($index = 0; $index -lt $Names.Count; $index++) {
+            "previous-$index"
+        })
+    $leases = Open-ReleaseArtifactSetLeases `
+        -Root $Transaction.Path `
+        -Names $backupNames `
+        -Description 'prior release artifact backup'
+    try {
+        $actualBlobHashes = [ordered]@{}
+        for ($index = 0; $index -lt $Names.Count; $index++) {
+            $actualBlobHashes[$Names[$index]] = $leases[$index].ComputeSha256()
+        }
+        Assert-BlobHashesEqual `
+            -Names $Names `
+            -Actual $actualBlobHashes `
+            -Expected $BackupBlobHashes `
+            -Description 'Prior release backup'
+        $archiveHashes = [ordered]@{
+            $Names[0] = $BackupBlobHashes[$Names[0]]
+            $Names[2] = $BackupBlobHashes[$Names[2]]
+        }
+        $sidecarBlobHashes = Assert-LeasedArtifactSet `
+            -Names $Names `
+            -Leases $leases `
+            -ExpectedArchiveHashes $archiveHashes `
+            -Description 'Prior release backup'
+        Assert-BlobHashesEqual `
+            -Names $Names `
+            -Actual $sidecarBlobHashes `
+            -Expected $BackupBlobHashes `
+            -Description 'Prior release backup'
+        return ,$leases
+    }
+    catch {
+        Close-ReleaseArtifactLeases -Leases $leases
+        throw
+    }
+}
+
+function Restore-PreparedReleaseTransaction {
+    param(
+        [Parameter(Mandatory = $true)][object]$Transaction,
+        [Parameter(Mandatory = $true)][object]$State,
+        [Parameter(Mandatory = $true)][string]$OutputRoot,
+        [Parameter(Mandatory = $true)][string[]]$Names,
+        [Parameter(Mandatory = $false)][scriptblock]$OperationHook
+    )
+
+    $backupLeases = [Collections.Generic.List[object]]::new()
+    $restoredLeases = [Collections.Generic.List[object]]::new()
+    try {
+        if ($State.HadPriorSet) {
+            $backupLeases = Open-VerifiedBackupLeases `
+                -Transaction $Transaction `
+                -Names $Names `
+                -BackupBlobHashes $State.BackupBlobHashes
+        }
+        Remove-ExactReleaseArtifacts `
+            -Root $OutputRoot `
+            -Names $Names `
+            -OperationHook $OperationHook
+        if ($State.HadPriorSet) {
+            for ($index = 0; $index -lt $Names.Count; $index++) {
+                Invoke-PromotionHook `
+                    -OperationHook $OperationHook `
+                    -Phase 'RollbackRestore' `
+                    -Index $index `
+                    -Name $Names[$index]
+                $backupLeases[$index].CopyToNewAndFlush(
+                    (Join-Path $OutputRoot $Names[$index]))
+            }
+            $restoredLeases = Open-ReleaseArtifactSetLeases `
+                -Root $OutputRoot `
+                -Names $Names `
+                -Description 'restored prior release artifact'
+            $archiveHashes = [ordered]@{
+                $Names[0] = $State.BackupBlobHashes[$Names[0]]
+                $Names[2] = $State.BackupBlobHashes[$Names[2]]
+            }
+            $restoredHashes = Assert-LeasedArtifactSet `
+                -Names $Names `
+                -Leases $restoredLeases `
+                -ExpectedArchiveHashes $archiveHashes `
+                -Description 'Restored prior release'
+            Assert-BlobHashesEqual `
+                -Names $Names `
+                -Actual $restoredHashes `
+                -Expected $State.BackupBlobHashes `
+                -Description 'Restored prior release'
+        }
+    }
+    finally {
+        Close-ReleaseArtifactLeases -Leases $restoredLeases
+        Close-ReleaseArtifactLeases -Leases $backupLeases
+    }
+    Remove-SafeReleaseDirectory -Directory $Transaction
+}
+
+function Convert-ToCommittedReleaseTransaction {
+    param([Parameter(Mandatory = $true)][object]$Transaction)
+
+    # The durable journal phase is the commit marker. Keeping the original,
+    # leased transaction identity avoids a directory-rename gap at commit.
+    return $Transaction
+}
+
+function Remove-CommittedReleaseTransaction {
+    param(
+        [Parameter(Mandatory = $true)][object]$Transaction,
+        [Parameter(Mandatory = $true)][string[]]$Names,
+        [Parameter(Mandatory = $false)][scriptblock]$OperationHook
+    )
+
+    for ($index = 0; $index -lt $Names.Count; $index++) {
+        $backupPath = Join-Path $Transaction.Path "previous-$index"
+        if (Test-Path -LiteralPath $backupPath) {
+            Invoke-PromotionHook `
+                -OperationHook $OperationHook `
+                -Phase 'BeforeCommittedBackupCleanup' `
+                -Index $index `
+                -Name $Names[$index]
+            Assert-RegularArtifactFile `
+                -Path $backupPath `
+                -Description 'Committed prior release backup'
+            [IO.File]::Delete($backupPath)
+        }
+    }
+    Invoke-PromotionHook `
+        -OperationHook $OperationHook `
+        -Phase 'BeforeCommittedJournalCleanup' `
+        -Index -1 `
+        -Name ''
+    Invoke-PromotionHook `
+        -OperationHook $OperationHook `
+        -Phase 'BeforeCommittedDirectoryCleanup' `
+        -Index -1 `
+        -Name ''
+    Remove-SafeReleaseDirectory -Directory $Transaction
+}
+
+function Repair-ReleasePublicationState {
+    param(
+        [Parameter(Mandatory = $true)][object]$OutputDirectory,
+        [Parameter(Mandatory = $true)][string[]]$Names,
+        [Parameter(Mandatory = $false)][scriptblock]$OperationHook
+    )
+
+    $pending = @(Get-ChildItem -LiteralPath $OutputDirectory.Path -Directory -Force | Where-Object {
+            $_.Name.StartsWith('release-publish-transaction-', [StringComparison]::Ordinal) `
+                -or $_.Name.StartsWith('release-publish-committed-', [StringComparison]::Ordinal)
+        })
+    if ($pending.Count -eq 0) {
+        return
+    }
+    if ($pending.Count -ne 1) {
+        throw "Multiple stale release publication transactions require manual recovery: $($pending.FullName -join ', ')"
+    }
+
+    $transaction = $null
+    $finalLeases = [Collections.Generic.List[object]]::new()
+    try {
+        $transaction = Open-ExistingReleaseTransaction `
+            -Path $pending[0].FullName `
+            -OutputRoot $OutputDirectory.Path
+        $state = Read-ReleaseTransactionState `
+            -TransactionRoot $transaction.Path `
+            -Names $Names
+        if ($state.Phase -ceq 'Prepared') {
+            Restore-PreparedReleaseTransaction `
+                -Transaction $transaction `
+                -State $state `
+                -OutputRoot $OutputDirectory.Path `
+                -Names $Names `
+                -OperationHook $OperationHook
+            $transaction = $null
+        }
+        else {
+            $finalLeases = Open-ReleaseArtifactSetLeases `
+                -Root $OutputDirectory.Path `
+                -Names $Names `
+                -Description 'committed published release artifact'
+            $finalHashes = Assert-LeasedArtifactSet `
+                -Names $Names `
+                -Leases $finalLeases `
+                -ExpectedArchiveHashes $state.ExpectedArchiveHashes `
+                -Description 'Committed published release'
+            Assert-BlobHashesEqual `
+                -Names $Names `
+                -Actual $finalHashes `
+                -Expected $state.ExpectedFinalBlobHashes `
+                -Description 'Committed published release'
+            $transaction = Convert-ToCommittedReleaseTransaction -Transaction $transaction
+            Remove-CommittedReleaseTransaction `
+                -Transaction $transaction `
+                -Names $Names `
+                -OperationHook $OperationHook
+            $transaction = $null
+        }
+        Invoke-PromotionHook `
+            -OperationHook $OperationHook `
+            -Phase 'AfterRecovery' `
+            -Index -1 `
+            -Name ''
+    }
+    catch {
+        if ($null -ne $transaction -and $null -ne $transaction.Lease) {
+            $transaction.Lease.Dispose()
+            $transaction.Lease = $null
+        }
+        throw
+    }
+    finally {
+        Close-ReleaseArtifactLeases -Leases $finalLeases
+    }
+}
+
 function Publish-ReleaseArtifactSet {
     param(
         [Parameter(Mandatory = $true)][string]$StagingRoot,
@@ -405,7 +871,10 @@ function Publish-ReleaseArtifactSet {
     $outputDirectory = $null
     $transaction = $null
     $stagedLeases = [Collections.Generic.List[object]]::new()
+    $priorLeases = [Collections.Generic.List[object]]::new()
+    $backupLeases = [Collections.Generic.List[object]]::new()
     $finalLeases = [Collections.Generic.List[object]]::new()
+    $committed = $false
     try {
         $outputDirectory = Open-SafeReleaseRoot -Path $OutputRoot
         if ($stagingDirectory.Path.Equals(
@@ -414,22 +883,24 @@ function Publish-ReleaseArtifactSet {
             throw 'Release staging and output roots must be different directories.'
         }
 
-        $staleTransactions = @(Get-ChildItem `
-            -LiteralPath $outputDirectory.Path `
-            -Directory `
-            -Force `
-            -Filter 'release-publish-transaction-*')
-        if ($staleTransactions.Count -ne 0) {
-            throw "A stale release publication transaction requires manual recovery: $($staleTransactions.FullName -join ', ')"
-        }
+        Repair-ReleasePublicationState `
+            -OutputDirectory $outputDirectory `
+            -Names @($names) `
+            -OperationHook $OperationHook
+
+        $stagedLeases = Open-ReleaseArtifactSetLeases `
+            -Root $stagingDirectory.Path `
+            -Names @($names) `
+            -Description 'staged release artifact'
+        $stagedBlobHashes = Assert-LeasedArtifactSet `
+            -Names @($names) `
+            -Leases $stagedLeases `
+            -ExpectedArchiveHashes $validatedExpectedHashes `
+            -Description 'Staged release'
 
         $priorNames = [Collections.Generic.List[string]]::new()
         foreach ($name in $names) {
-            $outputPath = Join-Path $outputDirectory.Path $name
-            if (Test-Path -LiteralPath $outputPath) {
-                Assert-RegularArtifactFile `
-                    -Path $outputPath `
-                    -Description 'Prior release artifact'
+            if (Test-Path -LiteralPath (Join-Path $outputDirectory.Path $name)) {
                 $priorNames.Add($name)
             }
         }
@@ -437,18 +908,22 @@ function Publish-ReleaseArtifactSet {
             throw "The output contains a partial prior release artifact set ($($priorNames.Count) of $($names.Count)); publication is fail-closed."
         }
         $hasPriorSet = $priorNames.Count -eq $names.Count
-
-        $state = [ordered]@{
-            schemaVersion = 2
-            phase = 'created'
-            hadPriorSet = $hasPriorSet
-            artifactNames = @($names)
-            stagedIdentities = @()
-            backedUp = @()
-            promoted = @()
+        $priorBlobHashes = [ordered]@{}
+        if ($hasPriorSet) {
+            $priorLeases = Open-ReleaseArtifactSetLeases `
+                -Root $outputDirectory.Path `
+                -Names @($names) `
+                -Description 'prior release artifact'
+            $priorArchiveHashes = Get-ArchiveHashesFromLeases `
+                -Names @($names) `
+                -Leases $priorLeases
+            $priorBlobHashes = Assert-LeasedArtifactSet `
+                -Names @($names) `
+                -Leases $priorLeases `
+                -ExpectedArchiveHashes $priorArchiveHashes `
+                -Description 'Prior release'
         }
-        $backedUp = [Collections.Generic.List[string]]::new()
-        $published = [Collections.Generic.List[string]]::new()
+
         $transaction = New-SafeReleaseDirectory `
             -TrustedRoot $outputDirectory.Path `
             -LeafPrefix 'release-publish-transaction-'
@@ -458,72 +933,67 @@ function Publish-ReleaseArtifactSet {
                 -Phase 'BeforeInitialJournal' `
                 -Index -1 `
                 -Name ''
-            Set-ReleaseTransactionState `
-                -TransactionRoot $transaction.Path `
-                -State $state
 
-            foreach ($name in $names) {
-                $stagedLeases.Add(
-                    [DSRRandomizer.Packaging.ReleaseArtifactLease]::Acquire(
-                        (Join-Path $stagingDirectory.Path $name),
-                        'staged release artifact'))
-            }
-            $state.stagedIdentities = @($stagedLeases | ForEach-Object { $_.Identity })
-            $stagedBlobHashes = Assert-LeasedArtifactSet `
-                -Names @($names) `
-                -Leases $stagedLeases `
-                -ExpectedArchiveHashes $validatedExpectedHashes `
-                -Description 'Staged release'
-            $state.phase = 'staged-verified'
-            Set-ReleaseTransactionState `
-                -TransactionRoot $transaction.Path `
-                -State $state
-
-            $state.phase = 'backing-up'
-            Set-ReleaseTransactionState `
-                -TransactionRoot $transaction.Path `
-                -State $state
             if ($hasPriorSet) {
                 for ($index = 0; $index -lt $names.Count; $index++) {
-                    $name = $names[$index]
                     Invoke-PromotionHook `
                         -OperationHook $OperationHook `
                         -Phase 'BeforeBackup' `
                         -Index $index `
-                        -Name $name
-                    [IO.File]::Move(
-                        (Join-Path $outputDirectory.Path $name),
-                        (Join-Path $transaction.Path ("previous-$index")),
-                        $false)
-                    $backedUp.Add($name)
-                    $state.backedUp = @($backedUp)
-                    Set-ReleaseTransactionState `
-                        -TransactionRoot $transaction.Path `
-                        -State $state
+                        -Name $names[$index]
+                    $priorLeases[$index].CopyToNewAndFlush(
+                        (Join-Path $transaction.Path "previous-$index"))
                 }
+                $backupLeases = Open-VerifiedBackupLeases `
+                    -Transaction $transaction `
+                    -Names @($names) `
+                    -BackupBlobHashes $priorBlobHashes
             }
 
-            $state.phase = 'publishing'
+            $state = [ordered]@{
+                schemaVersion = 3
+                phase = 'Prepared'
+                hadPriorSet = $hasPriorSet
+                artifactNames = @($names)
+                expectedArchiveHashes = $validatedExpectedHashes
+                expectedFinalBlobHashes = $stagedBlobHashes
+                backupBlobHashes = $priorBlobHashes
+            }
             Set-ReleaseTransactionState `
                 -TransactionRoot $transaction.Path `
                 -State $state
+
+            Close-ReleaseArtifactLeases -Leases $priorLeases
             for ($index = 0; $index -lt $names.Count; $index++) {
-                $name = $names[$index]
+                $outputPath = Join-Path $outputDirectory.Path $names[$index]
+                if (Test-Path -LiteralPath $outputPath) {
+                    $currentLease = [DSRRandomizer.Packaging.ReleaseArtifactLease]::Acquire(
+                        $outputPath,
+                        'prior release artifact selected for replacement')
+                    try {
+                        if (-not $hasPriorSet `
+                                -or $currentLease.ComputeSha256() -cne $priorBlobHashes[$names[$index]]) {
+                            throw "Prior release artifact changed before replacement: $($names[$index])"
+                        }
+                    }
+                    finally {
+                        $currentLease.Dispose()
+                    }
+                    [IO.File]::Delete($outputPath)
+                }
+            }
+
+            for ($index = 0; $index -lt $names.Count; $index++) {
                 Invoke-PromotionHook `
                     -OperationHook $OperationHook `
                     -Phase 'BeforePublishCopy' `
                     -Index $index `
-                    -Name $name
-                $outputPath = Join-Path $outputDirectory.Path $name
+                    -Name $names[$index]
+                $outputPath = Join-Path $outputDirectory.Path $names[$index]
                 if (Test-Path -LiteralPath $outputPath) {
                     throw "The exact publication destination unexpectedly exists: $outputPath"
                 }
-                $published.Add($name)
                 $stagedLeases[$index].CopyToNewAndFlush($outputPath)
-                $state.promoted = @($published)
-                Set-ReleaseTransactionState `
-                    -TransactionRoot $transaction.Path `
-                    -State $state
             }
 
             Invoke-PromotionHook `
@@ -531,126 +1001,99 @@ function Publish-ReleaseArtifactSet {
                 -Phase 'BeforeFinalVerification' `
                 -Index -1 `
                 -Name ''
-            foreach ($name in $names) {
-                $finalLeases.Add(
-                    [DSRRandomizer.Packaging.ReleaseArtifactLease]::Acquire(
-                        (Join-Path $outputDirectory.Path $name),
-                        'published release artifact'))
-            }
+            $finalLeases = Open-ReleaseArtifactSetLeases `
+                -Root $outputDirectory.Path `
+                -Names @($names) `
+                -Description 'published release artifact'
             $finalBlobHashes = Assert-LeasedArtifactSet `
                 -Names @($names) `
                 -Leases $finalLeases `
                 -ExpectedArchiveHashes $validatedExpectedHashes `
                 -Description 'Published release'
-            foreach ($name in $names) {
-                if ($finalBlobHashes[$name] -cne $stagedBlobHashes[$name]) {
-                    throw "Published release artifact verification failed: $name"
-                }
-            }
+            Assert-BlobHashesEqual `
+                -Names @($names) `
+                -Actual $finalBlobHashes `
+                -Expected $stagedBlobHashes `
+                -Description 'Published release'
 
-            $state.phase = 'complete'
+            $state.phase = 'Committed'
             Set-ReleaseTransactionState `
                 -TransactionRoot $transaction.Path `
                 -State $state
-            Remove-SafeReleaseDirectory -Directory $transaction
+            $committed = $true
+            $transaction = Convert-ToCommittedReleaseTransaction -Transaction $transaction
+
+            Close-ReleaseArtifactLeases -Leases $backupLeases
+            Remove-CommittedReleaseTransaction `
+                -Transaction $transaction `
+                -Names @($names) `
+                -OperationHook $OperationHook
             $transaction = $null
         }
         catch {
             $publicationFailure = $_.Exception
-            Close-ReleaseArtifactLeases -Leases $finalLeases
-            $rollbackFailures = [Collections.Generic.List[string]]::new()
-            $state.phase = 'rolling-back'
-            try {
-                Set-ReleaseTransactionState `
-                    -TransactionRoot $transaction.Path `
-                    -State $state
-            }
-            catch {
-                # The in-memory state remains authoritative for cleanup and rollback.
-            }
-
-            for ($index = $published.Count - 1; $index -ge 0; $index--) {
-                $name = $published[$index]
-                try {
-                    Invoke-PromotionHook `
-                        -OperationHook $OperationHook `
-                        -Phase 'RollbackRemove' `
-                        -Index $index `
-                        -Name $name
-                    $outputPath = Join-Path $outputDirectory.Path $name
-                    if (Test-Path -LiteralPath $outputPath) {
-                        Assert-RegularArtifactFile `
-                            -Path $outputPath `
-                            -Description 'Newly published release artifact'
-                        [IO.File]::Delete($outputPath)
-                    }
-                }
-                catch {
-                    $rollbackFailures.Add("Unable to remove newly published '$name': $($_.Exception.Message)")
-                }
-            }
-            for ($index = $backedUp.Count - 1; $index -ge 0; $index--) {
-                $name = $backedUp[$index]
-                try {
-                    Invoke-PromotionHook `
-                        -OperationHook $OperationHook `
-                        -Phase 'RollbackRestore' `
-                        -Index $index `
-                        -Name $name
-                    $backupPath = Join-Path $transaction.Path ("previous-$index")
-                    Assert-RegularArtifactFile `
-                        -Path $backupPath `
-                        -Description 'Prior release artifact backup'
-                    $outputPath = Join-Path $outputDirectory.Path $name
-                    if (Test-Path -LiteralPath $outputPath) {
-                        throw "Rollback destination unexpectedly exists: $outputPath"
-                    }
-                    [IO.File]::Move($backupPath, $outputPath, $false)
-                }
-                catch {
-                    $rollbackFailures.Add("Unable to restore prior '$name': $($_.Exception.Message)")
-                }
-            }
-
-            if ($rollbackFailures.Count -eq 0) {
-                try {
-                    $state.phase = 'rolled-back'
-                    try {
-                        Set-ReleaseTransactionState `
-                            -TransactionRoot $transaction.Path `
-                            -State $state
-                    }
-                    catch {
-                        # Cleanup does not depend on the advisory journal.
-                    }
-                    Remove-SafeReleaseDirectory -Directory $transaction
-                    $transaction = $null
-                }
-                catch {
-                    $rollbackFailures.Add("Unable to remove publication transaction: $($_.Exception.Message)")
-                }
-            }
-
-            if ($rollbackFailures.Count -ne 0) {
+            if ($committed) {
                 if ($null -ne $transaction -and $null -ne $transaction.Lease) {
                     $transaction.Lease.Dispose()
                     $transaction.Lease = $null
                 }
-                $retainedTransactionPath = if ($null -eq $transaction) {
-                    '<cleanup failed after transaction identity was released>'
+                $retainedPath = if ($null -eq $transaction) {
+                    '<committed cleanup path unavailable>'
                 }
                 else {
                     $transaction.Path
                 }
                 $transaction = $null
                 throw [IO.IOException]::new(
-                    "Release artifact publication failed and rollback or cleanup was incomplete. " +
-                    "Transaction retained at '$retainedTransactionPath'. " +
-                    "Publication failure: $($publicationFailure.Message) " +
-                    "Recovery failures: $($rollbackFailures -join ' | ')",
+                    "Release artifact publication committed the complete verified new set, but committed transaction cleanup is pending at '$retainedPath': $($publicationFailure.Message)",
                     $publicationFailure)
             }
 
+            Close-ReleaseArtifactLeases -Leases $finalLeases
+            Close-ReleaseArtifactLeases -Leases $priorLeases
+            Close-ReleaseArtifactLeases -Leases $backupLeases
+            $recoveryFailure = $null
+            try {
+                if (Test-Path -LiteralPath (Join-Path $transaction.Path 'transaction-state.json')) {
+                    $preparedState = Read-ReleaseTransactionState `
+                        -TransactionRoot $transaction.Path `
+                        -Names @($names)
+                    if ($preparedState.Phase -cne 'Prepared') {
+                        throw 'An uncommitted publication transaction did not retain Prepared state.'
+                    }
+                    Restore-PreparedReleaseTransaction `
+                        -Transaction $transaction `
+                        -State $preparedState `
+                        -OutputRoot $outputDirectory.Path `
+                        -Names @($names) `
+                        -OperationHook $OperationHook
+                    $transaction = $null
+                }
+                else {
+                    Remove-SafeReleaseDirectory -Directory $transaction
+                    $transaction = $null
+                }
+            }
+            catch {
+                $recoveryFailure = $_.Exception
+            }
+
+            if ($null -ne $recoveryFailure) {
+                $retainedPath = if ($null -eq $transaction) {
+                    '<recovery path unavailable>'
+                }
+                else {
+                    $transaction.Path
+                }
+                if ($null -ne $transaction -and $null -ne $transaction.Lease) {
+                    $transaction.Lease.Dispose()
+                    $transaction.Lease = $null
+                }
+                $transaction = $null
+                throw [IO.IOException]::new(
+                    "Release artifact publication failed and Prepared rollback was incomplete. Transaction retained at '$retainedPath'. Publication failure: $($publicationFailure.Message) Recovery failure: $($recoveryFailure.Message)",
+                    $publicationFailure)
+            }
             throw [IO.IOException]::new(
                 "Release artifact publication failed; the prior complete set was preserved or restored: $($publicationFailure.Message)",
                 $publicationFailure)
@@ -658,6 +1101,8 @@ function Publish-ReleaseArtifactSet {
     }
     finally {
         Close-ReleaseArtifactLeases -Leases $finalLeases
+        Close-ReleaseArtifactLeases -Leases $backupLeases
+        Close-ReleaseArtifactLeases -Leases $priorLeases
         Close-ReleaseArtifactLeases -Leases $stagedLeases
         if ($null -ne $transaction -and $null -ne $transaction.Lease) {
             $transaction.Lease.Dispose()

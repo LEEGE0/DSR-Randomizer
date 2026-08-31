@@ -42,13 +42,36 @@ function Assert-ArtifactSet {
 function Assert-NoTransactionResidue {
     param([Parameter(Mandatory = $true)][string]$OutputRoot)
 
-    $residue = @(Get-ChildItem `
-        -LiteralPath $OutputRoot `
-        -Directory `
-        -Force `
-        -Filter 'release-publish-transaction-*')
+    $residue = @(Get-ChildItem -LiteralPath $OutputRoot -Directory -Force | Where-Object {
+            $_.Name.StartsWith('release-publish-transaction-', [StringComparison]::Ordinal) `
+                -or $_.Name.StartsWith('release-publish-committed-', [StringComparison]::Ordinal)
+        })
     if ($residue.Count -ne 0) {
         throw "Release publication left transaction residue: $($residue.FullName -join ', ')"
+    }
+}
+
+function Get-PublicationResidue {
+    param([Parameter(Mandatory = $true)][string]$OutputRoot)
+
+    return @(Get-ChildItem -LiteralPath $OutputRoot -Directory -Force | Where-Object {
+            $_.Name.StartsWith('release-publish-transaction-', [StringComparison]::Ordinal) `
+                -or $_.Name.StartsWith('release-publish-committed-', [StringComparison]::Ordinal)
+        })
+}
+
+function Assert-OneCommittedTransaction {
+    param([Parameter(Mandatory = $true)][string]$OutputRoot)
+
+    $residue = @(Get-PublicationResidue -OutputRoot $OutputRoot)
+    if ($residue.Count -ne 1) {
+        throw 'A cleanup failure did not retain exactly one publication transaction.'
+    }
+    $journal = Get-Content `
+        -LiteralPath (Join-Path $residue[0].FullName 'transaction-state.json') `
+        -Raw | ConvertFrom-Json
+    if ([string]$journal.phase -cne 'Committed') {
+        throw 'A cleanup failure did not retain a clearly Committed transaction.'
     }
 }
 
@@ -97,6 +120,60 @@ function Write-ArtifactSet {
         Bytes = $bytesByName
         ExpectedArchiveHashes = $expectedArchiveHashes
     }
+}
+
+function Get-ArtifactBlobHashes {
+    param([Parameter(Mandatory = $true)][Collections.IDictionary]$Bytes)
+
+    $result = [ordered]@{}
+    foreach ($name in $artifactNames) {
+        $result[$name] = [Convert]::ToHexString(
+            [Security.Cryptography.SHA256]::HashData([byte[]]$Bytes[$name])).ToLowerInvariant()
+    }
+    return $result
+}
+
+function Write-ArtifactBytes {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][Collections.IDictionary]$Bytes
+    )
+
+    foreach ($name in $artifactNames) {
+        [IO.File]::WriteAllBytes((Join-Path $Root $name), [byte[]]$Bytes[$name])
+    }
+}
+
+function New-RecoveryTransactionFixture {
+    param(
+        [Parameter(Mandatory = $true)][string]$OutputRoot,
+        [Parameter(Mandatory = $true)][ValidateSet('Prepared', 'Committed')][string]$Phase,
+        [Parameter(Mandatory = $true)][object]$PriorArtifacts,
+        [Parameter(Mandatory = $true)][object]$FinalArtifacts
+    )
+
+    $transactionPath = Join-Path $OutputRoot (
+        'release-publish-transaction-' + [Guid]::NewGuid().ToString('N'))
+    [IO.Directory]::CreateDirectory($transactionPath) | Out-Null
+    for ($index = 0; $index -lt $artifactNames.Count; $index++) {
+        [IO.File]::WriteAllBytes(
+            (Join-Path $transactionPath "previous-$index"),
+            [byte[]]$PriorArtifacts.Bytes[$artifactNames[$index]])
+    }
+    $state = [ordered]@{
+        schemaVersion = 3
+        phase = $Phase
+        hadPriorSet = $true
+        artifactNames = $artifactNames
+        expectedArchiveHashes = $FinalArtifacts.ExpectedArchiveHashes
+        expectedFinalBlobHashes = Get-ArtifactBlobHashes -Bytes $FinalArtifacts.Bytes
+        backupBlobHashes = Get-ArtifactBlobHashes -Bytes $PriorArtifacts.Bytes
+    }
+    [IO.File]::WriteAllText(
+        (Join-Path $transactionPath 'transaction-state.json'),
+        ($state | ConvertTo-Json -Compress -Depth 4),
+        [Text.UTF8Encoding]::new($false))
+    return $transactionPath
 }
 
 function Invoke-TestPublication {
@@ -220,6 +297,99 @@ try {
     Assert-ArtifactSet -Expected $oldArtifacts.Bytes -Root $rollbackCase.OutputRoot
     Assert-NoTransactionResidue -OutputRoot $rollbackCase.OutputRoot
 
+    $priorMutationCase = New-CaseDirectories -Root $testRoot -Name 'prior-mutation'
+    $priorMutationOld = Write-ArtifactSet -Root $priorMutationCase.OutputRoot -Prefix 'old'
+    $priorMutationNew = Write-ArtifactSet -Root $priorMutationCase.StagingRoot -Prefix 'new'
+    $priorMutationWasBlocked = $false
+    Assert-PublicationFailed `
+        -ExpectedMessage 'controlled publication failure after prior backup' `
+        -Action {
+            Invoke-TestPublication `
+                -Case $priorMutationCase `
+                -ExpectedArchiveHashes $priorMutationNew.ExpectedArchiveHashes `
+                -OperationHook {
+                    param($Phase, $Index, $Name)
+                    if ($Phase -eq 'BeforeBackup' -and $Index -eq 0) {
+                        try {
+                            [IO.File]::WriteAllBytes(
+                                (Join-Path $priorMutationCase.OutputRoot $artifactNames[0]),
+                                [byte[]](9, 9, 9, 9))
+                        }
+                        catch [IO.IOException] {
+                            $script:priorMutationWasBlocked = $true
+                        }
+                    }
+                    if ($Phase -eq 'BeforePublishCopy' -and $Index -eq 2) {
+                        throw 'controlled publication failure after prior backup'
+                    }
+                }
+        }
+    if (-not $priorMutationWasBlocked) {
+        throw 'The prior release lease did not block a backup-boundary mutation.'
+    }
+    Assert-ArtifactSet -Expected $priorMutationOld.Bytes -Root $priorMutationCase.OutputRoot
+    Assert-NoTransactionResidue -OutputRoot $priorMutationCase.OutputRoot
+
+    $lockedPriorCase = New-CaseDirectories -Root $testRoot -Name 'locked-prior'
+    $lockedPriorOld = Write-ArtifactSet -Root $lockedPriorCase.OutputRoot -Prefix 'old'
+    $lockedPriorNew = Write-ArtifactSet -Root $lockedPriorCase.StagingRoot -Prefix 'new'
+    $lockedPriorStream = [IO.File]::Open(
+        (Join-Path $lockedPriorCase.OutputRoot $artifactNames[0]),
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::Read,
+        [IO.FileShare]::None)
+    try {
+        Assert-PublicationFailed `
+            -ExpectedMessage 'lease prior release artifact' `
+            -Action {
+                Invoke-TestPublication `
+                    -Case $lockedPriorCase `
+                    -ExpectedArchiveHashes $lockedPriorNew.ExpectedArchiveHashes
+            }
+    }
+    finally {
+        $lockedPriorStream.Dispose()
+    }
+    Assert-ArtifactSet -Expected $lockedPriorOld.Bytes -Root $lockedPriorCase.OutputRoot
+    Assert-NoTransactionResidue -OutputRoot $lockedPriorCase.OutputRoot
+
+    $invalidPriorCase = New-CaseDirectories -Root $testRoot -Name 'invalid-prior-sidecar'
+    $invalidPriorOld = Write-ArtifactSet -Root $invalidPriorCase.OutputRoot -Prefix 'old'
+    $invalidPriorNew = Write-ArtifactSet -Root $invalidPriorCase.StagingRoot -Prefix 'new'
+    $invalidPriorBytes = [Text.UTF8Encoding]::new($false).GetBytes(
+        "$($invalidPriorOld.ExpectedArchiveHashes[$artifactNames[0]])  wrong.zip`n")
+    [IO.File]::WriteAllBytes(
+        (Join-Path $invalidPriorCase.OutputRoot $artifactNames[1]),
+        $invalidPriorBytes)
+    $invalidPriorOld.Bytes[$artifactNames[1]] = $invalidPriorBytes
+    Assert-PublicationFailed `
+        -ExpectedMessage 'Prior release checksum sidecar does not exactly match' `
+        -Action {
+            Invoke-TestPublication `
+                -Case $invalidPriorCase `
+                -ExpectedArchiveHashes $invalidPriorNew.ExpectedArchiveHashes
+        }
+    Assert-ArtifactSet -Expected $invalidPriorOld.Bytes -Root $invalidPriorCase.OutputRoot
+    Assert-NoTransactionResidue -OutputRoot $invalidPriorCase.OutputRoot
+
+    $priorHardLinkCase = New-CaseDirectories -Root $testRoot -Name 'prior-hard-link'
+    $priorHardLinkOld = Write-ArtifactSet -Root $priorHardLinkCase.OutputRoot -Prefix 'old'
+    $priorHardLinkNew = Write-ArtifactSet -Root $priorHardLinkCase.StagingRoot -Prefix 'new'
+    $priorAliasPath = Join-Path $priorHardLinkCase.OutputRoot 'prior-alias.bin'
+    New-Item `
+        -ItemType HardLink `
+        -Path $priorAliasPath `
+        -Target (Join-Path $priorHardLinkCase.OutputRoot $artifactNames[0]) | Out-Null
+    Assert-PublicationFailed `
+        -ExpectedMessage 'multiple hard links' `
+        -Action {
+            Invoke-TestPublication `
+                -Case $priorHardLinkCase `
+                -ExpectedArchiveHashes $priorHardLinkNew.ExpectedArchiveHashes
+        }
+    Assert-ArtifactSet -Expected $priorHardLinkOld.Bytes -Root $priorHardLinkCase.OutputRoot
+    Assert-NoTransactionResidue -OutputRoot $priorHardLinkCase.OutputRoot
+
     $mismatchedNameCase = New-CaseDirectories -Root $testRoot -Name 'sidecar-name'
     $mismatchedNameOld = Write-ArtifactSet -Root $mismatchedNameCase.OutputRoot -Prefix 'old'
     $mismatchedNameNew = Write-ArtifactSet -Root $mismatchedNameCase.StagingRoot -Prefix 'new'
@@ -335,6 +505,84 @@ try {
     Assert-ArtifactSet -Expected $replacementArtifacts.Bytes -Root $replacementCase.OutputRoot
     Assert-NoTransactionResidue -OutputRoot $replacementCase.OutputRoot
 
+    foreach ($lockedBackupIndex in @(0, 3)) {
+        $committedCleanupCase = New-CaseDirectories `
+            -Root $testRoot `
+            -Name "committed-cleanup-$lockedBackupIndex"
+        Write-ArtifactSet -Root $committedCleanupCase.OutputRoot -Prefix 'old' | Out-Null
+        $committedCleanupNew = Write-ArtifactSet `
+            -Root $committedCleanupCase.StagingRoot `
+            -Prefix 'new'
+        $cleanupLock = $null
+        try {
+            Assert-PublicationFailed `
+                -ExpectedMessage 'committed' `
+                -Action {
+                    Invoke-TestPublication `
+                        -Case $committedCleanupCase `
+                        -ExpectedArchiveHashes $committedCleanupNew.ExpectedArchiveHashes `
+                        -OperationHook {
+                            param($Phase, $Index, $Name)
+                            if ($Phase -eq 'BeforeCommittedBackupCleanup' `
+                                    -and $Index -eq $lockedBackupIndex) {
+                                $transactionPath = @(Get-PublicationResidue `
+                                    -OutputRoot $committedCleanupCase.OutputRoot)[0].FullName
+                                $script:cleanupLock = [IO.File]::Open(
+                                    (Join-Path $transactionPath "previous-$Index"),
+                                    [IO.FileMode]::Open,
+                                    [IO.FileAccess]::Read,
+                                    [IO.FileShare]::Read)
+                            }
+                        }
+                }
+            Assert-ArtifactSet `
+                -Expected $committedCleanupNew.Bytes `
+                -Root $committedCleanupCase.OutputRoot
+            Assert-OneCommittedTransaction -OutputRoot $committedCleanupCase.OutputRoot
+        }
+        finally {
+            if ($null -ne $cleanupLock) {
+                $cleanupLock.Dispose()
+            }
+        }
+        Invoke-TestPublication `
+            -Case $committedCleanupCase `
+            -ExpectedArchiveHashes $committedCleanupNew.ExpectedArchiveHashes
+        Assert-ArtifactSet `
+            -Expected $committedCleanupNew.Bytes `
+            -Root $committedCleanupCase.OutputRoot
+        Assert-NoTransactionResidue -OutputRoot $committedCleanupCase.OutputRoot
+    }
+
+    foreach ($cleanupPhase in @(
+            'BeforeCommittedJournalCleanup',
+            'BeforeCommittedDirectoryCleanup')) {
+        $cleanupFaultCase = New-CaseDirectories `
+            -Root $testRoot `
+            -Name $cleanupPhase
+        Write-ArtifactSet -Root $cleanupFaultCase.OutputRoot -Prefix 'old' | Out-Null
+        $cleanupFaultNew = Write-ArtifactSet `
+            -Root $cleanupFaultCase.StagingRoot `
+            -Prefix 'new'
+        Assert-PublicationFailed `
+            -ExpectedMessage 'committed' `
+            -Action {
+                Invoke-TestPublication `
+                    -Case $cleanupFaultCase `
+                    -ExpectedArchiveHashes $cleanupFaultNew.ExpectedArchiveHashes `
+                    -OperationHook {
+                        param($Phase, $Index, $Name)
+                        if ($Phase -eq $cleanupPhase) {
+                            throw "controlled committed cleanup fault: $cleanupPhase"
+                        }
+                    }
+            }
+        Assert-ArtifactSet `
+            -Expected $cleanupFaultNew.Bytes `
+            -Root $cleanupFaultCase.OutputRoot
+        Assert-OneCommittedTransaction -OutputRoot $cleanupFaultCase.OutputRoot
+    }
+
     $newCase = New-CaseDirectories -Root $testRoot -Name 'new'
     $newArtifacts = Write-ArtifactSet -Root $newCase.StagingRoot -Prefix 'first'
     Invoke-TestPublication `
@@ -360,6 +608,74 @@ try {
         -Expected $partialBytes `
         -Path (Join-Path $partialCase.OutputRoot $artifactNames[0])
     Assert-NoTransactionResidue -OutputRoot $partialCase.OutputRoot
+
+    $preparedRecoveryCase = New-CaseDirectories -Root $testRoot -Name 'prepared-recovery'
+    $preparedRecoveryOld = Write-ArtifactSet `
+        -Root $preparedRecoveryCase.OutputRoot `
+        -Prefix 'old'
+    $preparedRecoveryNew = Write-ArtifactSet `
+        -Root $preparedRecoveryCase.StagingRoot `
+        -Prefix 'new'
+    New-RecoveryTransactionFixture `
+        -OutputRoot $preparedRecoveryCase.OutputRoot `
+        -Phase 'Prepared' `
+        -PriorArtifacts $preparedRecoveryOld `
+        -FinalArtifacts $preparedRecoveryNew | Out-Null
+    Write-ArtifactBytes `
+        -Root $preparedRecoveryCase.OutputRoot `
+        -Bytes $preparedRecoveryNew.Bytes
+    Assert-PublicationFailed `
+        -ExpectedMessage 'controlled stop after recovery' `
+        -Action {
+            Invoke-TestPublication `
+                -Case $preparedRecoveryCase `
+                -ExpectedArchiveHashes $preparedRecoveryNew.ExpectedArchiveHashes `
+                -OperationHook {
+                    param($Phase, $Index, $Name)
+                    if ($Phase -eq 'AfterRecovery') {
+                        throw 'controlled stop after recovery'
+                    }
+                }
+        }
+    Assert-ArtifactSet `
+        -Expected $preparedRecoveryOld.Bytes `
+        -Root $preparedRecoveryCase.OutputRoot
+    Assert-NoTransactionResidue -OutputRoot $preparedRecoveryCase.OutputRoot
+
+    $committedRecoveryCase = New-CaseDirectories -Root $testRoot -Name 'committed-recovery'
+    $committedRecoveryOldRoot = Join-Path $testRoot 'committed-recovery-old'
+    [IO.Directory]::CreateDirectory($committedRecoveryOldRoot) | Out-Null
+    $committedRecoveryOld = Write-ArtifactSet `
+        -Root $committedRecoveryOldRoot `
+        -Prefix 'old'
+    $committedRecoveryNew = Write-ArtifactSet `
+        -Root $committedRecoveryCase.StagingRoot `
+        -Prefix 'new'
+    Write-ArtifactBytes `
+        -Root $committedRecoveryCase.OutputRoot `
+        -Bytes $committedRecoveryNew.Bytes
+    New-RecoveryTransactionFixture `
+        -OutputRoot $committedRecoveryCase.OutputRoot `
+        -Phase 'Committed' `
+        -PriorArtifacts $committedRecoveryOld `
+        -FinalArtifacts $committedRecoveryNew | Out-Null
+    Assert-PublicationFailed `
+        -ExpectedMessage 'controlled stop after recovery' `
+        -Action {
+            Invoke-TestPublication `
+                -Case $committedRecoveryCase `
+                -ExpectedArchiveHashes $committedRecoveryNew.ExpectedArchiveHashes `
+                -OperationHook {
+                    param($Phase, $Index, $Name)
+                    if ($Phase -eq 'AfterRecovery') {
+                        throw 'controlled stop after recovery'
+                    }
+                }
+        }
+    Assert-ArtifactSet `
+        -Expected $committedRecoveryNew.Bytes `
+        -Root $committedRecoveryCase.OutputRoot
+    Assert-NoTransactionResidue -OutputRoot $committedRecoveryCase.OutputRoot
 
     $staleCase = New-CaseDirectories -Root $testRoot -Name 'stale'
     $staleNew = Write-ArtifactSet -Root $staleCase.StagingRoot -Prefix 'new'
