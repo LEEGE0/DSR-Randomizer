@@ -190,14 +190,33 @@ try {
             throw "The verified release pair is incomplete: $stagedPath"
         }
     }
+    $prePrivacyArchiveHashes = [ordered]@{}
+    foreach ($archiveIndex in @(0, 2)) {
+        $archiveName = $releaseArtifactNames[$archiveIndex]
+        $prePrivacyArchiveHashes[$archiveName] = (Get-FileHash `
+            -LiteralPath (Join-Path $releaseOutput $archiveName) `
+            -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
     Assert-ReleaseArchivePrivacy -ArchivePath (
         Join-Path $releaseOutput $releaseArtifactNames[0])
     Assert-ReleaseArchivePrivacy -ArchivePath (
         Join-Path $releaseOutput $releaseArtifactNames[2])
+    $gatedArchiveHashes = [ordered]@{}
+    foreach ($archiveIndex in @(0, 2)) {
+        $archiveName = $releaseArtifactNames[$archiveIndex]
+        $gatedHash = (Get-FileHash `
+            -LiteralPath (Join-Path $releaseOutput $archiveName) `
+            -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($gatedHash -cne $prePrivacyArchiveHashes[$archiveName]) {
+            throw "A release ZIP changed while its final privacy gate was running: $archiveName"
+        }
+        $gatedArchiveHashes[$archiveName] = $gatedHash
+    }
     Publish-ReleaseArtifactSet `
         -StagingRoot $releaseOutput `
         -OutputRoot $outputDirectory.Path `
-        -ArtifactNames $releaseArtifactNames
+        -ArtifactNames $releaseArtifactNames `
+        -ExpectedArchiveHashes $gatedArchiveHashes
 }
 finally {
     try {
