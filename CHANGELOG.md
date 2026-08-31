@@ -10,7 +10,7 @@ All notable changes to DSR Randomizer are documented here.
 - Recipient-controlled bridge installation beneath the selected external root, with strict four-property manifest validation, embedded SHA-256 identities, safe replacement, final re-verification, and matching no-op behavior.
 - Korean recipient guide covering official third-party download sources, the copied-runtime layout, Steam Offline Mode, save isolation, validation, rollback, and redistribution exclusions.
 - Exact 12-path package allowlist, staged and freshly extracted package validation, deterministic ZIP construction, and SHA-256 sidecar generation.
-- Deterministic corresponding-source ZIP and checksum containing the committed project tree plus the actual pinned SoulsFormatsNEXT contents.
+- Deterministic corresponding-source ZIP and checksum containing the committed project tree plus the actual pinned SoulsFormatsNEXT, ZstdNet 1.4.5, and Zstandard 1.4.5 contents.
 
 ### Changed
 
@@ -20,11 +20,12 @@ All notable changes to DSR Randomizer are documented here.
 - The release builder uses unique fail-if-exists work, staging, and extraction directories; rejects reparse/alias escapes; cleans only verified descendants; and preserves final ZIP/checksum outputs on successful cleanup.
 - The bridge-host Release publish contains no private absolute PDB path after the byte-level privacy gate rejected an earlier local-path disclosure.
 - The project-owned SoulsFormats subset omits TPF/DrSwizzler support and the unused BouncyCastle runtime while retaining the BND3/PARAM/DCX merge path; full ZstdNet/libzstd notices and SoulsFormatsNEXT corresponding-source obligations are included.
+- The release builder now fails closed unless the main repository is committed and clean and every recursive submodule is initialized, clean, and exactly at its pinned gitlink; it checks the same invariant again after binary staging and before source archiving.
 
 ### Verification
 
-- 438/438 managed Release tests and 15/15 native Release tests pass.
-- Clean-root bridge installation, tamper repair, extracted-binary-ZIP validation, parsed host bundle/dependency inspection, deterministic source-archive validation, strict manifest/hash validation, prohibited-content scans, exact-entry inspection, and checksum recomputation are part of the release gate.
+- 444/444 managed Release tests and 15/15 native Release tests pass.
+- Clean-root bridge installation, tamper repair, extracted-binary-ZIP validation, parsed host bundle/dependency inspection, deterministic exact-three-submodule source-archive validation, clean source-state enforcement, strict manifest/hash validation, prohibited-content scans, exact-entry inspection, extracted-source host rebuild, and checksum recomputation are part of the release gate.
 
 ## [0.1.0-alpha.1] - 2026-08-24
 

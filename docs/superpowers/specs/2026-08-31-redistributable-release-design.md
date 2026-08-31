@@ -56,9 +56,21 @@ DSR-for-MOD-v0.1.0-alpha.2-source.zip
 DSR-for-MOD-v0.1.0-alpha.2-source.zip.sha256
 ```
 
-The source archive is generated from committed `HEAD`, then overlays the actual pinned SoulsFormatsNEXT commit contents rather than a gitlink alone. It uses one versioned root prefix, ordinally sorted unique entries, and a fixed 1980 timestamp. It contains the main solution, subset project and modification notice, build/release scripts, project license files, and complete pinned SoulsFormatsNEXT source/license. It excludes `.git`, `bin`, `obj`, `artifacts`, `.superpowers`, private/generated working data, traversal, rooted paths, aliases, and duplicates.
+The source archive is generated from committed `HEAD`, then overlays the actual contents of all three pinned upstream commits rather than their gitlinks alone:
+
+- SoulsFormatsNEXT `55b08a3c02a03777cf19958d8f6aa18d7af59da1`, including its complete source and GPL license;
+- ZstdNet `c90152918f633e945f163652e6368001556784e7`, including its managed source, project/build inputs, and BSD license;
+- Zstandard `b706286adbba780006a47ef92df0ad7a785666b6`, including its native library source, build inputs, and BSD license.
+
+It uses one versioned root prefix, ordinally sorted unique entries, and a fixed 1980 timestamp. It contains the main solution, subset project and modification notice, build/release scripts, project license files, and those three complete pinned trees. It excludes `.git`, `bin`, `obj`, `artifacts`, `.superpowers`, private/generated working data, traversal, rooted paths, aliases, and duplicates. On Windows, recipients should extract it near a drive root or system temporary root to avoid legacy MSBuild path-length behavior; the included README provides exact host restore/build commands.
 
 The binary ZIP/checksum must be conveyed with this exact source ZIP/checksum, or equivalent same-place gratis access to the exact source must be maintained under GPL-3.0. A tracked document must not embed the source ZIP's own hash because that would make the archive identity self-referential.
+
+## Immutable Release Source State
+
+Before any official binary build, the main repository must resolve to a committed `HEAD`; all tracked files and all nonignored untracked files must be clean. Ignored generated outputs such as `artifacts`, `bin`, and `obj` are permitted. Every recursive submodule must be initialized, at the exact gitlink revision, and clean, and the three release-contract revisions above must match exactly. Errors identify whether the main tree or a named submodule violates the invariant.
+
+The same invariant is checked after binary staging and again inside the source builder immediately before it archives committed objects. The builder stages the binary ZIP, source ZIP, and both sidecars privately and publishes none of the four final outputs until all construction and state checks succeed. Tests cover clean exact state, dirty tracked main state, a nonignored untracked compile input, an uninitialized submodule, a wrong submodule HEAD, and a dirty submodule using isolated temporary repositories.
 
 The bridge manifest uses UTF-8 without a byte-order mark and this schema:
 
@@ -195,7 +207,7 @@ A release is deliverable only after fresh evidence for all of the following:
 - ZIP inspection confirms the exact allowlist and no local game/personal artifacts.
 - the SHA-256 sidecar matches a fresh hash of the final ZIP.
 - the official host's parsed .NET v6 bundle manifest and embedded deps JSON contain neither DrSwizzler nor BouncyCastle, while every retained non-runtime dependency has a complete shipped notice.
-- the source archive has deterministic safe entries, contains the committed project and actual pinned SoulsFormatsNEXT contents, excludes repository/build/private state, and its checksum matches.
+- the source archive has deterministic safe entries, matches the committed project plus every file in the exact pinned SoulsFormatsNEXT, ZstdNet, and Zstandard trees, excludes repository/build/private state, and its checksum matches.
 - the extracted source can restore and build the bridge-host project.
 
 If any verification is red, the release must be reported as incomplete; no “all tests pass” claim is allowed.

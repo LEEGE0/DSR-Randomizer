@@ -6,7 +6,7 @@ DSR for MOD creates an isolated Dark Souls Remastered mod runtime beneath a reci
 
 ## Redistribution boundary
 
-The binary release ZIP contains exactly 12 allowlisted paths: the project launcher; native offline/save guard and checksum; pinned compatibility profile; project-owned RMM bridge DLL and self-contained bridge host; a strict bridge deployment manifest; and the license, notices, changelog, overview, and Korean guide. Package validation rejects any extra or missing path and any mismatched pinned artifact. A separate deterministic `DSR-for-MOD-v0.1.0-alpha.2-source.zip` contains the committed corresponding source, including the actual pinned SoulsFormatsNEXT tree.
+The binary release ZIP contains exactly 12 allowlisted paths: the project launcher; native offline/save guard and checksum; pinned compatibility profile; project-owned RMM bridge DLL and self-contained bridge host; a strict bridge deployment manifest; and the license, notices, changelog, overview, and Korean guide. Package validation rejects any extra or missing path and any mismatched pinned artifact. A separate deterministic `DSR-for-MOD-v0.1.0-alpha.2-source.zip` contains the committed corresponding source, including the actual pinned SoulsFormatsNEXT, ZstdNet 1.4.5, and Zstandard 1.4.5 source trees.
 
 The archive does **not** contain, download, or install:
 
@@ -42,7 +42,18 @@ DSRForMod.Launcher.exe --validate-package <directory>
 
 ## Release verification
 
-The `0.1.0-alpha.2` release path builds in unique, reparse-safe work directories, cleans only verified work descendants, validates staging and a fresh binary-ZIP extraction, and emits SHA-256 sidecars for the binary and source archives. The source archive is generated from committed `HEAD`, overlays the exact pinned submodule contents, uses sorted fixed-timestamp entries, and excludes Git metadata, build outputs, artifacts, and private working data. The Release host contains no private absolute PDB path. Its parsed .NET v6 bundle manifest and embedded dependency manifest contain neither DrSwizzler nor BouncyCastle; the retained ZstdNet/libzstd notices are reproduced in full. The final gate covers 438 managed tests and 15 native tests. Native integration uses a distinct test-only callsite profile; production pinned executable verification remains strict. Generated archives and checksums remain build artifacts and are not source-controlled.
+The `0.1.0-alpha.2` release path builds in unique, reparse-safe work directories, cleans only verified work descendants, validates staging and a fresh binary-ZIP extraction, and emits SHA-256 sidecars for the binary and source archives. Before building and again after binary staging, it requires committed `HEAD`, no tracked or nonignored untracked main-tree changes, and every recursive submodule initialized, clean, and exactly at its gitlink. The source archive overlays the exact pinned SoulsFormatsNEXT, ZstdNet, and Zstandard contents, uses sorted fixed-timestamp entries, and excludes Git metadata, build outputs, artifacts, and private working data. The Release host contains no private absolute PDB path. Its parsed .NET v6 bundle manifest and embedded dependency manifest contain neither DrSwizzler nor BouncyCastle; the retained ZstdNet/libzstd notices are reproduced in full. The final gate covers 444 managed tests and 15 native tests. Native integration uses a distinct test-only callsite profile; production pinned executable verification remains strict. Generated archives and checksums remain build artifacts and are not source-controlled.
+
+## Building from the corresponding-source ZIP
+
+On Windows, extract the source ZIP to a reasonably short directory near a drive root or system temporary root. Deeply nested extraction paths can reach legacy MSBuild path-length behavior before compilation begins. From the extracted versioned directory, restore and build the relevant host with:
+
+```powershell
+dotnet restore src/DSRRandomizer.RmmBridgeHost/DSRRandomizer.RmmBridgeHost.csproj
+dotnet build src/DSRRandomizer.RmmBridgeHost/DSRRandomizer.RmmBridgeHost.csproj -c Release --no-restore -nr:false
+```
+
+The exact upstream rebuild inputs are included under `third_party/SoulsFormatsNEXT`, `third_party/ZstdNet`, and `third_party/zstd`, including their license, project/build, managed wrapper, and native library sources. The source ZIP intentionally excludes `.git`; use the official upstream URLs and pinned revisions in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) when repository history or upstream-specific build instructions are needed.
 
 ## License
 

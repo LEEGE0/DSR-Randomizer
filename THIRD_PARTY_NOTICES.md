@@ -17,7 +17,13 @@ DSR-for-MOD-v0.1.0-alpha.2-source.zip
 DSR-for-MOD-v0.1.0-alpha.2-source.zip.sha256
 ```
 
-That deterministic archive is made from the committed main-repository tree and the actual pinned SoulsFormatsNEXT tree, not merely a submodule pointer. It includes the project solution, the subset project and modification notice, release/build scripts, applicable license files, and the complete pinned SoulsFormatsNEXT source. It excludes Git metadata, build outputs, generated release artifacts, and private working data.
+That deterministic archive is made from the committed main-repository tree and the actual contents of all three pinned upstream trees, not merely their submodule pointers:
+
+- SoulsFormatsNEXT commit `55b08a3c02a03777cf19958d8f6aa18d7af59da1`: https://github.com/soulsmods/SoulsFormatsNEXT/tree/55b08a3c02a03777cf19958d8f6aa18d7af59da1
+- ZstdNet commit `c90152918f633e945f163652e6368001556784e7`: https://github.com/skbkontur/ZstdNet/tree/c90152918f633e945f163652e6368001556784e7
+- Zstandard commit `b706286adbba780006a47ef92df0ad7a785666b6`: https://github.com/facebook/zstd/tree/b706286adbba780006a47ef92df0ad7a785666b6
+
+It includes the project solution, the subset project and modification notice, release/build scripts, applicable license files, the complete pinned SoulsFormatsNEXT source, the ZstdNet managed wrapper source/project files, and the Zstandard native source/build inputs. It excludes Git metadata, build outputs, generated release artifacts, and private working data.
 
 The 12-path binary ZIP is not itself a corresponding-source archive. Convey the binary ZIP and checksum together with the exact source ZIP and checksum, or provide equivalent gratis access to that exact source at the same place, for as long as the GPL requires. Do not redistribute the binary alone unless you independently satisfy GPL-3.0 section 6 for the exact distributed build.
 
@@ -29,6 +35,8 @@ Primary sources:
 
 - ZstdNet wrapper: https://raw.githubusercontent.com/skbkontur/ZstdNet/c90152918f633e945f163652e6368001556784e7/LICENSE
 - bundled Zstandard 1.4.5: https://raw.githubusercontent.com/facebook/zstd/b706286adbba780006a47ef92df0ad7a785666b6/LICENSE
+- ZstdNet exact source tree: https://github.com/skbkontur/ZstdNet/tree/c90152918f633e945f163652e6368001556784e7
+- Zstandard exact source tree: https://github.com/facebook/zstd/tree/b706286adbba780006a47ef92df0ad7a785666b6
 
 ### ZstdNet wrapper license
 

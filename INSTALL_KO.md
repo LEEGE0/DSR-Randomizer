@@ -1,6 +1,6 @@
 # DSR for MOD v0.1.0-alpha.2 설치 안내
 
-이 문서는 배포 ZIP을 받은 사람이 자신의 Steam 정품 Dark Souls Remastered와 자신이 직접 받은 Randomizer를 사용해 별도의 모드 런타임을 만드는 절차입니다. 배포자는 12경로 바이너리 ZIP/체크섬과 함께 같은 버전의 `-source.zip`/체크섬도 제공해야 합니다. 소스 ZIP은 GPL corresponding source이며 런처 실행을 위해 풀 필요는 없습니다.
+이 문서는 배포 ZIP을 받은 사람이 자신의 Steam 정품 Dark Souls Remastered와 자신이 직접 받은 Randomizer를 사용해 별도의 모드 런타임을 만드는 절차입니다. 배포자는 12경로 바이너리 ZIP/체크섬과 함께 같은 버전의 `-source.zip`/체크섬도 제공해야 합니다. 소스 ZIP은 GPL corresponding source이며 런처 실행을 위해 풀 필요는 없습니다. 이 소스 묶음에는 프로젝트 코드와 함께 실제 고정 SoulsFormatsNEXT, ZstdNet 1.4.5, Zstandard 1.4.5 source/build tree가 들어 있습니다.
 
 ## 이 ZIP에 포함된 것과 포함되지 않은 것
 
