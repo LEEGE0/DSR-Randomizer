@@ -13,7 +13,7 @@ Set-StrictMode -Version Latest
 Import-Module (Join-Path $PSScriptRoot 'SafeReleaseDirectories.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'ReleaseSourceState.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'ReleasePrivacy.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'ReleaseArtifactPromotion.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'ReleaseRedistributable.psm1') -Force
 
 function Invoke-CheckedCommand {
     param(
@@ -25,6 +25,22 @@ function Invoke-CheckedCommand {
     & $FilePath @Arguments
     if ($LASTEXITCODE -ne 0) {
         throw "$FailureMessage Exit code: $LASTEXITCODE"
+    }
+}
+
+function Assert-PrivateReleaseSidecar {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArchivePath,
+        [Parameter(Mandatory = $true)][string]$ExpectedSha256
+    )
+
+    $archiveName = [IO.Path]::GetFileName($ArchivePath)
+    $sidecarPath = "$ArchivePath.sha256"
+    $expectedBytes = [Text.UTF8Encoding]::new($false).GetBytes(
+        "$ExpectedSha256  $archiveName`n")
+    $actualBytes = [IO.File]::ReadAllBytes($sidecarPath)
+    if ([Convert]::ToHexString($actualBytes) -cne [Convert]::ToHexString($expectedBytes)) {
+        throw "Private release sidecar is not strictly bound to its archive: $sidecarPath"
     }
 }
 
@@ -178,32 +194,38 @@ try {
             $releaseOutput) `
         -FailureMessage 'Corresponding-source packaging failed.'
 
-    $releaseArtifactNames = @(
-        "DSR-for-MOD-v$Version-win-x64.zip",
-        "DSR-for-MOD-v$Version-win-x64.zip.sha256",
-        "DSR-for-MOD-v$Version-source.zip",
-        "DSR-for-MOD-v$Version-source.zip.sha256"
+    $binaryName = "DSR-for-MOD-v$Version-win-x64.zip"
+    $sourceName = "DSR-for-MOD-v$Version-source.zip"
+    $privateArtifactNames = @(
+        $binaryName,
+        "$binaryName.sha256",
+        $sourceName,
+        "$sourceName.sha256"
     )
-    foreach ($name in $releaseArtifactNames) {
+    foreach ($name in $privateArtifactNames) {
         $stagedPath = Join-Path $releaseOutput $name
         if (-not (Test-Path -LiteralPath $stagedPath -PathType Leaf)) {
             throw "The verified release pair is incomplete: $stagedPath"
         }
     }
+    $binaryPath = Join-Path $releaseOutput $binaryName
+    $sourcePath = Join-Path $releaseOutput $sourceName
     $prePrivacyArchiveHashes = [ordered]@{}
-    foreach ($archiveIndex in @(0, 2)) {
-        $archiveName = $releaseArtifactNames[$archiveIndex]
+    foreach ($archiveName in @($binaryName, $sourceName)) {
         $prePrivacyArchiveHashes[$archiveName] = (Get-FileHash `
             -LiteralPath (Join-Path $releaseOutput $archiveName) `
             -Algorithm SHA256).Hash.ToLowerInvariant()
     }
-    Assert-ReleaseArchivePrivacy -ArchivePath (
-        Join-Path $releaseOutput $releaseArtifactNames[0])
-    Assert-ReleaseArchivePrivacy -ArchivePath (
-        Join-Path $releaseOutput $releaseArtifactNames[2])
+    Assert-PrivateReleaseSidecar `
+        -ArchivePath $binaryPath `
+        -ExpectedSha256 $prePrivacyArchiveHashes[$binaryName]
+    Assert-PrivateReleaseSidecar `
+        -ArchivePath $sourcePath `
+        -ExpectedSha256 $prePrivacyArchiveHashes[$sourceName]
+    Assert-ReleaseArchivePrivacy -ArchivePath $binaryPath
+    Assert-ReleaseArchivePrivacy -ArchivePath $sourcePath
     $gatedArchiveHashes = [ordered]@{}
-    foreach ($archiveIndex in @(0, 2)) {
-        $archiveName = $releaseArtifactNames[$archiveIndex]
+    foreach ($archiveName in @($binaryName, $sourceName)) {
         $gatedHash = (Get-FileHash `
             -LiteralPath (Join-Path $releaseOutput $archiveName) `
             -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -212,11 +234,33 @@ try {
         }
         $gatedArchiveHashes[$archiveName] = $gatedHash
     }
-    Publish-ReleaseArtifactSet `
-        -StagingRoot $releaseOutput `
+    $redistributableName = "DSR-for-MOD-v$Version-redistributable.zip"
+    $redistributablePath = Join-Path $releaseOutput $redistributableName
+    New-ReleaseRedistributableArchive `
+        -Version $Version `
+        -SourceArchivePath $sourcePath `
+        -BinaryArchivePath $binaryPath `
+        -OutputPath $redistributablePath
+    $redistributable = Assert-ReleaseRedistributableArchive `
+        -ArchivePath $redistributablePath `
+        -Version $Version
+    if ($redistributable.SourceSha256 -cne $gatedArchiveHashes[$sourceName] `
+            -or $redistributable.BinarySha256 -cne $gatedArchiveHashes[$binaryName]) {
+        throw 'Redistributable inner archives do not match their final gated hashes.'
+    }
+    Assert-ReleaseArchivePrivacy -ArchivePath $redistributablePath
+    $expectedRedistributableHash = (Get-FileHash `
+        -LiteralPath $redistributablePath `
+        -Algorithm SHA256).Hash.ToLowerInvariant()
+    Publish-ReleaseRedistributableArchive `
+        -StagedArchivePath $redistributablePath `
         -OutputRoot $outputDirectory.Path `
-        -ArtifactNames $releaseArtifactNames `
-        -ExpectedArchiveHashes $gatedArchiveHashes
+        -FileName $redistributableName `
+        -ExpectedSha256 $expectedRedistributableHash `
+        -Version $Version
+    Remove-LegacyReleaseArtifacts `
+        -OutputRoot $outputDirectory.Path `
+        -Names $privateArtifactNames
 }
 finally {
     try {

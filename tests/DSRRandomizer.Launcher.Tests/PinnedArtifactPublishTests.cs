@@ -36,7 +36,7 @@ public sealed class PinnedArtifactPublishTests : IDisposable
         $"dsr-official-release-{Guid.NewGuid():N}");
 
     [Fact]
-    public async Task OfficialReleaseBuildPublishesPinnedPairAndCreatesValidatedExactArchive()
+    public async Task OfficialReleaseBuildPublishesOneValidatedRedistributableArchive()
     {
         var repositoryRoot = FindRepositoryRoot();
         var existingWorkDirectories = ReleaseWorkDirectories(repositoryRoot);
@@ -46,12 +46,40 @@ public sealed class PinnedArtifactPublishTests : IDisposable
             $"build-release.ps1 failed with exit code {build.ExitCode}.\n{build.Output}");
         Assert.Equal(existingWorkDirectories, ReleaseWorkDirectories(repositoryRoot));
 
-        var zipPath = Path.Combine(
+        var redistributablePath = Path.Combine(
             _packageOutputRoot,
-            $"DSR-for-MOD-v{Version}-win-x64.zip");
-        var checksumPath = $"{zipPath}.sha256";
-        Assert.True(File.Exists(zipPath), $"Release ZIP is missing: {zipPath}");
-        Assert.True(File.Exists(checksumPath), $"Release checksum is missing: {checksumPath}");
+            $"DSR-for-MOD-v{Version}-redistributable.zip");
+        Assert.True(
+            File.Exists(redistributablePath),
+            $"Redistributable ZIP is missing: {redistributablePath}");
+        var sourceName = $"DSR-for-MOD-v{Version}-source.zip";
+        var binaryName = $"DSR-for-MOD-v{Version}-win-x64.zip";
+        var redistributableEntries = new[] { sourceName, binaryName, "SHA256SUMS.txt" };
+
+        using (var archive = ZipFile.OpenRead(redistributablePath))
+        {
+            Assert.Equal(
+                redistributableEntries,
+                archive.Entries.Select(entry => entry.FullName));
+            Assert.All(
+                archive.Entries,
+                entry => Assert.Equal(
+                    new DateTime(1980, 1, 1, 0, 0, 0, DateTimeKind.Unspecified),
+                    entry.LastWriteTime.DateTime));
+        }
+
+        var componentRoot = Path.Combine(_packageOutputRoot, "redistributable-components");
+        ZipFile.ExtractToDirectory(redistributablePath, componentRoot);
+        var sourcePath = Path.Combine(componentRoot, sourceName);
+        var zipPath = Path.Combine(componentRoot, binaryName);
+        Assert.True(File.Exists(sourcePath), $"Inner source ZIP is missing: {sourcePath}");
+        Assert.True(File.Exists(zipPath), $"Inner binary ZIP is missing: {zipPath}");
+        var expectedSums =
+            $"{Sha256(sourcePath).ToLowerInvariant()}  {sourceName}\n" +
+            $"{Sha256(zipPath).ToLowerInvariant()}  {binaryName}\n";
+        Assert.Equal(
+            expectedSums,
+            await File.ReadAllTextAsync(Path.Combine(componentRoot, "SHA256SUMS.txt")));
 
         using (var archive = ZipFile.OpenRead(zipPath))
         {
@@ -65,7 +93,7 @@ public sealed class PinnedArtifactPublishTests : IDisposable
                     entry.LastWriteTime.DateTime));
         }
 
-        var extractedRoot = Path.Combine(_packageOutputRoot, "independent-extract");
+        var extractedRoot = Path.Combine(_packageOutputRoot, "independent-binary-extract");
         ZipFile.ExtractToDirectory(zipPath, extractedRoot);
         var validation = await RunProcessAsync(
             Path.Combine(extractedRoot, "DSRForMod.Launcher.exe"),
@@ -107,10 +135,11 @@ public sealed class PinnedArtifactPublishTests : IDisposable
                 "DSRRandomizer.RmmBridge.dll")),
             Sha256(extractedBridge));
 
-        var zipHash = Sha256(zipPath).ToLowerInvariant();
-        Assert.Equal(
-            $"{zipHash}  {Path.GetFileName(zipPath)}\n",
-            (await File.ReadAllTextAsync(checksumPath)).Replace("\r\n", "\n", StringComparison.Ordinal));
+        Assert.Empty(
+            Directory.EnumerateFiles(
+                _packageOutputRoot,
+                "*.sha256",
+                SearchOption.TopDirectoryOnly));
     }
 
     [Fact]
@@ -321,12 +350,9 @@ public sealed class PinnedArtifactPublishTests : IDisposable
         Directory.CreateDirectory(_packageOutputRoot);
         var zipPath = Path.Combine(
             _packageOutputRoot,
-            $"DSR-for-MOD-v{Version}-win-x64.zip");
-        var checksumPath = $"{zipPath}.sha256";
+            $"DSR-for-MOD-v{Version}-redistributable.zip");
         var originalZip = new byte[] { 1, 3, 3, 7 };
-        var originalChecksum = new byte[] { 4, 2 };
         await File.WriteAllBytesAsync(zipPath, originalZip);
-        await File.WriteAllBytesAsync(checksumPath, originalChecksum);
         var existingWorkDirectories = ReleaseWorkDirectories(repositoryRoot);
 
         var build = await BuildReleaseAsync(
@@ -340,7 +366,6 @@ public sealed class PinnedArtifactPublishTests : IDisposable
         Assert.Equal(existingWorkDirectories, ReleaseWorkDirectories(repositoryRoot));
         Assert.Contains("Native Release build or tests failed", build.Output, StringComparison.Ordinal);
         Assert.Equal(originalZip, await File.ReadAllBytesAsync(zipPath));
-        Assert.Equal(originalChecksum, await File.ReadAllBytesAsync(checksumPath));
     }
 
     [Theory]
@@ -409,7 +434,7 @@ public sealed class PinnedArtifactPublishTests : IDisposable
     }
 
     [Fact]
-    public async Task ReleaseArtifactPromotionIsTransactionalAcrossAllFourOutputs()
+    public async Task ReleaseRedistributablePublicationIsAtomicAndSerialized()
     {
         var repositoryRoot = FindRepositoryRoot();
         var result = await RunProcessAsync(
@@ -423,11 +448,11 @@ public sealed class PinnedArtifactPublishTests : IDisposable
                 repositoryRoot,
                 "packaging",
                 "tests",
-                "Test-ReleaseArtifactPromotion.ps1"));
+                "Test-ReleaseRedistributable.ps1"));
 
         Assert.True(
             result.ExitCode == 0,
-            $"Release artifact-promotion test failed with exit code {result.ExitCode}.\n{result.Output}");
+            $"Release redistributable test failed with exit code {result.ExitCode}.\n{result.Output}");
     }
 
     [Fact]

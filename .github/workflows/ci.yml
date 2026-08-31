@@ -34,7 +34,5 @@ jobs:
         run: ./packaging/build-release.ps1 -Version 0.1.0-alpha.2 -OutputPath artifacts
       - uses: actions/upload-artifact@v4
         with:
-          name: DSR-for-MOD-binary-and-source
-          path: |
-            artifacts/DSR-for-MOD-*.zip
-            artifacts/DSR-for-MOD-*.zip.sha256
+          name: DSR-for-MOD-redistributable
+          path: artifacts/DSR-for-MOD-*-redistributable.zip
