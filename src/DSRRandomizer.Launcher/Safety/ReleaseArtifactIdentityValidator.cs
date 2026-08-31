@@ -111,9 +111,9 @@ internal static class ReleaseArtifactIdentityValidator
             }
 
             var properties = root.EnumerateObject().ToArray();
-            if (properties.Length != 5
+            if (properties.Length != 4
                 || properties.Any(property => property.Name is not (
-                    "schemaVersion" or "configuration" or "runtimeId" or "bridgeSha256" or "hostSha256")))
+                    "schemaVersion" or "configuration" or "bridgeSha256" or "hostSha256")))
             {
                 return false;
             }
@@ -125,9 +125,6 @@ internal static class ReleaseArtifactIdentityValidator
                    && root.TryGetProperty("configuration", out var configuration)
                    && configuration.ValueKind == JsonValueKind.String
                    && configuration.GetString() == "Release"
-                   && root.TryGetProperty("runtimeId", out var runtimeId)
-                   && runtimeId.ValueKind == JsonValueKind.String
-                   && !string.IsNullOrEmpty(runtimeId.GetString())
                    && root.TryGetProperty("bridgeSha256", out var bridgeHash)
                    && bridgeHash.ValueKind == JsonValueKind.String
                    && bridgeHash.GetString() == identities.BridgeSha256

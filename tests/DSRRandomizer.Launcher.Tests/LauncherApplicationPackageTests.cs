@@ -218,6 +218,23 @@ public sealed class LauncherApplicationPackageTests : IDisposable
             StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task RunAsync_ValidatePackageRejectsManifestWithUnexpectedFifthProperty()
+    {
+        await CreateCompletePackageAsync();
+        var manifestPath = PackagePath("components/rmm-bridge/deployment-manifest.json");
+        var manifest = await File.ReadAllTextAsync(manifestPath);
+        await File.WriteAllTextAsync(manifestPath, $"{manifest[..^1]},\"runtimeId\":\"win-x64\"}}");
+
+        var (exitCode, output) = await ValidatePackageAsync();
+
+        Assert.Equal(6, exitCode);
+        Assert.Contains(
+            "mismatch:components/rmm-bridge/deployment-manifest.json",
+            output,
+            StringComparison.Ordinal);
+    }
+
     private async Task CreateCompletePackageAsync()
     {
         Directory.CreateDirectory(_packageRoot);
@@ -266,7 +283,7 @@ public sealed class LauncherApplicationPackageTests : IDisposable
             .ToLowerInvariant();
         await File.WriteAllTextAsync(
             PackagePath("components/rmm-bridge/deployment-manifest.json"),
-            $"{{\"schemaVersion\":1,\"configuration\":\"Release\",\"runtimeId\":\"win-x64\",\"bridgeSha256\":\"{bridgeHash}\",\"hostSha256\":\"{hostHash}\"}}");
+            $"{{\"schemaVersion\":1,\"configuration\":\"Release\",\"bridgeSha256\":\"{bridgeHash}\",\"hostSha256\":\"{hostHash}\"}}");
     }
 
     private async Task<(int ExitCode, string Output)> ValidatePackageAsync()
