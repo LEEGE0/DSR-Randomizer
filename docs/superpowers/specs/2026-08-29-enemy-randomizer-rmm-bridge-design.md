@@ -1,19 +1,21 @@
 # Enemy Randomizer RMM Bridge Design
 
+**Status:** Implemented bridge architecture. The committed product entrypoint is now DSR for MOD's `Launch modded copy`; direct Enemy Randomizer `Launch DS1` instructions in the original proposal are superseded.
+
 ## 1. Purpose
 
-Make Matt's DS1 Enemy Randomizer v0.1.3 load and save only the existing dedicated `DRAKS0005.rmm` when the user presses the randomizer's built-in `Launch DS1` button.
+Make the integrated Randomizer launch load and save only the existing dedicated `DRAKS0005.rmm` when the user starts the copied game from DSR for MOD.
 
 The enemy randomizer remains in its self-contained directory and continues to use its bundled Mod Engine 2 launcher and loose-file mod output. The Steam installation, normal `DRAKS0005.sl2`, and Overhaul save remain outside every permitted write path.
 
 ## 2. Confirmed environment
 
-- External root: `D:\DSR MOD`
+- External root: recipient-selected `<external-root>`
 - Active copied runtime: resolved through `runtime-current.json`
 - Selected save profile: resolved through `config\selected-save-profile.json`
 - Dedicated save: `saves\<SteamID>\DRAKS0005.rmm`
-- Current selected Steam ID: `146808034`
-- Enemy randomizer: `runtimes\<runtime-id>\Mods\DS1 Enemy Randomizer-922-v0-1-3-1778373918\DS1EnemyRandomizer`
+- Selected Steam ID: resolved at runtime and never recorded in repository documentation
+- Enemy randomizer: `runtimes\<runtime-id>\Mods\<optional-package>\DS1EnemyRandomizer`
 - Enemy randomizer launches the copied game through its bundled Mod Engine 2 fork.
 - The existing project launcher already redirects `DRAKS0005.sl2` to `.rmm`, but that protection is absent when the enemy randomizer launches Mod Engine directly.
 
@@ -21,7 +23,7 @@ The `.rmm` is a standard 4,326,608-byte DSR save container with a private extens
 
 ## 3. Constraints
 
-- Preserve the exact `Launch DS1` user workflow.
+- Preserve the Randomizer generation workflow while using the project launcher for the final game start.
 - Do not patch or redistribute the third-party `DS1EnemyRandomizer.exe`.
 - Do not move the enemy randomizer into the copied game root.
 - Preserve Mod Engine loose-file loading so item and enemy randomizer merging continues to work.
@@ -106,7 +108,7 @@ Bridge initialization is fail closed.
 Deploy the bridge components beneath:
 
 ```text
-D:\DSR MOD\components\rmm-bridge\
+<external-root>\components\rmm-bridge\
   DSRRandomizer.RmmBridge.dll
   DSRRandomizer.RmmBridgeHost.exe
   supporting managed files, if framework-dependent publishing requires them
@@ -151,7 +153,7 @@ For immediate local deployment, update the current generated TOML only after pre
 - Built artifact hashes are recorded before copying.
 - Deployed artifact hashes match the build output.
 - Generated TOML contains the bridge DLL and required heap patch, but no executable masquerading as a DLL.
-- A real-game smoke launch is not automated as part of build verification; the user can press `Launch DS1` after Steam is placed in Offline Mode.
+- A real-game smoke launch is not automated as part of build verification; the user can use `Launch modded copy` after Steam is placed in Offline Mode.
 
 ## 11. Rollback
 

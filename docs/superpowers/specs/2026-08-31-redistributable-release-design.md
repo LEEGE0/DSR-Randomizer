@@ -151,7 +151,7 @@ Release construction is one orchestration path that:
 
 The dependency manifest used to assemble .NET notices must come from the supplied launcher publish directory or its exact publish invocation, never the newest unrelated `obj/Release` file.
 
-Before delivery, an additional privacy scan checks the extracted package for the known local values `D:\\DSRMOD`, `C:\\Users\\User`, and Steam ID `146808034`. The exact allowlist already excludes saves, logs, profiles, staging, seeds, spoilers, game files, and randomizer executables.
+Before delivery, an additional privacy scan checks the extracted package for the known private-root, private-worktree, and Steam-ID sentinels supplied outside committed documentation. The exact allowlist already excludes saves, logs, profiles, staging, seeds, spoilers, game files, and randomizer executables.
 
 ## Korean Installation Guide
 
@@ -175,7 +175,7 @@ A release is deliverable only after fresh evidence for all of the following:
 
 - `dotnet test DSR-Randomizer.sln -c Release --no-restore` passes all managed tests.
 - `pwsh -NoProfile -File scripts/build-native.ps1 -Configuration Release -Test` passes all 15 native tests.
-- the clean-root bridge installer tests pass without using `D:\DSRMOD` or an existing save/profile/runtime pointer.
+- the clean-root bridge installer tests pass without using a pre-existing private runtime or an existing save/profile/runtime pointer.
 - the published package validator accepts the staged directory and the freshly extracted ZIP.
 - ZIP inspection confirms the exact allowlist and no local game/personal artifacts.
 - the SHA-256 sidecar matches a fresh hash of the final ZIP.
@@ -191,4 +191,4 @@ artifacts/DSR-for-MOD-v0.1.0-alpha.2-win-x64.zip
 artifacts/DSR-for-MOD-v0.1.0-alpha.2-win-x64.zip.sha256
 ```
 
-The worktree's pre-existing modifications remain part of the feature branch. No reset, checkout-based rollback, bulk deletion, or copying from `D:\DSRMOD` is permitted.
+The worktree's pre-existing modifications remain part of the feature branch. No reset, checkout-based rollback, bulk deletion, or copying from a private local runtime is permitted.

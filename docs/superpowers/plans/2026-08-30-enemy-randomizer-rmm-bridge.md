@@ -1,8 +1,10 @@
 # Enemy Randomizer RMM Bridge Implementation Plan
 
+**Closure (2026-09-01):** The bridge, host, fail-closed save isolation, and synthetic integration coverage are implemented. The original direct Enemy Randomizer `Launch DS1` entrypoint was superseded by the committed DSR for MOD `Launch modded copy` flow, which generates and verifies the bridged configuration itself. This historical plan no longer describes the recipient entrypoint.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make the enemy randomizer's existing `Launch DS1` button launch the copied game with every logical `DRAKS0005.sl2` operation redirected exclusively to the selected dedicated `DRAKS0005.rmm`.
+**Goal:** Provide the RMM bridge used by the integrated copied-game launch so every logical `DRAKS0005.sl2` operation is redirected exclusively to the selected dedicated `DRAKS0005.rmm`.
 
 **Architecture:** Mod Engine 2 loads a project-owned x64 bridge DLL through `external_dlls`; its exported `modengine_ext_init` resolves and validates the active copied runtime, starts a managed session host, waits for a one-time readiness event, then installs the existing native save hooks. The managed host owns the existing `DedicatedSaveService` lease until the game exits, while every bootstrap failure is fail-closed and terminates the copied game before normal-save access is possible.
 
@@ -12,9 +14,9 @@
 
 ## Global Constraints
 
-- Preserve the exact enemy-randomizer `Launch DS1` workflow and its self-contained directory.
+- Preserve the Enemy Randomizer's self-contained directory while routing the final integrated game launch through DSR for MOD.
 - Do not modify or redistribute `DS1EnemyRandomizer.exe` or move it into the copied game root.
-- The only permitted mutable root is the resolved external root, currently `D:\DSR MOD`.
+- The only permitted mutable root is the resolved recipient-selected `<external-root>`.
 - Never read or write a normal/Overhaul `.sl2` as a fallback; missing or invalid bridge state terminates the copied game.
 - Require x64 Windows, `DarkSoulsRemastered.exe` as the live process image, runtime-current schema as currently emitted, save metadata schema version `1`, and a dedicated-save length of exactly `4,326,608` bytes.
 - Treat the bundled Mod Engine callback ABI as pinned: `extern "C" bool modengine_ext_init(void*, void**)`.
@@ -61,7 +63,7 @@
   const auto result = ResolveBridgeConfiguration(platform);
   Require(result.ok, result.message);
   RequireEqual(result.value.dedicatedRmm,
-      LR"(D:\DSR MOD\saves\146808034\DRAKS0005.rmm)");
+      LR"(<external-root>\saves\12345678901234567\DRAKS0005.rmm)");
 
   platform.files[metadataPath] = R"({"schemaVersion":2})";
   const auto unsupported = ResolveBridgeConfiguration(platform);
@@ -353,18 +355,18 @@
 **Files:**
 - Create: `scripts/publish-rmm-bridge.ps1`
 - Create: `docs/enemy-randomizer-rmm-bridge.md`
-- Local generated file with backup: `D:\DSR MOD\runtimes\runtime-a39cb5e0b3d6c410d550f468b5e034ebe3d4db3e2c719ca3d3cff64102295c10\Mods\DS1 Enemy Randomizer-922-v0-1-3-1778373918\DS1EnemyRandomizer\config_randomizer.toml`
+- Local generated file with backup: `<external-root>\runtimes\<runtime-id>\Mods\<package>\DS1EnemyRandomizer\config_randomizer.toml`
 
 **Interfaces:**
-- Consumes: Release native DLL, self-contained win-x64 managed host publish, the current enemy-randomizer folder, and current `D:\DSR MOD` configuration.
-- Produces: verified artifacts under `D:\DSR MOD\components\rmm-bridge`, a backed-up current TOML containing only actual DLLs in `external_dlls`, and repeatable UI/regeneration instructions.
+- Consumes: Release native DLL, self-contained win-x64 managed host publish, the current enemy-randomizer folder, and the selected `<external-root>` configuration.
+- Produces: verified artifacts under `<external-root>\components\rmm-bridge`, a backed-up current TOML containing only actual DLLs in `external_dlls`, and repeatable UI/regeneration instructions.
 
 - [ ] **Step 1: Add a publish-script verification mode that initially fails**
 
   Support `-ExternalRoot`, `-Configuration Release`, and `-VerifyOnly`. `-VerifyOnly` must fail if the bridge export is absent, the host is not win-x64, deployed SHA-256 hashes differ, current runtime pointer/profile/save metadata disagree, TOML omits the bridge DLL, or TOML contains `DarkSoulsItemRandomizer.exe` in `external_dlls`.
 
   ```powershell
-  & .\scripts\publish-rmm-bridge.ps1 -ExternalRoot 'D:\DSR MOD' -VerifyOnly
+  & .\scripts\publish-rmm-bridge.ps1 -ExternalRoot '<external-root>' -VerifyOnly
   if ($LASTEXITCODE -ne 0) { throw 'RMM bridge verification failed.' }
   ```
 
@@ -388,7 +390,7 @@
 
 - [ ] **Step 4: Document durable enemy-randomizer UI settings and rollback**
 
-  Record: keep `Select exe` on the copied runtime executable; set the other-mod directory to `D:\DSR MOD\components\rmm-bridge`; enable DLL-mod merge; keep game-directory merge enabled for item-randomizer loose files; after every `Randomize!`, run `-VerifyOnly`. Rollback consists of removing bridge DLL selection, regenerating TOML, and confirming no bridge path remains.
+  Record: keep `Select exe` on the copied runtime executable; set the other-mod directory to `<external-root>\components\rmm-bridge`; enable DLL-mod merge; keep game-directory merge enabled for item-randomizer loose files; after every `Randomize!`, run `-VerifyOnly`. Rollback consists of removing bridge DLL selection, regenerating TOML, and confirming no bridge path remains.
 
 - [ ] **Step 5: Run full managed/native/publish verification**
 
@@ -396,8 +398,8 @@
   dotnet test DSR-Randomizer.sln -c Release
   cmake --build --preset windows-x64-release
   ctest --preset windows-x64-release --output-on-failure
-  & .\scripts\publish-rmm-bridge.ps1 -ExternalRoot 'D:\DSR MOD'
-  & .\scripts\publish-rmm-bridge.ps1 -ExternalRoot 'D:\DSR MOD' -VerifyOnly
+  & .\scripts\publish-rmm-bridge.ps1 -ExternalRoot '<external-root>'
+  & .\scripts\publish-rmm-bridge.ps1 -ExternalRoot '<external-root>' -VerifyOnly
   git diff --check
   ```
 
@@ -426,8 +428,8 @@
   ```powershell
   git status --short
   git log --oneline -6
-  Get-FileHash 'D:\DSR MOD\components\rmm-bridge\DSRRandomizer.RmmBridge.dll' -Algorithm SHA256
-  Get-FileHash 'D:\DSR MOD\components\rmm-bridge\DSRRandomizer.RmmBridgeHost.exe' -Algorithm SHA256
+  Get-FileHash '<external-root>\components\rmm-bridge\DSRRandomizer.RmmBridge.dll' -Algorithm SHA256
+  Get-FileHash '<external-root>\components\rmm-bridge\DSRRandomizer.RmmBridgeHost.exe' -Algorithm SHA256
   ```
 
   Expected: no unexplained worktree changes and hashes equal the publish manifest.
@@ -437,11 +439,11 @@
   ```powershell
   ctest --preset windows-x64-release -R "RmmBridge|SaveHookIntegrationTests" --output-on-failure
   dotnet test tests/DSRRandomizer.RmmBridgeHost.Tests/DSRRandomizer.RmmBridgeHost.Tests.csproj -c Release
-  & .\scripts\publish-rmm-bridge.ps1 -ExternalRoot 'D:\DSR MOD' -VerifyOnly
+  & .\scripts\publish-rmm-bridge.ps1 -ExternalRoot '<external-root>' -VerifyOnly
   ```
 
   Expected: all commands exit zero without starting `DarkSoulsRemastered.exe`.
 
 - [ ] **Step 3: Provide the manual smoke-test boundary**
 
-  Tell the user to put Steam in Offline Mode, close any running game/bridge-host process, press `Launch DS1` once, exit normally, and report whether the title screen and character load succeed. Do not claim real-game success until that smoke test is observed; the completed automated claim is limited to build, tests, deployment, configuration, and save-isolation fixtures.
+  Tell the user to put Steam in Offline Mode, close any running game/bridge-host process, use DSR for MOD's `Launch modded copy` once, exit normally, and report whether the title screen and character load succeed. Do not claim real-game success until that smoke test is observed; the completed automated claim is limited to build, tests, deployment, configuration, and save-isolation fixtures.

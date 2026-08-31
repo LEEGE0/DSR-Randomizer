@@ -13,13 +13,13 @@
 ## Global Constraints
 
 - Preserve every pre-existing tracked and untracked change in the dirty `feat/official-online-guard` worktree.
-- Never copy from `D:\DSRMOD` into the repository or release.
+- Never copy from any pre-existing private local runtime into the repository or release.
 - Never include Dark Souls Remastered executables/assets, `.sl2`, `.rmm`, Steam IDs, logs, profiles, staging data, generated seeds, spoilers, Item/Enemy Randomizer executables, Mod Engine, or `DS1HeapPatch.dll`.
 - Package exactly the 12 paths listed in the spec; PDB files are prohibited.
 - Production pinned executable verification must not gain an environment, command-line, or external-file bypass.
 - Bridge installation must not require a runtime pointer, save/profile state, Steam ID, or third-party randomizer installation.
 - Use version `0.1.0-alpha.2` and output `artifacts/DSR-for-MOD-v0.1.0-alpha.2-win-x64.zip` plus `.sha256`.
-- Do not claim full success unless all 385 managed tests, all 15 native tests, clean-root tests, staged-package validation, extracted-ZIP validation, privacy scan, and checksum verification pass freshly.
+- Do not claim full success unless all 435 managed tests, all 15 native tests, clean-root tests, staged-package validation, extracted-ZIP validation, privacy scan, and checksum verification pass freshly.
 
 ---
 
@@ -203,7 +203,7 @@ git commit -m "feat: pin redistributable bridge artifacts"
 
 Cover: fresh install; matching no-op; stale pair replacement; missing source; source hash mismatch; malformed/mismatched manifest; destination reparse point; external-root escape; interrupted mixed pair repaired on the next call; and preservation of `components/rmm-bridge/content/overhaul/GameParam.parambnd.dcx`.
 
-Use only generated temporary bytes and matching SHA-256 values. No test may reference `D:\DSRMOD`, a runtime pointer, a save, or a Steam ID.
+Use only generated temporary bytes and matching SHA-256 values. No test may reference a private local runtime, a runtime pointer, a save, or a Steam ID.
 
 - [ ] **Step 2: Run the installer tests and confirm missing types fail compilation**
 
@@ -345,7 +345,7 @@ dotnet publish src/DSRRandomizer.RmmBridgeHost/DSRRandomizer.RmmBridgeHost.cspro
 dotnet publish src/DSRRandomizer.Launcher/DSRRandomizer.Launcher.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:PinnedBridgePath=$bridgeDll -p:PinnedBridgeHostPath=(Join-Path $hostPublish 'DSRRandomizer.RmmBridgeHost.exe') -o $launcherPublish
 ```
 
-Use validated output descendants under `artifacts/release-work-0.1.0-alpha.2`; never use `D:\DSRMOD`. Pass the exact generated launcher dependency-manifest path into `package.ps1` instead of asking it to choose the newest `obj/Release` file.
+Use validated output descendants under `artifacts`; never use a pre-existing private local runtime. Pass the exact generated launcher dependency-manifest path into `package.ps1` instead of asking it to choose the newest `obj/Release` file.
 
 - [ ] **Step 4: Extend `package.ps1` and archive revalidation**
 
@@ -418,9 +418,11 @@ Document the bundled project-owned bridge/host and SoulsFormatsNEXT obligations.
 
 - [ ] **Step 3: Run documentation and privacy preflight**
 
+Run fixed-string scans for each out-of-band private-root, private-worktree, and Steam-ID sentinel across every changed or added document. Also run:
+
 ```powershell
-rg -n -S "D:\\DSRMOD|C:\\Users\\User|146808034" README.md INSTALL_KO.md THIRD_PARTY_NOTICES.md CHANGELOG.md
-rg -n -S "TBD|TODO|implement later" README.md INSTALL_KO.md THIRD_PARTY_NOTICES.md CHANGELOG.md
+$placeholderTerms = @(('T' + 'BD'), ('TO' + 'DO'), ('implement ' + 'later'))
+foreach ($term in $placeholderTerms) { rg -n -F $term README.md INSTALL_KO.md THIRD_PARTY_NOTICES.md CHANGELOG.md }
 git diff --check
 ```
 
@@ -436,7 +438,7 @@ Expected: the exact ZIP and `.sha256` paths from the spec.
 
 - [ ] **Step 5: Independently inspect the final ZIP and checksum**
 
-List every ZIP entry and compare it byte-for-byte with the 12-path allowlist. Extract to a new temporary directory, run the packaged launcher `--validate-package`, and scan all extracted bytes for `D:\DSRMOD`, `C:\Users\User`, and `146808034`. Recompute the ZIP SHA-256 and compare it with the sidecar.
+List every ZIP entry and compare it byte-for-byte with the 12-path allowlist. Extract to a new temporary directory, run the packaged launcher `--validate-package`, and scan all extracted bytes for the out-of-band private-root, private-worktree, and Steam-ID sentinels. Recompute the ZIP SHA-256 and compare it with the sidecar.
 
 - [ ] **Step 6: Run the final full verification gate**
 
@@ -445,17 +447,15 @@ dotnet test DSR-Randomizer.sln -c Release --no-restore
 pwsh -NoProfile -File scripts/build-native.ps1 -Configuration Release -Test
 ```
 
-Expected: 385/385 managed tests and 15/15 native tests pass, plus successful package and checksum checks from Steps 4-5.
+Expected: 435/435 managed tests and 15/15 native tests pass, plus successful package and checksum checks from Steps 4-5.
 
 - [ ] **Step 7: Commit documentation and release metadata without committing generated ZIPs unless repository policy already tracks them**
 
 ```powershell
-git add INSTALL_KO.md README.md THIRD_PARTY_NOTICES.md CHANGELOG.md HANDOFF_DISTRIBUTION_2026-08-31.md
+git add INSTALL_KO.md README.md THIRD_PARTY_NOTICES.md CHANGELOG.md HANDOFF_DISTRIBUTION_2026-08-31.md docs
 git commit -m "docs: publish redistributable setup guide"
 ```
 
-- [ ] **Step 8: Push the feature branch**
+- [ ] **Step 8: Hand off for final whole-branch review without pushing**
 
-```powershell
-git push -u origin feat/official-online-guard
-```
+Do not push until the final whole-branch review approves the documentation commit and generated release evidence.
