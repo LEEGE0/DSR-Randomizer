@@ -55,6 +55,12 @@ public sealed class MainWindowViewModel : ObservableObject
         LaunchCommand = new AsyncRelayCommand(
             _ => LaunchAsync(),
             _ => CanLaunch);
+        ItemRandomizerCommand = new AsyncRelayCommand(
+            _ => LaunchItemRandomizerAsync(),
+            _ => CanLaunchRandomizers);
+        EnemyRandomizerCommand = new AsyncRelayCommand(
+            _ => LaunchEnemyRandomizerAsync(),
+            _ => CanLaunchRandomizers);
         SaveExternalRootCommand = new AsyncRelayCommand(
             _ => SaveExternalRootAsync(),
             _ => !IsBusy && _externalRootStore is not null);
@@ -115,6 +121,8 @@ public sealed class MainWindowViewModel : ObservableObject
 
     public bool CanInitialize => CanMutate();
 
+    public bool CanLaunchRandomizers => CanUseMaterialOperations() && _runtimeReady;
+
     public bool AreSaveControlsEnabled => CanUseMaterialOperations();
 
     public ObservableCollection<SaveProfileCandidate> SaveProfiles { get; } = [];
@@ -156,6 +164,10 @@ public sealed class MainWindowViewModel : ObservableObject
     public AsyncRelayCommand InitializeCommand { get; }
 
     public AsyncRelayCommand LaunchCommand { get; }
+
+    public AsyncRelayCommand ItemRandomizerCommand { get; }
+
+    public AsyncRelayCommand EnemyRandomizerCommand { get; }
 
     public AsyncRelayCommand SaveExternalRootCommand { get; }
 
@@ -305,13 +317,57 @@ public sealed class MainWindowViewModel : ObservableObject
                 selection.SteamId,
                 CancellationToken.None);
             Status = result.Started
-                ? $"Modded copy exited with code {result.ExitCode ?? 0}. Original and Overhaul remain untouched."
+                ? result.ExitCode is int exitCode
+                    ? $"Modded copy exited with code {exitCode}. Original and Overhaul remain untouched."
+                    : "Modded copy launch requested through Mod Engine. The RMM bridge now owns the game session."
                 : $"Modded launch failed: {result.ErrorCode}";
         }
         catch (Exception exception)
         {
             await LogWithoutMaskingAsync(exception);
             Status = $"Modded launch failed: {exception.Message}";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task LaunchItemRandomizerAsync()
+    {
+        IsBusy = true;
+        try
+        {
+            var result = await Service.LaunchItemRandomizerAsync(CancellationToken.None);
+            Status = result.Started
+                ? "Item Randomizer launched against the active copied runtime. Export items before running Enemy Randomizer."
+                : $"Item Randomizer launch failed: {result.ErrorCode}";
+        }
+        catch (Exception exception)
+        {
+            await LogWithoutMaskingAsync(exception);
+            Status = $"Item Randomizer launch failed: {exception.Message}";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task LaunchEnemyRandomizerAsync()
+    {
+        IsBusy = true;
+        try
+        {
+            var result = await Service.LaunchEnemyRandomizerAsync(CancellationToken.None);
+            Status = result.Started
+                ? "Enemy Randomizer launched. Keep Merge files from game directory enabled, randomize last, and return here to launch the game."
+                : $"Enemy Randomizer launch failed: {result.ErrorCode}";
+        }
+        catch (Exception exception)
+        {
+            await LogWithoutMaskingAsync(exception);
+            Status = $"Enemy Randomizer launch failed: {exception.Message}";
         }
         finally
         {
@@ -360,6 +416,8 @@ public sealed class MainWindowViewModel : ObservableObject
         VerifyCommand.RaiseCanExecuteChanged();
         InitializeCommand.RaiseCanExecuteChanged();
         LaunchCommand.RaiseCanExecuteChanged();
+        ItemRandomizerCommand.RaiseCanExecuteChanged();
+        EnemyRandomizerCommand.RaiseCanExecuteChanged();
         SaveExternalRootCommand.RaiseCanExecuteChanged();
     }
 

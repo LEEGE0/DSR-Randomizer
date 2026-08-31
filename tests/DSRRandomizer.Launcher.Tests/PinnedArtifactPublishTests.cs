@@ -116,6 +116,7 @@ public sealed class PinnedArtifactPublishTests : IDisposable
                      "win-x64",
                      "--self-contained",
                      "true",
+                     "-nr:false",
                      "--no-restore",
                      "-o",
                      _publishRoot

@@ -33,4 +33,17 @@ public interface ILauncherService
     Task<SafetyLaunchResult> LaunchModdedAsync(
         string steamId,
         CancellationToken cancellationToken);
+
+    Task<RandomizerToolLaunchResult> LaunchItemRandomizerAsync(
+        CancellationToken cancellationToken);
+
+    Task<RandomizerToolLaunchResult> LaunchEnemyRandomizerAsync(
+        CancellationToken cancellationToken);
+}
+
+public sealed record RandomizerToolLaunchResult(bool Started, string ErrorCode)
+{
+    public static RandomizerToolLaunchResult Success() => new(true, string.Empty);
+
+    public static RandomizerToolLaunchResult Failed(string errorCode) => new(false, errorCode);
 }

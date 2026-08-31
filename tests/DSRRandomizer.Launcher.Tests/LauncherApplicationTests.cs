@@ -313,6 +313,14 @@ public sealed class LauncherApplicationTests
             LaunchCalls.Add(steamId);
             return Task.FromResult(LaunchResult);
         }
+
+        public Task<RandomizerToolLaunchResult> LaunchItemRandomizerAsync(
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public Task<RandomizerToolLaunchResult> LaunchEnemyRandomizerAsync(
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
     }
 
     private sealed class ProgramFixture : IDisposable

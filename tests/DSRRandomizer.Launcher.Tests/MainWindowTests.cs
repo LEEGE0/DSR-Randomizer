@@ -1,5 +1,8 @@
 using DSRRandomizer.Launcher.Logging;
 using DSRRandomizer.Launcher.ViewModels;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Media;
 
 namespace DSRRandomizer.Launcher.Tests;
 
@@ -65,6 +68,54 @@ public sealed class MainWindowTests
         Assert.True(thread.Join(TimeSpan.FromSeconds(10)), "The WPF window did not finish opening.");
         Assert.True(completed);
         Assert.Null(failure);
+    }
+
+    [Fact]
+    public void Window_ContainsItemAndEnemyRandomizerButtons()
+    {
+        Exception? failure = null;
+        var foundContents = new List<string>();
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                var window = new MainWindow(CreateViewModel());
+                window.Show();
+                foundContents.AddRange(FindVisualChildren<Button>(window)
+                    .Select(button => button.Content as string)
+                    .Where(content => content is not null)!);
+                window.Close();
+            }
+            catch (Exception exception)
+            {
+                failure = exception;
+            }
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+
+        thread.Start();
+
+        Assert.True(thread.Join(TimeSpan.FromSeconds(10)), "The WPF window did not finish opening.");
+        Assert.Null(failure);
+        Assert.Contains("Launch Item Randomizer", foundContents);
+        Assert.Contains("Launch Enemy Randomizer", foundContents);
+    }
+
+    private static IEnumerable<T> FindVisualChildren<T>(DependencyObject root)
+        where T : DependencyObject
+    {
+        if (root is T match)
+        {
+            yield return match;
+        }
+
+        for (var index = 0; index < VisualTreeHelper.GetChildrenCount(root); index++)
+        {
+            foreach (var child in FindVisualChildren<T>(VisualTreeHelper.GetChild(root, index)))
+            {
+                yield return child;
+            }
+        }
     }
 
     private static MainWindowViewModel CreateViewModel() => new(

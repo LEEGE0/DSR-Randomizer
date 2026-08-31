@@ -242,6 +242,214 @@ public sealed class LauncherServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task LaunchModdedAsync_WithNewEnemySeed_CreatesAndUsesBridgedRandomizerConfiguration()
+    {
+        using var fixture = await LaunchFixture.CreateAsync(existingRmm: true);
+        var randomizer = fixture.InstallRandomizer();
+        var heapPatch = Path.Combine(randomizer, "dist1", "DLL", "DS1HeapPatch.dll");
+        File.WriteAllText(
+            Path.Combine(randomizer, "config_randomizer.toml"),
+            "[modengine]\ndebug = false\n" +
+            $"external_dlls = [{TomlString(heapPatch)}]\n\n" +
+            "[extension.mod_loader]\nenabled = true\nloose_params = false\n" +
+            $"mods = [{{ enabled = true, name = \"randomizer\", path = {TomlString(randomizer)} }}]\n");
+
+        var result = await fixture.Service.LaunchModdedAsync(
+            SteamId,
+            CancellationToken.None);
+
+        Assert.True(result.Started, result.ErrorCode);
+        Assert.Equal(0, fixture.Platform.CreateCalls);
+        var startInfo = Assert.Single(fixture.RandomizerProcesses.ModEngineStarts);
+        Assert.Equal("dsr", startInfo.Arguments[1]);
+        Assert.Equal(
+            Path.Combine(fixture.RuntimeRoot, "chr", "c0000.chrbnd.dcx"),
+            startInfo.Arguments[3]);
+        Assert.Equal(
+            Path.Combine(
+                fixture.ExternalRoot,
+                "staging",
+                "diagnostics",
+                "config-randomizer-bridged.toml"),
+            startInfo.Arguments[5]);
+        var bridgedConfiguration = File.ReadAllText(startInfo.Arguments[5]);
+        Assert.Contains(TomlString(heapPatch), bridgedConfiguration, StringComparison.Ordinal);
+        Assert.Contains(TomlString(randomizer), bridgedConfiguration, StringComparison.Ordinal);
+        Assert.Contains(
+            TomlString(Path.Combine(
+                fixture.ExternalRoot,
+                "components",
+                "rmm-bridge",
+                "DSRRandomizer.RmmBridge.dll")),
+            bridgedConfiguration,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            TomlString(Path.Combine(fixture.ExternalRoot, "components", "rmm-bridge")),
+            bridgedConfiguration,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task LaunchModdedAsync_InstallsBridgeInsideLaunchGateBeforeArtifactsAndConfiguration()
+    {
+        using var fixture = await LaunchFixture.CreateAsync(existingRmm: true);
+        fixture.InstallRandomizer();
+        var bridgedConfiguration = Path.Combine(
+            fixture.ExternalRoot,
+            "staging",
+            "diagnostics",
+            "config-randomizer-bridged.toml");
+        var events = new List<string>();
+        fixture.BridgeInstaller.OnEnsureInstalled = externalRoot =>
+        {
+            using var competingGate = ExternalRootLaunchGate.TryAcquire(externalRoot);
+            Assert.Null(competingGate);
+            Assert.False(File.Exists(fixture.BridgeInstaller.BridgePath(externalRoot)));
+            Assert.False(File.Exists(bridgedConfiguration));
+            events.Add("install");
+        };
+        fixture.RandomizerProcesses.OnModEngineLaunch = () => events.Add("process");
+
+        var result = await fixture.Service.LaunchModdedAsync(SteamId, CancellationToken.None);
+
+        Assert.True(result.Started, result.ErrorCode);
+        Assert.Equal(["install", "process"], events);
+        Assert.True(File.Exists(fixture.BridgeInstaller.BridgePath(fixture.ExternalRoot)));
+        Assert.True(File.Exists(fixture.BridgeInstaller.HostPath(fixture.ExternalRoot)));
+    }
+
+    [Theory]
+    [InlineData("RMM_BRIDGE_BUNDLE_INVALID")]
+    [InlineData("RMM_BRIDGE_INSTALL_FAILED")]
+    [InlineData("RMM_BRIDGE_INSTALL_TAMPERED")]
+    public async Task LaunchModdedAsync_WhenBridgeInstallationFails_ReturnsInstallerCodeWithoutStartingModEngine(
+        string installerError)
+    {
+        using var fixture = await LaunchFixture.CreateAsync(existingRmm: true);
+        fixture.InstallRandomizer();
+        fixture.BridgeInstaller.Result = RmmBridgeInstallResult.Failed(installerError);
+
+        var result = await fixture.Service.LaunchModdedAsync(SteamId, CancellationToken.None);
+
+        Assert.False(result.Started);
+        Assert.Equal(installerError, result.ErrorCode);
+        Assert.Empty(fixture.RandomizerProcesses.ModEngineStarts);
+    }
+
+    [Fact]
+    public async Task LaunchModdedAsync_FreshExternalRootInstallsBridgePairWithoutExistingSaveOrProfile()
+    {
+        using var fixture = await LaunchFixture.CreateAsync(
+            existingRmm: false,
+            existingNormalSave: false,
+            persistNormalSelection: false,
+            useRealBridgeInstaller: true);
+        fixture.InstallRandomizer();
+
+        var result = await fixture.Service.LaunchModdedAsync(SteamId, CancellationToken.None);
+
+        Assert.True(result.Started, result.ErrorCode);
+        Assert.True(File.Exists(Path.Combine(
+            fixture.ExternalRoot,
+            "components",
+            "rmm-bridge",
+            "DSRRandomizer.RmmBridge.dll")));
+        Assert.True(File.Exists(Path.Combine(
+            fixture.ExternalRoot,
+            "components",
+            "rmm-bridge",
+            "DSRRandomizer.RmmBridgeHost.exe")));
+        Assert.Single(fixture.RandomizerProcesses.ModEngineStarts);
+    }
+
+    [Fact]
+    public async Task LaunchModdedAsync_WithExistingRmm_UpdatesStaleBridgeProfileSelection()
+    {
+        const string otherSteamId = "22222222222222222";
+        using var fixture = await LaunchFixture.CreateAsync(existingRmm: true);
+        fixture.InstallRandomizer();
+        var documents = Directory.GetParent(
+            Directory.GetParent(
+                Directory.GetParent(Path.GetDirectoryName(fixture.NormalSave)!)!.FullName)!.FullName)!.FullName;
+        var otherSource = CreateNormalSave(documents, otherSteamId, 0x73);
+        CreateSelectedProfile(fixture.ExternalRoot, otherSteamId, otherSource);
+
+        var result = await fixture.Service.LaunchModdedAsync(SteamId, CancellationToken.None);
+
+        Assert.True(result.Started, result.ErrorCode);
+        var selected = JsonSerializer.Deserialize<SaveProfileCandidate>(
+            File.ReadAllBytes(Path.Combine(
+                fixture.ExternalRoot,
+                "config",
+                "selected-save-profile.json")),
+            new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+        Assert.Equal(SteamId, selected?.SteamId);
+        Assert.Equal(Path.GetFullPath(fixture.NormalSave), selected?.SourcePath);
+    }
+
+    [Fact]
+    public async Task LaunchModdedAsync_WhenGeneratedConfigurationOmitsHeapPatch_FailsClosed()
+    {
+        using var fixture = await LaunchFixture.CreateAsync(existingRmm: true);
+        var randomizer = fixture.InstallRandomizer();
+        File.WriteAllText(
+            Path.Combine(randomizer, "config_randomizer.toml"),
+            "[modengine]\nexternal_dlls = []\n\n" +
+            "[extension.mod_loader]\nenabled = true\nloose_params = false\n" +
+            $"mods = [{{ enabled = true, name = \"randomizer\", path = {TomlString(randomizer)} }}]\n");
+
+        var result = await fixture.Service.LaunchModdedAsync(SteamId, CancellationToken.None);
+
+        Assert.False(result.Started);
+        Assert.Equal("RANDOMIZER_CONFIGURATION_INVALID", result.ErrorCode);
+        Assert.Empty(fixture.RandomizerProcesses.ModEngineStarts);
+    }
+
+    [Fact]
+    public async Task LaunchModdedAsync_WhenAnotherInstanceOwnsLaunchGate_FailsClosed()
+    {
+        using var fixture = await LaunchFixture.CreateAsync(existingRmm: true);
+        fixture.InstallRandomizer();
+        using var heldGate = ExternalRootLaunchGate.TryAcquire(fixture.ExternalRoot);
+        Assert.NotNull(heldGate);
+
+        var result = await fixture.Service.LaunchModdedAsync(SteamId, CancellationToken.None);
+
+        Assert.False(result.Started);
+        Assert.Equal("CONCURRENT_MODDED_LAUNCH", result.ErrorCode);
+        Assert.Empty(fixture.RandomizerProcesses.ModEngineStarts);
+    }
+
+    [Fact]
+    public async Task LaunchModdedAsync_HoldsRandomizerArtifactsThroughModEngineBootstrap()
+    {
+        using var fixture = await LaunchFixture.CreateAsync(existingRmm: true);
+        var randomizer = fixture.InstallRandomizer();
+        var paths = new[]
+        {
+            Path.Combine(
+                fixture.ExternalRoot,
+                "staging",
+                "diagnostics",
+                "config-randomizer-bridged.toml"),
+            Path.Combine(randomizer, "config_randomizer.toml"),
+            Path.Combine(randomizer, "dist1", "DLL", "DS1HeapPatch.dll"),
+            Path.Combine(randomizer, "dist1", "ModEngine", "modengine2_launcher.exe"),
+            Path.Combine(randomizer, "dist1", "ModEngine", "modengine2", "bin", "modengine2.dll"),
+            Path.Combine(fixture.ExternalRoot, "components", "rmm-bridge", "DSRRandomizer.RmmBridge.dll")
+        };
+        bool[]? replacements = null;
+        fixture.RandomizerProcesses.OnModEngineLaunch = () =>
+            replacements = paths.Select(path => TryReplace(path, [0x41, 0x42])).ToArray();
+
+        var result = await fixture.Service.LaunchModdedAsync(SteamId, CancellationToken.None);
+
+        Assert.True(result.Started, result.ErrorCode);
+        Assert.NotNull(replacements);
+        Assert.All(replacements, Assert.False);
+    }
+
+    [Fact]
     public async Task LaunchModdedAsync_UsesRmmDirectlyWithoutCreatingVirtualSl2()
     {
         using var fixture = await LaunchFixture.CreateAsync(existingRmm: true);
@@ -793,6 +1001,9 @@ public sealed class LauncherServiceTests : IDisposable
         }
     }
 
+    private static string TomlString(string value) =>
+        $"\"{value.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("\"", "\\\"", StringComparison.Ordinal)}\"";
+
     private static bool TryReplace(string path, byte[] replacement)
     {
         var temporary = path + $".{Guid.NewGuid():N}.replacement";
@@ -923,6 +1134,8 @@ public sealed class LauncherServiceTests : IDisposable
             string profilePath,
             TrackingFileAccess fileAccess,
             RecordingPlatform platform,
+            RecordingBridgeInstaller bridgeInstaller,
+            RecordingRandomizerProcessPlatform randomizerProcesses,
             LauncherService service)
         {
             Container = container;
@@ -938,6 +1151,8 @@ public sealed class LauncherServiceTests : IDisposable
             ProfilePath = profilePath;
             FileAccess = fileAccess;
             Platform = platform;
+            BridgeInstaller = bridgeInstaller;
+            RandomizerProcesses = randomizerProcesses;
             Service = service;
         }
 
@@ -954,7 +1169,56 @@ public sealed class LauncherServiceTests : IDisposable
         public string ProfilePath { get; }
         public TrackingFileAccess FileAccess { get; }
         public RecordingPlatform Platform { get; }
+        public RecordingBridgeInstaller BridgeInstaller { get; }
+        public RecordingRandomizerProcessPlatform RandomizerProcesses { get; }
         public LauncherService Service { get; }
+
+        public string InstallRandomizer()
+        {
+            var root = Path.Combine(RuntimeRoot, "Mods", "Enemy-package", "DS1EnemyRandomizer");
+            Directory.CreateDirectory(Path.Combine(root, "dist1", "ModEngine"));
+            Directory.CreateDirectory(Path.Combine(root, "dist1", "DLL"));
+            Directory.CreateDirectory(Path.Combine(RuntimeRoot, "chr"));
+            File.WriteAllText(
+                Path.Combine(RuntimeRoot, "chr", "c0000.chrbnd.dcx"),
+                "anchor");
+            File.WriteAllText(Path.Combine(root, "DarkSoulsItemRandomizer.exe"), "item");
+            File.WriteAllText(Path.Combine(root, "DS1EnemyRandomizer.exe"), "enemy");
+            var bridge = Path.Combine(
+                ExternalRoot,
+                "components",
+                "rmm-bridge",
+                "DSRRandomizer.RmmBridge.dll");
+            var bridgeOnlyConfiguration = Path.Combine(
+                ExternalRoot,
+                "staging",
+                "diagnostics",
+                "config-bridge-only.toml");
+            Directory.CreateDirectory(Path.GetDirectoryName(bridgeOnlyConfiguration)!);
+            File.WriteAllText(
+                bridgeOnlyConfiguration,
+                $"[modengine]\nexternal_dlls = [{TomlString(bridge)}]\n\n" +
+                "[extension.mod_loader]\nenabled = false\nloose_params = false\nmods = []\n");
+            var heapPatch = Path.Combine(root, "dist1", "DLL", "DS1HeapPatch.dll");
+            File.WriteAllText(heapPatch, "heap");
+            File.WriteAllText(
+                Path.Combine(root, "config_randomizer.toml"),
+                $"[modengine]\nexternal_dlls = [{TomlString(bridge)}, {TomlString(heapPatch)}]\n\n" +
+                "[extension.mod_loader]\nenabled = true\nloose_params = false\n" +
+                $"mods = [{{ enabled = true, name = \"randomizer\", path = {TomlString(root)} }}, " +
+                $"{{ enabled = true, name = \"mod1\", path = {TomlString(Path.GetDirectoryName(bridge)!)} }}]\n");
+            File.WriteAllText(
+                Path.Combine(root, "dist1", "ModEngine", "modengine2_launcher.exe"),
+                "modengine");
+            Directory.CreateDirectory(Path.Combine(root, "dist1", "ModEngine", "modengine2", "bin"));
+            File.WriteAllText(
+                Path.Combine(root, "dist1", "ModEngine", "modengine2", "bin", "modengine2.dll"),
+                "modengine-dll");
+            return root;
+        }
+
+        private static string TomlString(string value) =>
+            $"\"{value.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("\"", "\\\"", StringComparison.Ordinal)}\"";
 
         public DedicatedSaveMetadata ReadMetadata() => JsonSerializer.Deserialize<DedicatedSaveMetadata>(
             File.ReadAllBytes(Path.Combine(
@@ -1021,7 +1285,8 @@ public sealed class LauncherServiceTests : IDisposable
             bool existingRmm,
             bool existingNormalSave = true,
             bool supportedProfile = true,
-            bool persistNormalSelection = true)
+            bool persistNormalSelection = true,
+            bool useRealBridgeInstaller = false)
         {
             var container = Path.Combine(
                 Path.GetTempPath(),
@@ -1125,6 +1390,21 @@ public sealed class LauncherServiceTests : IDisposable
             var profilePath = Path.Combine(profileDirectory, "compatibility-profiles.json");
             var profileBytes = "synthetic pinned profile"u8.ToArray();
             await File.WriteAllBytesAsync(profilePath, profileBytes);
+            var bridgeBytes = "bridge"u8.ToArray();
+            var hostBytes = "host"u8.ToArray();
+            var packagedBridgeRoot = Path.Combine(container, "package", "components", "rmm-bridge");
+            Directory.CreateDirectory(packagedBridgeRoot);
+            await File.WriteAllBytesAsync(
+                Path.Combine(packagedBridgeRoot, "DSRRandomizer.RmmBridge.dll"),
+                bridgeBytes);
+            await File.WriteAllBytesAsync(
+                Path.Combine(packagedBridgeRoot, "DSRRandomizer.RmmBridgeHost.exe"),
+                hostBytes);
+            await File.WriteAllTextAsync(
+                Path.Combine(packagedBridgeRoot, "deployment-manifest.json"),
+                $$"""
+                  {"schemaVersion":1,"configuration":"Release","bridgeSha256":"{{Sha256(bridgeBytes)}}","hostSha256":"{{Sha256(hostBytes)}}"}
+                  """);
 
             var executableIdentity = ProfileInspector.InspectIdentity(runtimeExe);
             var steamIdentity = ProfileInspector.InspectIdentity(steamDll);
@@ -1145,6 +1425,13 @@ public sealed class LauncherServiceTests : IDisposable
                 supportedProfile ? [profile] : Array.Empty<CompatibilityProfile>());
             var fileAccess = new TrackingFileAccess(normalSave);
             var platform = new RecordingPlatform(fileAccess);
+            var bridgeInstaller = new RecordingBridgeInstaller();
+            var randomizerProcesses = new RecordingRandomizerProcessPlatform();
+            var identities = new LaunchArtifactIdentities(
+                Sha256(guardBytes),
+                Sha256(profileBytes),
+                Sha256(bridgeBytes),
+                Sha256(hostBytes));
             var service = new LauncherService(
                 externalRoot,
                 new FixedKnownFolderProvider(documents),
@@ -1153,9 +1440,11 @@ public sealed class LauncherServiceTests : IDisposable
                 platform,
                 guardDll,
                 profilePath,
-                new LaunchArtifactIdentities(
-                    Sha256(guardBytes),
-                    Sha256(profileBytes)));
+                identities,
+                useRealBridgeInstaller
+                    ? new RmmBridgeBundleInstaller(Path.Combine(container, "package"), identities)
+                    : bridgeInstaller,
+                randomizerProcesses);
             return new LaunchFixture(
                 container,
                 externalRoot,
@@ -1170,6 +1459,8 @@ public sealed class LauncherServiceTests : IDisposable
                 profilePath,
                 fileAccess,
                 platform,
+                bridgeInstaller,
+                randomizerProcesses,
                 service);
         }
 
@@ -1204,6 +1495,63 @@ public sealed class LauncherServiceTests : IDisposable
 
         internal static string Sha256(byte[] bytes) =>
             Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+    }
+
+    private sealed class RecordingBridgeInstaller : IRmmBridgeBundleInstaller
+    {
+        public RmmBridgeInstallResult Result { get; set; } = RmmBridgeInstallResult.Ready(changed: true);
+
+        public Action<string>? OnEnsureInstalled { get; set; }
+
+        public string BridgePath(string externalRoot) => Path.Combine(
+            externalRoot,
+            "components",
+            "rmm-bridge",
+            "DSRRandomizer.RmmBridge.dll");
+
+        public string HostPath(string externalRoot) => Path.Combine(
+            externalRoot,
+            "components",
+            "rmm-bridge",
+            "DSRRandomizer.RmmBridgeHost.exe");
+
+        public RmmBridgeInstallResult EnsureInstalled(string externalRoot)
+        {
+            OnEnsureInstalled?.Invoke(externalRoot);
+            if (!Result.IsReady)
+            {
+                return Result;
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(BridgePath(externalRoot))!);
+            File.WriteAllText(BridgePath(externalRoot), "bridge");
+            File.WriteAllText(HostPath(externalRoot), "host");
+            return Result;
+        }
+    }
+
+    private sealed class RecordingRandomizerProcessPlatform : IRandomizerProcessPlatform
+    {
+        public List<RandomizerProcessRequest> ToolStarts { get; } = [];
+
+        public List<RandomizerProcessRequest> ModEngineStarts { get; } = [];
+
+        public Action? OnModEngineLaunch { get; set; }
+
+        public RandomizerToolLaunchResult StartTool(RandomizerProcessRequest request)
+        {
+            ToolStarts.Add(request);
+            return RandomizerToolLaunchResult.Success();
+        }
+
+        public Task<SafetyLaunchResult> LaunchModEngineAsync(
+            RandomizerProcessRequest request,
+            CancellationToken cancellationToken)
+        {
+            ModEngineStarts.Add(request);
+            OnModEngineLaunch?.Invoke();
+            return Task.FromResult(new SafetyLaunchResult(true, string.Empty, 0));
+        }
     }
 
     private sealed class RecordingPlatform(TrackingFileAccess fileAccess) : IProtectedProcessPlatform

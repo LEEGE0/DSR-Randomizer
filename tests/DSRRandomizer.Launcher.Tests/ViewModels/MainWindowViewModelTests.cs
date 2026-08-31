@@ -212,6 +212,32 @@ public sealed class MainWindowViewModelTests
         Assert.True(viewModel.LaunchCommand.CanExecute(null));
     }
 
+    [Fact]
+    public async Task LoadAsync_WhenRuntimeIsReady_ExposesItemAndEnemyRandomizerCommands()
+    {
+        var viewModel = CreateViewModel(new FakeLauncherService(), new RecordingLogger());
+
+        await viewModel.LoadAsync();
+
+        Assert.NotNull(viewModel.ItemRandomizerCommand);
+        Assert.NotNull(viewModel.EnemyRandomizerCommand);
+        Assert.True(viewModel.ItemRandomizerCommand.CanExecute(null));
+        Assert.True(viewModel.EnemyRandomizerCommand.CanExecute(null));
+    }
+
+    [Fact]
+    public async Task ItemAndEnemyRandomizerCommands_UpdateStatusWithLaunchResult()
+    {
+        var viewModel = CreateViewModel(new FakeLauncherService(), new RecordingLogger());
+        await viewModel.LoadAsync();
+
+        await viewModel.ItemRandomizerCommand.ExecuteAsync(null);
+        Assert.Contains("item", viewModel.Status, StringComparison.OrdinalIgnoreCase);
+
+        await viewModel.EnemyRandomizerCommand.ExecuteAsync(null);
+        Assert.Contains("enemy", viewModel.Status, StringComparison.OrdinalIgnoreCase);
+    }
+
     private static MainWindowViewModel CreateViewModel(
         ILauncherService service,
         IExternalLogger logger) =>
@@ -291,6 +317,14 @@ public sealed class MainWindowViewModelTests
             LaunchCalls.Add(steamId);
             return Task.FromResult(LaunchResult);
         }
+
+        public Task<RandomizerToolLaunchResult> LaunchItemRandomizerAsync(
+            CancellationToken cancellationToken) =>
+            Task.FromResult(RandomizerToolLaunchResult.Success());
+
+        public Task<RandomizerToolLaunchResult> LaunchEnemyRandomizerAsync(
+            CancellationToken cancellationToken) =>
+            Task.FromResult(RandomizerToolLaunchResult.Success());
     }
 
     private sealed class RecordingLogger : IExternalLogger

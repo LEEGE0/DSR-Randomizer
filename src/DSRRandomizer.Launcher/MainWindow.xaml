@@ -3,7 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="DSR for MOD — Manual Offline Mod Runtime"
         Width="720"
-        Height="700"
+        Height="780"
         MinWidth="640"
         MinHeight="460"
         WindowStartupLocation="CenterScreen">
@@ -67,6 +67,24 @@
                          Minimum="0"
                          Maximum="100"
                          Value="{Binding ProgressPercent, Mode=OneWay}" />
+
+            <TextBlock Margin="0,20,0,0"
+                       FontWeight="SemiBold"
+                       Text="Randomizers — run in this order" />
+            <TextBlock Margin="0,6,0,8"
+                       TextWrapping="Wrap"
+                       Text="1. Export Item Randomizer changes into the active copied runtime. 2. Run Enemy Randomizer last with Merge files from game directory enabled. Do not use its Launch DS1 button; return here to launch." />
+            <WrapPanel Margin="0,0,0,8">
+                <Button MinWidth="190"
+                        Margin="0,0,8,0"
+                        Padding="12,7"
+                        Content="Launch Item Randomizer"
+                        Command="{Binding ItemRandomizerCommand}" />
+                <Button MinWidth="200"
+                        Padding="12,7"
+                        Content="Launch Enemy Randomizer"
+                        Command="{Binding EnemyRandomizerCommand}" />
+            </WrapPanel>
 
             <TextBlock Margin="0,20,0,0"
                        FontWeight="SemiBold"
