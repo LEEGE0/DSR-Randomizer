@@ -1,10 +1,10 @@
 # DSR for MOD v0.1.0-alpha.2 설치 안내
 
-이 문서는 배포 ZIP을 받은 사람이 자신의 Steam 정품 Dark Souls Remastered와 자신이 직접 받은 Randomizer를 사용해 별도의 모드 런타임을 만드는 절차입니다. 배포자는 12경로 바이너리 ZIP/체크섬과 함께 같은 버전의 `-source.zip`/체크섬도 제공해야 합니다. 소스 ZIP은 GPL corresponding source이며 런처 실행을 위해 풀 필요는 없습니다. 이 소스 묶음에는 프로젝트 코드와 함께 실제 고정 SoulsFormatsNEXT, ZstdNet 1.4.5, Zstandard 1.4.5 source/build tree가 들어 있습니다.
+이 문서는 `DSR-for-MOD-v0.1.0-alpha.2-redistributable.zip` 한 파일을 받은 사람이 자신의 Steam 정품 Dark Souls Remastered와 자신이 직접 받은 Randomizer를 사용해 별도의 모드 런타임을 만드는 절차입니다. 이 외부 ZIP 안에는 정확한 12경로 바이너리 ZIP, 그 바이너리의 GPL corresponding source ZIP, 두 내부 ZIP을 묶는 `SHA256SUMS.txt`가 함께 들어 있습니다. 세 파일을 같은 위치에 보관하십시오. 소스 ZIP은 런처 실행을 위해 풀 필요는 없지만, 프로젝트 코드와 실제 고정 SoulsFormatsNEXT, ZstdNet 1.4.5, Zstandard 1.4.5 source/build tree를 포함하므로 재배포할 때 빼면 안 됩니다.
 
 ## 이 ZIP에 포함된 것과 포함되지 않은 것
 
-ZIP에는 DSR for MOD 프로젝트가 소유한 런처, 네이티브 오프라인/저장 가드, 호환성 프로필, RMM 브리지 DLL, 자체 포함형 브리지 호스트, 배포 매니페스트와 문서만 들어 있습니다. 압축을 푼 뒤에는 `DSRForMod.Launcher.exe`, `native`, `config`, `components`의 상대 배치를 바꾸지 마십시오.
+내부 바이너리 ZIP에는 DSR for MOD 프로젝트가 소유한 런처, 네이티브 오프라인/저장 가드, 호환성 프로필, RMM 브리지 DLL, 자체 포함형 브리지 호스트, 배포 매니페스트와 문서만 들어 있습니다. 바이너리 ZIP을 푼 뒤에는 `DSRForMod.Launcher.exe`, `native`, `config`, `components`의 상대 배치를 바꾸지 마십시오.
 
 다음 타사 파일은 **번들되지 않으며, 런처가 다운로드하거나 설치하지도 않습니다.**
 
@@ -25,18 +25,26 @@ Enemy Randomizer 압축은 받은 구조 그대로 보관하십시오. 그 패�
 1. Windows x64 PC에서 Steam 정품 Dark Souls Remastered를 설치하고 Steam의 파일 무결성 검사를 완료합니다.
 2. 게임 복사본을 둘 새 로컬 폴더를 만듭니다. 이 폴더가 `<external-root>`이며, Steam 설치 폴더와 서로 겹치지 않아야 합니다. 네트워크/UNC 경로, 심볼릭 링크, 정션, 재분석 지점은 사용하지 마십시오.
 3. `<external-root>`에는 약 9 GB 이상의 여유 공간을 준비합니다. 세이브, 로그, 생성 결과도 모두 이 루트 아래에 쌓입니다.
-4. 바이너리 ZIP과 소스 ZIP 각각에 같은 위치의 `.sha256` 파일이 있어야 합니다. 압축을 풀기 전에 PowerShell에서 두 해시를 비교합니다.
+4. 받은 외부 ZIP의 파일명이 정확히 `DSR-for-MOD-v0.1.0-alpha.2-redistributable.zip`인지 확인합니다. 배포자가 외부 ZIP의 SHA-256을 별도로 알려 주었다면 `Get-FileHash` 결과와 먼저 비교합니다. 외부 ZIP에는 별도 `.sha256` sidecar가 없습니다.
+5. 외부 ZIP을 빈 폴더에 한 번 풀면 다음 세 파일만 나와야 합니다. 내부 ZIP을 옮기거나 이름을 바꾸지 마십시오.
+
+   ```text
+   DSR-for-MOD-v0.1.0-alpha.2-source.zip
+   DSR-for-MOD-v0.1.0-alpha.2-win-x64.zip
+   SHA256SUMS.txt
+   ```
+
+6. `SHA256SUMS.txt`의 두 줄과 PowerShell 계산값을 비교합니다. 파일에는 소스 ZIP이 먼저, 바이너리 ZIP이 다음 순서로 기록되어 있으며 각 줄은 `소문자 SHA-256`, 공백 두 칸, 정확한 파일명 형식입니다.
 
    ```powershell
-   Get-FileHash .\DSR-for-MOD-v0.1.0-alpha.2-win-x64.zip -Algorithm SHA256
-   Get-Content .\DSR-for-MOD-v0.1.0-alpha.2-win-x64.zip.sha256
    Get-FileHash .\DSR-for-MOD-v0.1.0-alpha.2-source.zip -Algorithm SHA256
-   Get-Content .\DSR-for-MOD-v0.1.0-alpha.2-source.zip.sha256
+   Get-FileHash .\DSR-for-MOD-v0.1.0-alpha.2-win-x64.zip -Algorithm SHA256
+   Get-Content .\SHA256SUMS.txt
    ```
 
 ## 런처와 복사 런타임 초기화
 
-1. ZIP을 비어 있는 새 폴더에 풉니다. Steam 게임 폴더나 기존 Randomizer 폴더에 덮어 풀지 마십시오.
+1. 해시를 확인한 내부 `DSR-for-MOD-v0.1.0-alpha.2-win-x64.zip`만 비어 있는 새 폴더에 풉니다. Steam 게임 폴더나 기존 Randomizer 폴더에 덮어 풀지 마십시오. 외부 ZIP이나 소스 ZIP을 실행 폴더에 풀 필요는 없습니다.
 2. 압축을 푼 폴더에서 다음 명령으로 12개 허용 파일과 내장 해시/매니페스트를 검사할 수 있습니다. 종료 코드가 0이어야 합니다.
 
    ```powershell
@@ -75,7 +83,7 @@ Steam 원본 폴더는 읽기 전용 입력입니다. 프로젝트 네이티브 
 - Item Randomizer 파일은 `DarkSoulsItemRandomizer.exe`가 위 `DS1EnemyRandomizer` 디렉터리에 오도록 사용자가 직접 배치합니다.
 - Enemy Randomizer의 `dist1`, `param`, Mod Engine, `DS1HeapPatch.dll` 구조는 유지합니다.
 - `Mods` 아래에 `DS1EnemyRandomizer.exe` 복사본이나 백업을 여러 개 두지 마십시오. 런처는 정확히 하나만 허용합니다.
-- 이 배치는 사용자가 소유한 로컬 설치입니다. DSR for MOD ZIP에 합쳐서 재배포하면 안 됩니다.
+- 이 배치는 사용자가 소유한 로컬 설치입니다. DSR for MOD 외부/내부 ZIP에 합쳐서 재배포하면 안 됩니다.
 
 ## Randomizer 실행과 모드 시작
 
@@ -99,7 +107,7 @@ Steam 원본 폴더는 읽기 전용 입력입니다. 프로젝트 네이티브 
 ## 설치 확인과 문제 해결
 
 - `DSRForMod.Launcher.exe --status`로 선택된 외부 루트와 활성 런타임 준비 상태를 확인할 수 있습니다.
-- `--validate-package`가 실패하면 ZIP을 다시 받고 체크섬부터 확인하십시오. 개별 DLL/EXE를 인터넷에서 따로 구해 덮어쓰지 마십시오.
+- `--validate-package`가 실패하면 외부 ZIP을 다시 받고, 외부 ZIP에서 새로 꺼낸 두 내부 ZIP을 `SHA256SUMS.txt`와 다시 비교하십시오. 개별 DLL/EXE를 인터넷에서 따로 구해 덮어쓰지 마십시오.
 - `RMM_BRIDGE_BUNDLE_INVALID`는 압축을 푼 패키지의 브리지 소스 또는 매니페스트가 없거나 해시가 다르다는 뜻입니다.
 - `RMM_BRIDGE_INSTALL_FAILED`는 선택한 외부 루트에 안전하게 설치할 수 없다는 뜻입니다. 권한, 남은 공간, 링크/정션 여부와 실행 중인 게임/호스트를 확인하십시오.
 - `RMM_BRIDGE_INSTALL_TAMPERED`는 설치 후 재검증이 실패했다는 뜻입니다. 게임을 시작하지 않은 상태로 패키지 체크섬과 외부 루트를 다시 확인하십시오.
@@ -128,4 +136,4 @@ Steam의 Dark Souls Remastered 설치 폴더와 정상 세이브 폴더는 제�
 - `DarkSoulsRemastered.exe`와 Steam 게임 데이터/에셋, 복사 런타임 전체
 - Item Randomizer, Enemy Randomizer, 호환 Mod Engine 포크, `DS1HeapPatch.dll`
 
-공유할 수 있는 것은 프로젝트가 만든 원본 바이너리 ZIP/체크섬과 그 바이너리에 대응하는 정확한 소스 ZIP/체크섬뿐입니다. 바이너리는 이 소스 묶음과 함께 전달하거나 GPL이 허용하는 동일 장소의 무료 소스 제공 방법을 갖춰야 합니다. 자신의 외부 루트나 초기화된 런타임을 다시 압축해 전달하지 마십시오.
+공유할 수 있는 것은 프로젝트가 만든 원본 `DSR-for-MOD-v0.1.0-alpha.2-redistributable.zip` 한 파일뿐입니다. 이 파일에는 바이너리, 정확한 대응 소스, `SHA256SUMS.txt`가 물리적으로 함께 들어 있습니다. 내부 바이너리 ZIP만 떼어 보내거나 자신의 외부 루트/초기화된 런타임을 다시 압축해 전달하지 마십시오.

@@ -2,7 +2,7 @@
 
 ## 현재 상태
 
-재배포 파이프라인 구현과 Task 5 재검토는 코드 HEAD `478a0b3`에서 승인됐다. 승인 시 검증은 관리형 435/435, 네이티브 15/15였으며, 이전 계획의 385개는 역사적 기준선이다. Task 6 배포 검토에서 단일 파일 호스트의 무허가 DrSwizzler 포함을 발견했고, fix commit `a77a7d2`가 TPF/DrSwizzler 및 사용하지 않는 BouncyCastle 런타임을 제외하는 프로젝트 소유 SoulsFormats subset, 구조적 bundle/deps 검사, deterministic corresponding-source builder를 추가했다. 독립 privacy gate에서 subset의 Release CodeView path를 추가로 거부해 fix commit `4497070`이 Release-only symbol suppression과 Debug-PDB 보존 검사를 추가했다. 대응 소스 재검토 뒤 fix commit `24db7b0`이 ZstdNet/Zstandard의 정확한 upstream tree를 고정하고, 세 submodule 전체를 소스 ZIP에 넣으며, main/submodule 바이너리-소스 동일성 검사를 fail-closed로 추가했다. 최종 빌드가 260자를 넘는 staging 경로의 Win32 file lease 문제를 드러냈고 fix commit `8bfdf8d`가 extended-path 검증과 회귀 검사를 추가했다. 재검토에서 소스 fixture의 개인 식별자와 네 산출물의 순차 게시 위험을 발견해 fix commit `68a253f`가 중립 fixture, 다중 표현/인코딩 privacy gate, 목적지 로컬 4-file transaction과 완전 rollback 검사를 추가했다. 후속 검토에서 초기 staged-open 실패가 transaction 잔여물을 남기고 gate 이후 pathname을 다시 여는 문제를 발견해 fix commit `337e304`가 단일 owner rollback/cleanup, 네 입력의 안정된 non-write-sharing lease, 엄격한 sidecar/최종 gate hash 결합, leased-byte durable copy, 최종 네 파일 lease 재검증을 추가했다. 그다음 검토에서 commit 이후 backup 정리 실패가 새 세트를 삭제할 수 있고 이전 세트가 pathname으로만 결합된 문제를 발견해 fix commit `40435fc`가 이전 네 파일의 안정된 lease/sidecar/hash 검증, leased-byte backup, `Prepared`/`Committed` journal, phase별 recovery를 추가했다. 최종 publication 재검토의 동시 publisher, unrelated Prepared recovery, 비내구성 journal rename, 실제 directory-delete 실패 문제는 fix commit `f6fcb23`이 canonical output-root lock, schema-v4 progress/identity ownership, `MoveFileExW` write-through phase 전환, 실제 journal/directory 잠금 뒤 자동 재시도를 추가해 해결했다. 현재 전체 기준은 관리형 447개와 네이티브 15개다.
+재배포 파이프라인 구현과 Task 5 재검토는 코드 HEAD `478a0b3`에서 승인됐다. 승인 시 검증은 관리형 435/435, 네이티브 15/15였으며, 이전 계획의 385개는 역사적 기준선이다. Task 6 검토 과정에서 DrSwizzler 제거, 정확한 Zstd 대응 소스, main/submodule 동일성, 다중 표현 privacy 검사, 긴 경로 검증을 추가했다. 여러 loose 산출물을 transaction으로 게시하는 설계는 반복 검토에서 불필요하게 넓은 crash/ownership 표면을 드러냈다. 최종 구조 결정에 따라 fix commit `7429093`은 해당 state machine과 journal을 제거하고, 검증된 내부 바이너리/소스 ZIP과 `SHA256SUMS.txt`를 포함하는 하나의 authoritative outer ZIP만 안정된 lease와 Windows 원자 교체로 게시한다. 현재 전체 기준은 관리형 447개와 네이티브 15개다.
 
 배포 빌드는 저장소 루트에서 다음 한 경로로 만든다.
 
@@ -10,20 +10,17 @@
 pwsh -NoProfile -File packaging/build-release.ps1 -Version 0.1.0-alpha.2 -OutputPath artifacts
 ```
 
-출력 파일은 다음 네 개이며 소스 관리에는 추가하지 않는다.
+최종 출력 파일은 다음 하나이며 소스 관리에는 추가하지 않는다.
 
 ```text
-artifacts/DSR-for-MOD-v0.1.0-alpha.2-win-x64.zip
-artifacts/DSR-for-MOD-v0.1.0-alpha.2-win-x64.zip.sha256
-artifacts/DSR-for-MOD-v0.1.0-alpha.2-source.zip
-artifacts/DSR-for-MOD-v0.1.0-alpha.2-source.zip.sha256
+artifacts/DSR-for-MOD-v0.1.0-alpha.2-redistributable.zip
 ```
 
-빌드할 때마다 두 ZIP이 교체되므로 각각 함께 생성된 sidecar 체크섬만 해당 ZIP에 유효하다. 바이너리 ZIP은 정확히 12경로를 유지하고, 별도 소스 ZIP은 committed `HEAD`와 실제 고정 SoulsFormatsNEXT, ZstdNet, Zstandard tree로 만든다. 소스 ZIP의 `SOURCE_REVISIONS.json`은 해당 main commit과 세 submodule commit을 엄격한 스키마로 식별한다.
+외부 ZIP에는 fixed timestamp/ordinal order로 `DSR-for-MOD-v0.1.0-alpha.2-source.zip`, `DSR-for-MOD-v0.1.0-alpha.2-win-x64.zip`, `SHA256SUMS.txt` 세 경로만 들어간다. `SHA256SUMS.txt`는 두 내부 ZIP의 exact byte hash와 파일명을 묶는다. 외부 ZIP의 sidecar는 만들지 않으며 최종 SHA-256은 report에 별도로 기록한다. 내부 바이너리 ZIP은 정확히 12경로를 유지하고, 내부 소스 ZIP은 committed `HEAD`와 실제 고정 SoulsFormatsNEXT, ZstdNet, Zstandard tree로 만든다. `SOURCE_REVISIONS.json`은 해당 main commit과 세 submodule commit을 엄격한 스키마로 식별한다.
 
-최종 검토에 사용할 두 archive의 크기/해시는 `.superpowers/sdd/2026-08-31-redistributable-release/task-6-report.md`에 기록한다. 추적 문서 안에 source ZIP hash를 넣으면 그 문서 자체가 source ZIP을 바꾸는 자기참조가 되므로 여기에는 source hash를 고정하지 않는다.
+최종 검토에 사용할 outer/inner archive의 크기와 해시는 `.superpowers/sdd/2026-08-31-redistributable-release/task-6-report.md`에 기록한다. 추적 package 문서 안에 source ZIP hash를 넣으면 그 문서 자체가 source ZIP을 바꾸는 자기참조가 되므로 여기에는 source hash를 고정하지 않는다.
 
-최종 검증은 바이너리를 새 고유 임시 디렉터리에 독립 추출해 12개 경로, 엄격한 네 속성 매니페스트, bridge/host hash, package validator, 금지 경로와 개인정보 byte를 검사한다. source ZIP도 별도로 경로 정렬/중복/상위 이동/fixed timestamp/세 upstream tree의 exact entry/필수 소스/금지 디렉터리/checksum을 확인하고, 추출한 소스에서 bridge host를 restore/build한다.
+최종 검증은 먼저 outer ZIP의 정확한 세 entry/순서/timestamp/manifest hash를 검사한다. 그 exact inner 바이너리를 새 고유 임시 디렉터리에 독립 추출해 12개 경로, 엄격한 네 속성 매니페스트, bridge/host hash, package validator, 금지 경로와 개인정보 byte를 검사한다. exact inner source도 경로 정렬/중복/상위 이동/fixed timestamp/세 upstream tree의 exact entry/필수 소스/금지 디렉터리/hash를 확인하고, 추출한 소스에서 bridge host를 restore/build한다.
 
 ## 정확한 ZIP 경계
 
@@ -83,15 +80,15 @@ Steam Offline Mode는 수령자가 직접 설정해야 한다. 런처는 네트�
 - 릴리스 빌더는 GUID가 붙은 fail-if-exists 작업/스테이징/추출 디렉터리만 사용하고, 물리적 루트와 자식을 고정·검증하며, 검증된 작업 디렉터리만 수동 정리한다.
 - 브리지 호스트 Release 빌드는 private absolute PDB path를 넣지 않는다. Task 6의 byte-level privacy scan은 첫 빌드의 local PDB path를 거부했고, Debug build의 유용한 symbol 출력은 유지한다.
 - bridge-host 전용 SoulsFormats subset은 `Formats/TPF` 전체와 DrSwizzler를 제외한다. 사용하지 않는 BouncyCastle runtime도 제외하며, 필요한 BND3/PARAM/DCX_DFLT 경로와 ZstdNet/libzstd는 유지한다. official host의 .NET v6 bundle manifest와 embedded deps JSON을 직접 파싱해 제외 항목을 검증한다.
-- 공식 빌드 전에 main `HEAD`가 committed/clean인지 확인하고 nonignored untracked 입력을 거부한다. 재귀 submodule은 모두 초기화되고 각 gitlink와 정확히 일치하며 clean해야 한다. 바이너리 staging 뒤와 소스 archive 직전에도 동일 조건을 재검사하고, 네 산출물이 모두 성공하기 전에는 최종 경로로 게시하지 않는다. `artifacts`, `bin`, `obj` 같은 ignored 생성물은 이 검사에서 허용된다.
+- 공식 빌드 전에 main `HEAD`가 committed/clean인지 확인하고 nonignored untracked 입력을 거부한다. 재귀 submodule은 모두 초기화되고 각 gitlink와 정확히 일치하며 clean해야 한다. 바이너리 staging 뒤와 소스 archive 직전에도 동일 조건을 재검사하고, 두 내부 ZIP과 outer 검증이 모두 성공하기 전에는 최종 경로로 게시하지 않는다. `artifacts`, `bin`, `obj` 같은 ignored 생성물은 이 검사에서 허용된다.
 - 소스와 바이너리 ZIP의 모든 엔트리는 알려진 reviewed profile/account marker를 plain, JSON-escaped, forward-slash/URI, UTF-8, UTF-16LE, UTF-16BE 형태로 검사한다. 프로젝트 소유 테스트 fixture는 중립 합성 값만 사용하며, 세 upstream submodule은 읽기 전용으로 별도 검사한다.
-- 마지막 package/privacy/source gate 뒤 두 ZIP의 expected SHA-256을 고정한다. Recovery 전부터 완료까지 canonical output root에 비공개 데이터가 없는 빈 `.dsr-release-publication.lock`을 배타적으로 유지하고, 경쟁 publisher는 출력/transaction을 바꾸지 않은 채 `PUBLICATION_IN_PROGRESS`로 실패한다. 네 staged 입력을 각각 한 번 열어 write/delete 교체를 막는 lease를 게시 완료까지 유지한다. Sidecar는 정확한 소문자 SHA-256, 두 칸, 대응 ZIP 파일명, LF만 허용한다. 기존 네 파일도 모두 안정된 lease로 열어 ZIP/sidecar 관계와 hash를 확인하고, 그 handle에서만 같은 volume의 transaction backup으로 복사해 flush/재검증한다. 출력 변경 전 strict schema-v4 `Prepared` journal에 old/new hash, 진행 상태, promoted file identity를 기록한다. Prepared recovery는 현재 경로를 lease/hash/identity 확인해 해당 transaction 소유 byte만 바꾸고, unrelated valid set은 그대로 보존한 채 fail-closed다. Journal 교체는 같은 directory의 `MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)` 후 live journal을 다시 엄격히 parse/검증한다. 최종 네 파일을 lease해 expected hash와 sidecar 관계를 검증한 뒤 strict `Committed` journal을 기록하는 지점이 commit point다. 그 뒤 backup/journal/directory 정리 실패는 새 네 파일을 삭제하거나 rollback하지 않으며, journal이 삭제된 뒤 directory 삭제가 실패해도 recognizable Committed journal을 재생성한다. 다음 실행은 committed 새 세트를 먼저 재검증한 뒤 남은 transaction만 정리한다. 기존 파일이 일부만 있거나 journal schema/identity가 불명확한 stale transaction이면 fail-closed다.
+- 마지막 package/privacy/source gate 뒤 두 내부 ZIP의 expected SHA-256을 고정하고, 두 exact leased byte와 strict LF-only `SHA256SUMS.txt`로 deterministic outer ZIP을 만든다. 게시 완료까지 canonical output root의 빈 `.dsr-release-publication.lock`을 배타적으로 유지하고, 경쟁 publisher는 canonical 출력에 손대지 않은 채 `PUBLICATION_IN_PROGRESS`로 실패한다. 게시자는 gated outer를 안정된 lease로 열고 같은 volume의 pending file로 내구성 있게 복사한다. 기존 outer가 있으면 전체 한 파일을 lease/검증해 `.previous` whole-file backup으로 복사한다. `MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)` 뒤 outer hash와 세 entry semantics를 다시 확인한다. Replace 전 실패는 기존 outer를 유지하고, replace 후 검증 실패는 whole backup을 복원한다. Backup 정리 실패는 valid canonical outer를 손상하지 않으며 valid `.previous`만 남길 수 있다. Transaction directory와 journal은 없다. 성공 뒤 과거 네 loose ZIP/sidecar exact path는 regular/single-link/non-reparse일 때만 삭제한다.
 - package validator의 Win32 file lease는 extended path를 사용한다. 따라서 reparse/identity 검사를 완화하지 않고도 260자를 넘는 안전한 고유 staging 경로를 검증한다.
 - staging과 새 ZIP 추출본 모두 패키지 validator를 통과해야 하며, ZIP 엔트리의 중복·루트 경로·역슬래시 별칭·점/상위 경로를 거부한다.
 
 ## 라이선스 주의
 
-브리지 호스트는 commit `55b08a3c02a03777cf19958d8f6aa18d7af59da1`의 SoulsFormatsNEXT 소스를 수정된 subset으로 컴파일한다. 수정 고지는 `THIRD_PARTY_NOTICES.md`와 subset project에 있다. 12경로 바이너리 ZIP은 corresponding source가 아니므로 정확한 별도 source ZIP/checksum과 함께 전달하거나, GPL이 허용하는 same-place gratis source access를 유지해야 한다. source ZIP에는 단순 gitlink가 아니라 실제 고정 SoulsFormatsNEXT 전체, ZstdNet commit `c90152918f633e945f163652e6368001556784e7`의 managed source/project, Zstandard commit `b706286adbba780006a47ef92df0ad7a785666b6`의 native source/build 입력이 들어간다.
+브리지 호스트는 commit `55b08a3c02a03777cf19958d8f6aa18d7af59da1`의 SoulsFormatsNEXT 소스를 수정된 subset으로 컴파일한다. 수정 고지는 `THIRD_PARTY_NOTICES.md`와 subset project에 있다. 12경로 inner 바이너리 ZIP은 corresponding source가 아니므로 정확한 inner source ZIP과 이를 함께 묶은 authoritative outer 전체를 전달해야 한다. Source ZIP에는 단순 gitlink가 아니라 실제 고정 SoulsFormatsNEXT 전체, ZstdNet commit `c90152918f633e945f163652e6368001556784e7`의 managed source/project, Zstandard commit `b706286adbba780006a47ef92df0ad7a785666b6`의 native source/build 입력이 들어간다.
 
 Windows에서 source ZIP을 재빌드할 때는 드라이브 루트나 시스템 임시 루트에 가까운 짧은 경로에 압축을 푼다. 깊은 경로는 컴파일 전에 레거시 MSBuild 경로 길이 제한에 걸릴 수 있다. 정확한 restore/build 명령은 source ZIP 안의 `README.md`에 있다.
 
@@ -100,4 +97,4 @@ Windows에서 source ZIP을 재빌드할 때는 드라이브 루트나 시스템
 - 이 버전은 alpha이며 실제 수령자 PC의 Randomizer 패키지 구조와 Steam Offline Mode는 자동으로 공급하거나 증명하지 않는다.
 - 자동화 검증은 실제 게임 플레이 성공을 대신하지 않는다. 수령자 환경에서는 설치 안내를 따른 제어된 오프라인 실행 확인이 여전히 필요하다.
 - 외부 루트를 지우면 개인 `.rmm`, 생성 결과, 로그도 사라진다. 제거 전 사용자가 보관할 `.rmm`은 별도의 비공개 위치에 백업해야 한다.
-- 생성된 외부 루트나 복사 런타임을 다시 압축해 배포하면 안 된다. 배포 대상은 공식 빌더가 만든 12경로 binary ZIP/checksum과 exact corresponding-source ZIP/checksum 묶음이다.
+- 생성된 외부 루트나 복사 런타임을 다시 압축해 배포하면 안 된다. 배포 대상은 공식 빌더가 만든 `DSR-for-MOD-v0.1.0-alpha.2-redistributable.zip` 한 파일뿐이다.

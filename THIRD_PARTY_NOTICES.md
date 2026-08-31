@@ -10,11 +10,10 @@ SoulsFormatsNEXT, from https://github.com/soulsmods/SoulsFormatsNEXT.git, is com
 
 **Modified by DSR for MOD on 2026-09-01 to omit TPF/DrSwizzler support for the bridge-host build.** The project-owned subset project excludes every `Formats/TPF` source file. It also satisfies two unused BouncyCastle `using` directives with empty compile-time namespace declarations, so neither DrSwizzler nor BouncyCastle code, assembly, or package reference enters the published host. The pinned upstream checkout itself remains unmodified.
 
-The corresponding source is emitted separately as:
+The authoritative `DSR-for-MOD-v0.1.0-alpha.2-redistributable.zip` physically includes the corresponding source as:
 
 ```text
 DSR-for-MOD-v0.1.0-alpha.2-source.zip
-DSR-for-MOD-v0.1.0-alpha.2-source.zip.sha256
 ```
 
 That deterministic archive is made from the committed main-repository tree and the actual contents of all three pinned upstream trees, not merely their submodule pointers:
@@ -25,7 +24,7 @@ That deterministic archive is made from the committed main-repository tree and t
 
 It includes the project solution, the subset project and modification notice, release/build scripts, applicable license files, the complete pinned SoulsFormatsNEXT source, the ZstdNet managed wrapper source/project files, and the Zstandard native source/build inputs. Its strict `SOURCE_REVISIONS.json` records the exact main commit and all three submodule commits. It excludes Git metadata, build outputs, generated release artifacts, and private working data.
 
-The 12-path binary ZIP is not itself a corresponding-source archive. Convey the binary ZIP and checksum together with the exact source ZIP and checksum, or provide equivalent gratis access to that exact source at the same place, for as long as the GPL requires. Do not redistribute the binary alone unless you independently satisfy GPL-3.0 section 6 for the exact distributed build.
+The 12-path inner binary ZIP is not itself a corresponding-source archive. Convey the complete authoritative outer redistributable: it contains the exact binary ZIP, exact source ZIP, and a strict `SHA256SUMS.txt` that binds both inner bytes. Do not remove the source ZIP or redistribute the binary alone unless you independently satisfy GPL-3.0 section 6 for the exact distributed build.
 
 ## ZstdNet 1.4.5
 

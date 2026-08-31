@@ -9,8 +9,8 @@ All notable changes to DSR Randomizer are documented here.
 - Redistributable Windows x64 package with the project-owned native RMM bridge DLL and self-contained bridge host.
 - Recipient-controlled bridge installation beneath the selected external root, with strict four-property manifest validation, embedded SHA-256 identities, safe replacement, final re-verification, and matching no-op behavior.
 - Korean recipient guide covering official third-party download sources, the copied-runtime layout, Steam Offline Mode, save isolation, validation, rollback, and redistribution exclusions.
-- Exact 12-path package allowlist, staged and freshly extracted package validation, deterministic ZIP construction, and SHA-256 sidecar generation.
-- Deterministic corresponding-source ZIP and checksum containing the committed project tree plus the actual pinned SoulsFormatsNEXT, ZstdNet 1.4.5, and Zstandard 1.4.5 contents, with a strict manifest identifying all four revisions.
+- Exact 12-path inner binary allowlist, staged and freshly extracted package validation, and deterministic ZIP construction.
+- One authoritative deterministic outer redistributable containing the exact binary ZIP, corresponding-source ZIP, and strict `SHA256SUMS.txt`; the source contains the committed project tree plus the actual pinned SoulsFormatsNEXT, ZstdNet 1.4.5, and Zstandard 1.4.5 contents, with a strict manifest identifying all four revisions.
 
 ### Changed
 
@@ -22,13 +22,13 @@ All notable changes to DSR Randomizer are documented here.
 - The project-owned SoulsFormats subset omits TPF/DrSwizzler support and the unused BouncyCastle runtime while retaining the BND3/PARAM/DCX merge path; full ZstdNet/libzstd notices and SoulsFormatsNEXT corresponding-source obligations are included.
 - The release builder now fails closed unless the main repository is committed and clean and every recursive submodule is initialized, clean, and exactly at its pinned gitlink; it checks the same invariant again after binary staging and before source archiving.
 - Reviewed profile/account sentinels are rejected across binary and source entries in plain, JSON-escaped, forward-slash/URI, UTF-8, UTF-16LE, and UTF-16BE forms; project-owned fixtures use neutral synthetic identities.
-- The binary ZIP, binary checksum, source ZIP, and source checksum are promoted as one recoverable set from stable non-write-sharing input leases under one canonical output-root publication lock. Competing publishers fail with `PUBLICATION_IN_PROGRESS`. Complete prior sets are also leased, sidecar-validated, and copied into verified durable backups. A strict schema-v4 `Prepared` journal binds old/new hashes, progress, and promoted identities; recovery refuses to touch unrelated current bytes. Same-directory `MoveFileExW` replace/write-through plus strict reopen verification establishes the `Committed` point. Pre-commit failures restore the verified old bytes, while post-commit journal/directory cleanup faults preserve and revalidate the complete new set on retry. Partial prior sets and unknown stale transactions fail closed.
+- The builder now creates and validates both inner ZIPs privately, binds their exact bytes in the outer hash manifest, and publishes only the one leased outer file under a canonical output-root lock. Same-filesystem Windows replace/write-through makes the visible result one complete old or new redistributable, never a mixed binary/source set. Pre-replace faults leave the old file, post-replace verification faults restore a whole-file backup, concurrent publishers receive `PUBLICATION_IN_PROGRESS`, and no transaction directory or journal is used. Exact legacy loose ZIP/sidecar paths are removed only when they are safe regular single-link files.
 - Package identity validation uses extended Windows paths for its reparse-safe file leases, so deeply nested release staging remains verifiable beyond the legacy 260-character boundary.
 
 ### Verification
 
 - 447/447 managed Release tests and 15/15 native Release tests pass.
-- Clean-root bridge installation, tamper repair, extracted-binary-ZIP validation, parsed host bundle/dependency inspection, deterministic exact-three-submodule source-archive validation, clean source-state enforcement, strict manifest/hash validation, prohibited-content scans, exact-entry inspection, extracted-source host rebuild, and checksum recomputation are part of the release gate.
+- Clean-root bridge installation, tamper repair, exact-three-entry outer validation, extracted inner-binary validation, parsed host bundle/dependency inspection, deterministic exact-three-submodule source-archive validation, clean source-state enforcement, strict manifests/hashes, prohibited-content scans, exact-entry inspection, extracted-source host rebuild, and inner/outer checksum recomputation are part of the release gate.
 
 ## [0.1.0-alpha.1] - 2026-08-24
 

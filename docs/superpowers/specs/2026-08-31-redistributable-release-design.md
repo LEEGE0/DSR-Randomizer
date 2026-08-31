@@ -47,14 +47,15 @@ components/rmm-bridge/deployment-manifest.json
 
 No PDB is included. No additional path is accepted by package validation.
 
-## Corresponding-Source Archive
+## Authoritative Outer Archive and Corresponding Source
 
-The exact 12-path binary layout remains unchanged. The official build also emits:
+The exact 12-path binary layout remains unchanged as an inner component. The only authoritative file intended for delivery is:
 
 ```text
-DSR-for-MOD-v0.1.0-alpha.2-source.zip
-DSR-for-MOD-v0.1.0-alpha.2-source.zip.sha256
+DSR-for-MOD-v0.1.0-alpha.2-redistributable.zip
 ```
+
+That deterministic outer ZIP has exactly three root entries, in ordinal order with fixed timestamps: `DSR-for-MOD-v0.1.0-alpha.2-source.zip`, `DSR-for-MOD-v0.1.0-alpha.2-win-x64.zip`, and `SHA256SUMS.txt`. The hash manifest has exactly two LF-terminated lines in the same order, each containing a lowercase SHA-256, two spaces, and the exact inner filename. No external sidecar is created for the outer archive.
 
 The source archive is generated from committed `HEAD`, then overlays the actual contents of all three pinned upstream commits rather than their gitlinks alone:
 
@@ -64,13 +65,15 @@ The source archive is generated from committed `HEAD`, then overlays the actual 
 
 It uses one versioned root prefix, ordinally sorted unique entries, and a fixed 1980 timestamp. A generated `SOURCE_REVISIONS.json` has exactly `schemaVersion`, `mainRevision`, and `submodules`; the submodule object names all three paths and their exact commits. The archive contains the main solution, subset project and modification notice, build/release scripts, project license files, and those three complete pinned trees. It excludes `.git`, `bin`, `obj`, `artifacts`, `.superpowers`, private/generated working data, traversal, rooted paths, aliases, and duplicates. On Windows, recipients should extract it near a drive root or system temporary root to avoid legacy MSBuild path-length behavior; the included README provides exact host restore/build commands.
 
-The binary ZIP/checksum must be conveyed with this exact source ZIP/checksum, or equivalent same-place gratis access to the exact source must be maintained under GPL-3.0. A tracked document must not embed the source ZIP's own hash because that would make the archive identity self-referential.
+The complete authoritative outer archive must be conveyed. It physically keeps the exact inner binary/source pair and their hash manifest together, satisfying the chosen same-place source distribution. A tracked package document must not embed the source ZIP's own hash because that would make the archive identity self-referential.
 
 ## Immutable Release Source State
 
 Before any official binary build, the main repository must resolve to a committed `HEAD`; all tracked files and all nonignored untracked files must be clean. Ignored generated outputs such as `artifacts`, `bin`, and `obj` are permitted. Every recursive submodule must be initialized, at the exact gitlink revision, and clean, and the three release-contract revisions above must match exactly. Errors identify whether the main tree or a named submodule violates the invariant.
 
-The same invariant is checked after binary staging and again inside the source builder immediately before it archives committed objects. After the final package, privacy, and source checks, the builder captures both exact ZIP SHA-256 values. Publication acquires a canonical, regular, single-link output-root lock before scanning stale transactions and holds it through recovery, publication, committed cleanup, and return. The persistent lock file is empty, ignored, outside archives/upload globs, and a concurrent publisher receives stable `PUBLICATION_IN_PROGRESS` without mutating outputs. Publication opens all four staged inputs once with stable regular-file identities and sharing that denies write/delete replacement. Each strict lowercase sidecar must name and hash its paired ZIP, and each leased ZIP must match the gated hash. A complete prior set is also opened through stable single-link leases, its two ZIP/sidecar pairs are validated, and its exact leased bytes are copied into durably flushed and hash-verified transaction backups. A strict schema-v4 `Prepared` journal records final/backup hashes, progress, and promoted file identities before any output changes. Prepared recovery leases each present current file and changes it only when its hash or recorded identity belongs to that transaction; an unrelated internally valid current set is preserved and recovery fails closed. Pre-commit failures validate backups before removing partial owned outputs and restore only the leased backup bytes. All four final files are then leased and their blob hashes, gated ZIP hashes, and sidecar pairings are reverified. Both initial Prepared publication and the `Committed` transition replace the live journal with same-directory Windows `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`, then reopen and strictly parse the exact live bytes. The verified transition to `Committed` is the publication commit point. From that point, backup/journal/directory cleanup exceptions never enter rollback or delete the verified new set. If final directory deletion fails after journal removal, the publisher durably recreates a valid Committed journal; a later invocation validates the committed finals and finishes only the pending cleanup. Partial prior sets and unknown journal/schema state fail closed. Tests cover clean exact state, dirty tracked main state, a nonignored untracked compile input, an uninitialized submodule, a wrong submodule HEAD, a dirty submodule, locked staged and prior inputs, invalid/hard-linked prior sets, blocked prior mutation, strict sidecar and gated-hash mismatches, post-write tamper rollback, controlled pre-commit rollback, successful first/replacement publication, partial-set rejection, owned and unrelated Prepared recovery, Committed recovery, concurrent publishers with and without prior outputs, committed cleanup locks at backup indices 0 and 3, actual journal and directory-ADS cleanup locks with retry, durable-move and live-journal-verification failures, and unknown stale-transaction rejection.
+The same invariant is checked after binary staging and again inside the source builder immediately before it archives committed objects. The binary and source builders may create private sidecars inside the verified work directory, but those are checked strictly and never published. After the final package, privacy, source-tree, and extracted-source build checks, the builder captures both exact inner ZIP hashes and constructs the deterministic outer ZIP from stable leased inner inputs. It validates the exact three-entry order/timestamps, strict hash manifest, and the exact inner bytes before publication.
+
+Publication acquires a canonical, regular, single-link output-root lock and holds it through final return. The persistent lock file is empty, ignored, and outside archives/upload globs; a concurrent publisher receives stable `PUBLICATION_IN_PROGRESS` without changing the canonical archive. The publisher leases the exact gated outer input with write/delete replacement denied, verifies its expected SHA-256 and semantics, and streams it into a same-filesystem pending file. If a prior canonical outer archive exists, it is leased, validated, and copied byte-for-byte to one verified whole-file backup. Windows `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)` atomically publishes the pending file. Final bytes and outer/inner semantics are reverified. A pre-replace failure leaves the prior archive unchanged; a post-replace verification failure restores the verified whole-file backup. Backup cleanup failure never invalidates the canonical archive and may leave only a clearly named valid `.previous` whole archive for later cleanup. There are no transaction directories, journals, or multi-file commit phases. Tests cover deterministic construction, first publication, replacement, pre/post-replace failures, locked/injected backup-cleanup failures, synchronized publishers and retry, and safe exact cleanup of the four obsolete loose artifact paths.
 
 The bridge manifest uses UTF-8 without a byte-order mark and this schema:
 
@@ -171,10 +174,12 @@ Release construction is one orchestration path that:
 4. stages exactly the allowlisted files;
 5. writes the bridge manifest and native guard sidecar;
 6. runs `DSRForMod.Launcher.exe --validate-package` against staging;
-7. creates a deterministic ZIP with sorted entries and fixed timestamps;
-8. validates ZIP entry names for duplicates, rooted paths, `..`, and unexpected directories;
-9. extracts the ZIP into a fresh temporary directory and runs the same launcher validator again;
-10. writes `<zip>.sha256` using lowercase SHA-256 and the ZIP filename.
+7. creates the deterministic 12-path inner binary ZIP with sorted entries and fixed timestamps;
+8. validates binary ZIP entry names for duplicates, rooted paths, `..`, and unexpected directories;
+9. extracts the binary ZIP into a fresh temporary directory and runs the same launcher validator again;
+10. creates and validates the deterministic corresponding-source ZIP;
+11. constructs the exact three-entry outer redistributable and strict two-line `SHA256SUMS.txt` from the gated inner bytes;
+12. publishes only the one outer file atomically and removes only safe exact legacy loose artifact paths.
 
 The dependency manifest used to assemble .NET notices must come from the supplied launcher publish directory or its exact publish invocation, never the newest unrelated `obj/Release` file.
 
@@ -206,9 +211,10 @@ A release is deliverable only after fresh evidence for all of the following:
 - the published package validator accepts the staged directory and the freshly extracted ZIP.
 - package identity leases remain reparse-safe and validate regular files whose absolute staging paths exceed the legacy Windows 260-character boundary.
 - ZIP inspection confirms the exact allowlist and no local game/personal artifacts.
-- the SHA-256 sidecar matches a fresh hash of the final ZIP.
+- `SHA256SUMS.txt` exactly matches fresh hashes of both inner ZIPs and the separately reported outer SHA-256 matches the final outer bytes.
 - the official host's parsed .NET v6 bundle manifest and embedded deps JSON contain neither DrSwizzler nor BouncyCastle, while every retained non-runtime dependency has a complete shipped notice.
-- the source archive has deterministic safe entries, matches the committed project plus every file in the exact pinned SoulsFormatsNEXT, ZstdNet, and Zstandard trees, excludes repository/build/private state, and its checksum matches.
+- the source archive has deterministic safe entries, matches the committed project plus every file in the exact pinned SoulsFormatsNEXT, ZstdNet, and Zstandard trees, excludes repository/build/private state, and its hash matches the outer manifest.
+- the outer archive has exactly the three ordered fixed-timestamp entries, no duplicates/aliases/traversal, no external sidecar, and its exact inner bytes retain every binary/source gate.
 - the extracted source can restore and build the bridge-host project.
 
 If any verification is red, the release must be reported as incomplete; no “all tests pass” claim is allowed.
@@ -218,10 +224,7 @@ If any verification is red, the release must be reported as incomplete; no “al
 The first completed redistributable revision uses version `0.1.0-alpha.2` and produces:
 
 ```text
-artifacts/DSR-for-MOD-v0.1.0-alpha.2-win-x64.zip
-artifacts/DSR-for-MOD-v0.1.0-alpha.2-win-x64.zip.sha256
-artifacts/DSR-for-MOD-v0.1.0-alpha.2-source.zip
-artifacts/DSR-for-MOD-v0.1.0-alpha.2-source.zip.sha256
+artifacts/DSR-for-MOD-v0.1.0-alpha.2-redistributable.zip
 ```
 
 The worktree's pre-existing modifications remain part of the feature branch. No reset, checkout-based rollback, bulk deletion, or copying from a private local runtime is permitted.

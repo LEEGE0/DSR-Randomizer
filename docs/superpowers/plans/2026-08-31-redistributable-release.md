@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build and verify the exact 12-path `DSR-for-MOD-v0.1.0-alpha.2-win-x64.zip` plus its deterministic corresponding-source ZIP, containing the project-owned launcher, guard, RMM bridge, bridge host, notices, Korean installation guide, and GPL-required committed source without game files, personal data, or third-party randomizer executables.
+**Goal:** Build and verify one `DSR-for-MOD-v0.1.0-alpha.2-redistributable.zip` containing the exact 12-path Windows binary ZIP, its deterministic corresponding-source ZIP, and a strict hash manifest, without game files, personal data, or third-party randomizer executables.
 
-**Architecture:** The official publish pins the guard, compatibility profile, bridge DLL, and self-contained bridge host identities into the launcher. A focused installer copies the packaged bridge pair into a selected external root and verifies it before launch. An exact allowlist, deterministic binary ZIP builder, extracted-ZIP revalidation, and clean-root tests enforce the executable boundary. A second deterministic builder archives committed `HEAD` plus the actual pinned SoulsFormatsNEXT, ZstdNet, and Zstandard trees and excludes repository/build/private state. A shared fail-closed gate requires the main tree and all recursive submodules to be clean, initialized, and exactly pinned before and after binary construction and immediately before source archiving.
+**Architecture:** The official publish pins the guard, compatibility profile, bridge DLL, and self-contained bridge host identities into the launcher. A focused installer copies the packaged bridge pair into a selected external root and verifies it before launch. An exact allowlist, deterministic binary ZIP builder, extracted-ZIP revalidation, and clean-root tests enforce the executable boundary. A second deterministic builder archives committed `HEAD` plus the actual pinned SoulsFormatsNEXT, ZstdNet, and Zstandard trees and excludes repository/build/private state. A shared fail-closed gate requires the main tree and all recursive submodules to be clean, initialized, and exactly pinned. Both ZIPs are validated privately, then embedded with `SHA256SUMS.txt` in one deterministic outer archive that is published as a single leased atomic file.
 
 **Tech Stack:** .NET 8 / C# / WPF / xUnit, C++20 / CMake / CTest, PowerShell 7, Windows x64
 
@@ -18,7 +18,7 @@
 - Package exactly the 12 paths listed in the spec; PDB files are prohibited.
 - Production pinned executable verification must not gain an environment, command-line, or external-file bypass.
 - Bridge installation must not require a runtime pointer, save/profile state, Steam ID, or third-party randomizer installation.
-- Use version `0.1.0-alpha.2` and output binary and source ZIPs under `artifacts`, each with a matching `.sha256`.
+- Use version `0.1.0-alpha.2` and publish only `artifacts/DSR-for-MOD-v0.1.0-alpha.2-redistributable.zip`; it contains both inner ZIPs and their hash manifest and has no external sidecar.
 - Do not claim full success unless all 447 managed tests, all 15 native tests, clean-root tests, staged-package validation, extracted binary/source validation, privacy scan, dependency/notice compliance, extracted-source build, and both checksum verifications pass freshly.
 
 ---
@@ -367,7 +367,7 @@ Replace the standalone launcher publish/package steps with:
   run: ./packaging/build-release.ps1 -Version 0.1.0-alpha.2 -OutputPath artifacts
 ```
 
-Upload `artifacts/DSR-for-MOD-*.zip` and matching `.sha256` files.
+Upload only `artifacts/DSR-for-MOD-*-redistributable.zip`.
 
 - [ ] **Step 6: Run packaging integration and full Release verification**
 
@@ -394,14 +394,11 @@ git commit -m "build: package verified redistributable release"
 - Modify: `THIRD_PARTY_NOTICES.md`
 - Modify: `CHANGELOG.md`
 - Modify: `HANDOFF_DISTRIBUTION_2026-08-31.md`
-- Output: `artifacts/DSR-for-MOD-v0.1.0-alpha.2-win-x64.zip`
-- Output: `artifacts/DSR-for-MOD-v0.1.0-alpha.2-win-x64.zip.sha256`
-- Output: `artifacts/DSR-for-MOD-v0.1.0-alpha.2-source.zip`
-- Output: `artifacts/DSR-for-MOD-v0.1.0-alpha.2-source.zip.sha256`
+- Output: `artifacts/DSR-for-MOD-v0.1.0-alpha.2-redistributable.zip`
 
 **Interfaces:**
 - Consumes: official Item/Enemy Randomizer URLs and the verified pipeline from Task 5.
-- Produces: recipient-facing Korean setup instructions, truthful release notes, exact binary/source ZIP pair, and matching checksums.
+- Produces: recipient-facing Korean setup instructions, truthful release notes, and one authoritative outer ZIP that physically contains the exact binary/source pair and matching inner checksums.
 
 - [ ] **Step 1: Write the Korean installation guide with official sources and exact exclusions**
 
@@ -438,11 +435,11 @@ Expected: no personal path/ID matches, no placeholders, and no whitespace errors
 pwsh -NoProfile -File packaging/build-release.ps1 -Version 0.1.0-alpha.2 -OutputPath artifacts
 ```
 
-Expected: the exact binary/source ZIP and `.sha256` paths from the spec.
+Expected: the one exact outer redistributable path from the spec; loose inner ZIPs/sidecars are private work files and exact legacy loose output paths are removed safely.
 
 - [ ] **Step 5: Independently inspect the final ZIP and checksum**
 
-List every binary ZIP entry and compare it byte-for-byte with the 12-path allowlist. Extract to a new temporary directory, run the packaged launcher `--validate-package`, parse the official host's .NET v6 bundle manifest and embedded deps JSON, verify bundled dependencies have complete notices, and scan all extracted bytes for the out-of-band private-root, private-worktree, and Steam-ID sentinels. Independently inspect the source ZIP for a single prefix, sorted unique safe paths, fixed timestamps, a strict main/submodule revision manifest, committed subset/main solution/build scripts, full exact pinned SoulsFormatsNEXT, ZstdNet, and Zstandard source/build/license trees, and absence of Git/build/artifact/private state. Compare every archived file with the main tracked tree plus each pinned submodule tree. Extract to a short safe path and restore/build the bridge host. Recompute both ZIP SHA-256 values and compare them with their sidecars. Exercise leased four-file publication with locked staged and prior inputs, invalid and hard-linked prior sets, blocked prior mutation, strict sidecar and expected-gate mismatches, controlled pre-commit publication failure, and post-write tamper. Exercise the canonical output-root cross-process lock with synchronized publishers for both no-prior and prior-set cases; the loser must return `PUBLICATION_IN_PROGRESS` without output or transaction mutation and a later retry must succeed. Exercise durable schema-v4 `Prepared` and `Committed` recovery, partial owned old/new outputs, an unrelated valid current set that must remain byte-exact, locked committed backup cleanup at indices 0 and 3, actual committed journal and directory-ADS deletion locks with immediate retry, write-through journal-move failure, and live-journal verification failure with recoverable Prepared state. Require initial Prepared and Committed journal publication to use same-directory `MoveFileExW` replace-existing/write-through followed by strict live parse. Require pre-commit failures to restore only the verified prior bytes, post-commit cleanup failures to preserve/revalidate only the complete new set, and a failed final directory delete to retain or recreate a recognizable committed marker; also cover replacement, first publication, partial-set rejection, and unknown stale-transaction rejection.
+List the outer archive and require exactly three root entries in ordinal order with fixed timestamps: source ZIP, binary ZIP, and `SHA256SUMS.txt`. Reject duplicates, traversal, aliases, or any extra entry; strictly recompute both inner hashes and compare the exact two LF-only manifest lines. On the exact embedded binary bytes, compare the 12 paths byte-for-byte with the allowlist, extract to a new temporary directory, run `--validate-package`, parse the official host's .NET v6 bundle manifest and embedded deps JSON, verify bundled dependencies have complete notices, and scan extracted bytes for reviewed privacy sentinels. On the exact embedded source bytes, require a single prefix, sorted unique safe paths, fixed timestamps, a strict main/submodule revision manifest, committed subset/main solution/build scripts, full exact pinned SoulsFormatsNEXT, ZstdNet, and Zstandard source/build/license trees, and absence of Git/build/artifact/private state. Compare every archived file with the main tracked tree plus each pinned submodule tree, extract to a short safe path, and restore/build the bridge host. Recompute and report the outer SHA-256 separately; no external sidecar exists. Exercise first publication, replacement, pre-replace failure, post-replace verification rollback, actual and injected whole-backup cleanup failure, synchronized publishers with `PUBLICATION_IN_PROGRESS`/retry, and safe cleanup of only the four exact obsolete loose artifact paths. Require no transaction directory or journal.
 
 - [ ] **Step 6: Run the final full verification gate**
 
@@ -451,7 +448,7 @@ dotnet test DSR-Randomizer.sln -c Release --no-restore
 pwsh -NoProfile -File scripts/build-native.ps1 -Configuration Release -Test
 ```
 
-Expected: 447/447 managed tests and 15/15 native tests pass, plus successful binary/source package and checksum checks from Steps 4-5.
+Expected: the current managed count and 15/15 native tests pass, plus successful outer/inner package, source rebuild, privacy, and checksum checks from Steps 4-5.
 
 - [ ] **Step 7: Commit documentation and release metadata without committing generated ZIPs unless repository policy already tracks them**
 
