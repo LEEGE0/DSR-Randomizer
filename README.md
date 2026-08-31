@@ -53,7 +53,7 @@ dotnet restore src/DSRRandomizer.RmmBridgeHost/DSRRandomizer.RmmBridgeHost.cspro
 dotnet build src/DSRRandomizer.RmmBridgeHost/DSRRandomizer.RmmBridgeHost.csproj -c Release --no-restore -nr:false
 ```
 
-The exact upstream rebuild inputs are included under `third_party/SoulsFormatsNEXT`, `third_party/ZstdNet`, and `third_party/zstd`, including their license, project/build, managed wrapper, and native library sources. The source ZIP intentionally excludes `.git`; use the official upstream URLs and pinned revisions in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) when repository history or upstream-specific build instructions are needed.
+The exact upstream rebuild inputs are included under `third_party/SoulsFormatsNEXT`, `third_party/ZstdNet`, and `third_party/zstd`, including their license, project/build, managed wrapper, and native library sources. `SOURCE_REVISIONS.json` identifies the exact committed main revision and all three submodule revisions represented by the archive. The source ZIP intentionally excludes `.git`; use the official upstream URLs and pinned revisions in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) when repository history or upstream-specific build instructions are needed.
 
 ## License
 

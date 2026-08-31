@@ -19,7 +19,7 @@ artifacts/DSR-for-MOD-v0.1.0-alpha.2-source.zip
 artifacts/DSR-for-MOD-v0.1.0-alpha.2-source.zip.sha256
 ```
 
-빌드할 때마다 두 ZIP이 교체되므로 각각 함께 생성된 sidecar 체크섬만 해당 ZIP에 유효하다. 바이너리 ZIP은 정확히 12경로를 유지하고, 별도 소스 ZIP은 committed `HEAD`와 실제 고정 SoulsFormatsNEXT, ZstdNet, Zstandard tree로 만든다.
+빌드할 때마다 두 ZIP이 교체되므로 각각 함께 생성된 sidecar 체크섬만 해당 ZIP에 유효하다. 바이너리 ZIP은 정확히 12경로를 유지하고, 별도 소스 ZIP은 committed `HEAD`와 실제 고정 SoulsFormatsNEXT, ZstdNet, Zstandard tree로 만든다. 소스 ZIP의 `SOURCE_REVISIONS.json`은 해당 main commit과 세 submodule commit을 엄격한 스키마로 식별한다.
 
 최종 검토에 사용할 두 archive의 크기/해시는 `.superpowers/sdd/2026-08-31-redistributable-release/task-6-report.md`에 기록한다. 추적 문서 안에 source ZIP hash를 넣으면 그 문서 자체가 source ZIP을 바꾸는 자기참조가 되므로 여기에는 source hash를 고정하지 않는다.
 

@@ -23,7 +23,7 @@ That deterministic archive is made from the committed main-repository tree and t
 - ZstdNet commit `c90152918f633e945f163652e6368001556784e7`: https://github.com/skbkontur/ZstdNet/tree/c90152918f633e945f163652e6368001556784e7
 - Zstandard commit `b706286adbba780006a47ef92df0ad7a785666b6`: https://github.com/facebook/zstd/tree/b706286adbba780006a47ef92df0ad7a785666b6
 
-It includes the project solution, the subset project and modification notice, release/build scripts, applicable license files, the complete pinned SoulsFormatsNEXT source, the ZstdNet managed wrapper source/project files, and the Zstandard native source/build inputs. It excludes Git metadata, build outputs, generated release artifacts, and private working data.
+It includes the project solution, the subset project and modification notice, release/build scripts, applicable license files, the complete pinned SoulsFormatsNEXT source, the ZstdNet managed wrapper source/project files, and the Zstandard native source/build inputs. Its strict `SOURCE_REVISIONS.json` records the exact main commit and all three submodule commits. It excludes Git metadata, build outputs, generated release artifacts, and private working data.
 
 The 12-path binary ZIP is not itself a corresponding-source archive. Convey the binary ZIP and checksum together with the exact source ZIP and checksum, or provide equivalent gratis access to that exact source at the same place, for as long as the GPL requires. Do not redistribute the binary alone unless you independently satisfy GPL-3.0 section 6 for the exact distributed build.
 

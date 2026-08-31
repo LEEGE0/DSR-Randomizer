@@ -10,7 +10,7 @@ All notable changes to DSR Randomizer are documented here.
 - Recipient-controlled bridge installation beneath the selected external root, with strict four-property manifest validation, embedded SHA-256 identities, safe replacement, final re-verification, and matching no-op behavior.
 - Korean recipient guide covering official third-party download sources, the copied-runtime layout, Steam Offline Mode, save isolation, validation, rollback, and redistribution exclusions.
 - Exact 12-path package allowlist, staged and freshly extracted package validation, deterministic ZIP construction, and SHA-256 sidecar generation.
-- Deterministic corresponding-source ZIP and checksum containing the committed project tree plus the actual pinned SoulsFormatsNEXT, ZstdNet 1.4.5, and Zstandard 1.4.5 contents.
+- Deterministic corresponding-source ZIP and checksum containing the committed project tree plus the actual pinned SoulsFormatsNEXT, ZstdNet 1.4.5, and Zstandard 1.4.5 contents, with a strict manifest identifying all four revisions.
 
 ### Changed
 
