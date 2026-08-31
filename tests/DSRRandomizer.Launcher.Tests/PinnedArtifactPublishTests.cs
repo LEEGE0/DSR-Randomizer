@@ -32,15 +32,16 @@ public sealed class PinnedArtifactPublishTests : IDisposable
     public async Task OfficialReleaseBuildPublishesPinnedPairAndCreatesValidatedExactArchive()
     {
         var repositoryRoot = FindRepositoryRoot();
+        var existingWorkDirectories = ReleaseWorkDirectories(repositoryRoot);
         var firstBuild = await BuildReleaseAsync(repositoryRoot);
         Assert.True(
             firstBuild.ExitCode == 0,
             $"build-release.ps1 failed with exit code {firstBuild.ExitCode}.\n{firstBuild.Output}");
 
-        var releaseWork = Path.Combine(
-            repositoryRoot,
-            "artifacts",
-            $"release-work-{Version}");
+        var releaseWork = Assert.Single(
+            ReleaseWorkDirectories(repositoryRoot).Except(
+                existingWorkDirectories,
+                StringComparer.OrdinalIgnoreCase));
         var launcherPublish = Path.Combine(releaseWork, "launcher");
         var hostPublish = Path.Combine(releaseWork, "rmm-bridge-host");
         var publishedBridge = Path.Combine(
@@ -83,10 +84,34 @@ public sealed class PinnedArtifactPublishTests : IDisposable
         File.SetLastWriteTimeUtc(publishedBridge, future);
         File.SetLastWriteTimeUtc(publishedHost, future);
 
+        existingWorkDirectories = ReleaseWorkDirectories(repositoryRoot);
         var secondBuild = await BuildReleaseAsync(repositoryRoot);
         Assert.True(
             secondBuild.ExitCode == 0,
             $"Second build-release.ps1 failed with exit code {secondBuild.ExitCode}.\n{secondBuild.Output}");
+        var secondReleaseWork = Assert.Single(
+            ReleaseWorkDirectories(repositoryRoot).Except(
+                existingWorkDirectories,
+                StringComparer.OrdinalIgnoreCase));
+        Assert.NotEqual(releaseWork, secondReleaseWork);
+        launcherPublish = Path.Combine(secondReleaseWork, "launcher");
+        hostPublish = Path.Combine(secondReleaseWork, "rmm-bridge-host");
+        publishedBridge = Path.Combine(
+            launcherPublish,
+            "components",
+            "rmm-bridge",
+            "DSRRandomizer.RmmBridge.dll");
+        publishedHost = Path.Combine(
+            launcherPublish,
+            "components",
+            "rmm-bridge",
+            "DSRRandomizer.RmmBridgeHost.exe");
+        publishedManifest = Path.Combine(
+            launcherPublish,
+            "components",
+            "rmm-bridge",
+            "deployment-manifest.json");
+        selfContainedHost = Path.Combine(hostPublish, "DSRRandomizer.RmmBridgeHost.exe");
         Assert.Equal(Sha256(nativeBridge), Sha256(publishedBridge));
         Assert.Equal(Sha256(selfContainedHost), Sha256(publishedHost));
         AssertStrictManifest(publishedManifest, Sha256(publishedBridge), Sha256(publishedHost));
@@ -170,6 +195,28 @@ public sealed class PinnedArtifactPublishTests : IDisposable
         Assert.Contains("Release archive entry validation failed", result.Output, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task SafeReleaseDirectoryScriptRejectsJunctionsAndPreservesOutsideSentinel()
+    {
+        var repositoryRoot = FindRepositoryRoot();
+        var result = await RunProcessAsync(
+            "pwsh.exe",
+            repositoryRoot,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            Path.Combine(
+                repositoryRoot,
+                "packaging",
+                "tests",
+                "Test-SafeReleaseDirectories.ps1"));
+
+        Assert.True(
+            result.ExitCode == 0,
+            $"Safe release-directory test failed with exit code {result.ExitCode}.\n{result.Output}");
+    }
+
     private Task<(int ExitCode, string Output)> BuildReleaseAsync(string repositoryRoot) =>
         RunProcessAsync(
             "pwsh.exe",
@@ -183,6 +230,19 @@ public sealed class PinnedArtifactPublishTests : IDisposable
             Version,
             "-OutputPath",
             _packageOutputRoot);
+
+    private static HashSet<string> ReleaseWorkDirectories(string repositoryRoot)
+    {
+        var artifactsRoot = Path.Combine(repositoryRoot, "artifacts");
+        return Directory.Exists(artifactsRoot)
+            ? Directory.EnumerateDirectories(
+                    artifactsRoot,
+                    $"release-work-{Version}-*",
+                    SearchOption.TopDirectoryOnly)
+                .Select(Path.GetFullPath)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase)
+            : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    }
 
     private static async Task<(int ExitCode, string Output)> RunProcessAsync(
         string fileName,

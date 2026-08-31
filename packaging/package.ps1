@@ -19,6 +19,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+Import-Module (Join-Path $PSScriptRoot 'SafeReleaseDirectories.psm1') -Force
 
 $ExpectedPackagePaths = @(
     'CHANGELOG.md',
@@ -47,23 +48,6 @@ function Assert-StrictDescendant {
         $normalizedRoot + [IO.Path]::DirectorySeparatorChar,
         [StringComparison]::OrdinalIgnoreCase)) {
         throw "Package path escaped the output root: $normalizedCandidate"
-    }
-}
-
-function Remove-ValidatedPackageDirectory {
-    param(
-        [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][string]$OutputRoot,
-        [Parameter(Mandatory = $true)][string]$RequiredLeafPrefix
-    )
-
-    Assert-StrictDescendant -Candidate $Path -Root $OutputRoot
-    $leaf = [IO.Path]::GetFileName([IO.Path]::TrimEndingDirectorySeparator($Path))
-    if (-not $leaf.StartsWith($RequiredLeafPrefix, [StringComparison]::Ordinal)) {
-        throw "Refusing to clean an unexpected package directory: $Path"
-    }
-    if (Test-Path -LiteralPath $Path) {
-        Remove-Item -LiteralPath $Path -Recurse -Force
     }
 }
 
@@ -187,14 +171,22 @@ if ($PSCmdlet.ParameterSetName -eq 'ValidateArchive') {
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $publishRoot = (Resolve-Path -LiteralPath $PublishPath).Path
 $dependencyManifest = (Resolve-Path -LiteralPath $DependencyManifestPath).Path
-$outputRoot = [IO.Path]::GetFullPath($OutputPath)
-[IO.Directory]::CreateDirectory($outputRoot) | Out-Null
-$uniqueSuffix = [Guid]::NewGuid().ToString('N')
-$stagingRoot = Join-Path $outputRoot "package-staging-$Version-$uniqueSuffix"
-$extractedRoot = Join-Path $outputRoot "package-extracted-$Version-$uniqueSuffix"
-$zipName = "DSR-for-MOD-v$Version-win-x64.zip"
-$zipPath = Join-Path $outputRoot $zipName
-$checksumPath = "$zipPath.sha256"
+$outputDirectory = Open-SafeReleaseRoot -Path $OutputPath
+$outputRoot = $outputDirectory.Path
+$stagingDirectory = $null
+$extractedDirectory = $null
+try {
+    $stagingDirectory = New-SafeReleaseDirectory `
+        -TrustedRoot $outputRoot `
+        -LeafPrefix "package-staging-$Version-"
+    $extractedDirectory = New-SafeReleaseDirectory `
+        -TrustedRoot $outputRoot `
+        -LeafPrefix "package-extracted-$Version-"
+    $stagingRoot = $stagingDirectory.Path
+    $extractedRoot = $extractedDirectory.Path
+    $zipName = "DSR-for-MOD-v$Version-win-x64.zip"
+    $zipPath = Join-Path $outputRoot $zipName
+    $checksumPath = "$zipPath.sha256"
 Assert-StrictDescendant -Candidate $stagingRoot -Root $outputRoot
 Assert-StrictDescendant -Candidate $extractedRoot -Root $outputRoot
 Assert-StrictDescendant -Candidate $zipPath -Root $outputRoot
@@ -221,8 +213,6 @@ foreach ($path in @(
     }
 }
 
-[IO.Directory]::CreateDirectory($stagingRoot) | Out-Null
-try {
     Copy-Item -LiteralPath $publishedLauncher -Destination $stagingRoot
     foreach ($notice in @('README.md', 'INSTALL_KO.md', 'LICENSE', 'CHANGELOG.md')) {
         $source = Join-Path $repositoryRoot $notice
@@ -346,7 +336,6 @@ try {
     }
 
     Assert-ReleaseArchiveEntries -ArchivePath $zipPath
-    [IO.Directory]::CreateDirectory($extractedRoot) | Out-Null
     [IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $extractedRoot)
     Assert-ExactFileSet -Root $extractedRoot
     Invoke-PackageValidator `
@@ -365,12 +354,19 @@ try {
     } | ConvertTo-Json -Compress
 }
 finally {
-    Remove-ValidatedPackageDirectory `
-        -Path $stagingRoot `
-        -OutputRoot $outputRoot `
-        -RequiredLeafPrefix "package-staging-$Version-"
-    Remove-ValidatedPackageDirectory `
-        -Path $extractedRoot `
-        -OutputRoot $outputRoot `
-        -RequiredLeafPrefix "package-extracted-$Version-"
+    try {
+        if ($null -ne $stagingDirectory) {
+            Remove-SafeReleaseDirectory -Directory $stagingDirectory
+        }
+    }
+    finally {
+        try {
+            if ($null -ne $extractedDirectory) {
+                Remove-SafeReleaseDirectory -Directory $extractedDirectory
+            }
+        }
+        finally {
+            $outputDirectory.Lease.Dispose()
+        }
+    }
 }

@@ -23,7 +23,8 @@ public sealed class WindowsBridgeHostPlatform : IBridgeHostPlatform
                 ?? throw new InvalidOperationException("The game image path is unavailable.");
             var expectedImage = Path.Combine(
                 externalRoot, "runtimes", arguments.RuntimeId, "DarkSoulsRemastered.exe");
-            if (!FileContentIdentity.AreEqual(imagePath, expectedImage))
+            using var imageLease = TryLeaseSelectedRuntimeImage(imagePath, expectedImage);
+            if (imageLease is null)
             {
                 return BridgeBindingResult.Failure("The live process is not the selected copied runtime.");
             }
@@ -60,6 +61,39 @@ public sealed class WindowsBridgeHostPlatform : IBridgeHostPlatform
                 or UnauthorizedAccessException or JsonException)
         {
             return BridgeBindingResult.Failure(exception.Message);
+        }
+    }
+
+    private FileStream? TryLeaseSelectedRuntimeImage(
+        string processImagePath,
+        string expectedImagePath)
+    {
+        FileStream? lease = null;
+        try
+        {
+            lease = new FileStream(expectedImagePath, new FileStreamOptions
+            {
+                Access = FileAccess.Read,
+                Mode = FileMode.Open,
+                Share = FileShare.Read,
+                Options = FileOptions.SequentialScan
+            });
+            if (lease.Length <= 0
+                || !_canonicalizer.Canonicalize(processImagePath).Equals(
+                    _canonicalizer.Canonicalize(expectedImagePath),
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                lease.Dispose();
+                return null;
+            }
+            return lease;
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException or IOException or NotSupportedException
+                or UnauthorizedAccessException)
+        {
+            lease?.Dispose();
+            return null;
         }
     }
 
