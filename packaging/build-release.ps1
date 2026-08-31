@@ -153,11 +153,19 @@ try {
         -FailureMessage 'Verified release packaging failed.'
 }
 finally {
-    if ($null -ne $releaseWorkDirectory) {
-        $releaseWorkDirectory.Lease.Dispose()
+    try {
+        if ($null -ne $releaseWorkDirectory) {
+            Remove-SafeReleaseDirectory -Directory $releaseWorkDirectory
+        }
     }
-    if ($null -ne $outputDirectory) {
-        $outputDirectory.Lease.Dispose()
+    finally {
+        try {
+            if ($null -ne $outputDirectory) {
+                $outputDirectory.Lease.Dispose()
+            }
+        }
+        finally {
+            $artifactsDirectory.Lease.Dispose()
+        }
     }
-    $artifactsDirectory.Lease.Dispose()
 }

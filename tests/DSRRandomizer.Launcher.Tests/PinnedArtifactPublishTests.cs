@@ -33,88 +33,11 @@ public sealed class PinnedArtifactPublishTests : IDisposable
     {
         var repositoryRoot = FindRepositoryRoot();
         var existingWorkDirectories = ReleaseWorkDirectories(repositoryRoot);
-        var firstBuild = await BuildReleaseAsync(repositoryRoot);
+        var build = await BuildReleaseAsync(repositoryRoot);
         Assert.True(
-            firstBuild.ExitCode == 0,
-            $"build-release.ps1 failed with exit code {firstBuild.ExitCode}.\n{firstBuild.Output}");
-
-        var releaseWork = Assert.Single(
-            ReleaseWorkDirectories(repositoryRoot).Except(
-                existingWorkDirectories,
-                StringComparer.OrdinalIgnoreCase));
-        var launcherPublish = Path.Combine(releaseWork, "launcher");
-        var hostPublish = Path.Combine(releaseWork, "rmm-bridge-host");
-        var publishedBridge = Path.Combine(
-            launcherPublish,
-            "components",
-            "rmm-bridge",
-            "DSRRandomizer.RmmBridge.dll");
-        var publishedHost = Path.Combine(
-            launcherPublish,
-            "components",
-            "rmm-bridge",
-            "DSRRandomizer.RmmBridgeHost.exe");
-        var publishedManifest = Path.Combine(
-            launcherPublish,
-            "components",
-            "rmm-bridge",
-            "deployment-manifest.json");
-        Assert.True(File.Exists(publishedBridge), $"Published bridge is missing: {publishedBridge}");
-        Assert.True(File.Exists(publishedHost), $"Published host is missing: {publishedHost}");
-        Assert.True(File.Exists(publishedManifest), $"Published manifest is missing: {publishedManifest}");
-
-        var nativeBridge = Path.Combine(
-            repositoryRoot,
-            "native",
-            "out",
-            "build",
-            "windows-x64-release",
-            "native",
-            "runtime",
-            "Release",
-            "DSRRandomizer.RmmBridge.dll");
-        var selfContainedHost = Path.Combine(hostPublish, "DSRRandomizer.RmmBridgeHost.exe");
-        Assert.Equal(Sha256(nativeBridge), Sha256(publishedBridge));
-        Assert.Equal(Sha256(selfContainedHost), Sha256(publishedHost));
-        AssertStrictManifest(publishedManifest, Sha256(publishedBridge), Sha256(publishedHost));
-
-        await File.WriteAllTextAsync(publishedBridge, "future-dated tampered bridge");
-        await File.WriteAllTextAsync(publishedHost, "future-dated tampered host");
-        var future = DateTime.UtcNow.AddYears(1);
-        File.SetLastWriteTimeUtc(publishedBridge, future);
-        File.SetLastWriteTimeUtc(publishedHost, future);
-
-        existingWorkDirectories = ReleaseWorkDirectories(repositoryRoot);
-        var secondBuild = await BuildReleaseAsync(repositoryRoot);
-        Assert.True(
-            secondBuild.ExitCode == 0,
-            $"Second build-release.ps1 failed with exit code {secondBuild.ExitCode}.\n{secondBuild.Output}");
-        var secondReleaseWork = Assert.Single(
-            ReleaseWorkDirectories(repositoryRoot).Except(
-                existingWorkDirectories,
-                StringComparer.OrdinalIgnoreCase));
-        Assert.NotEqual(releaseWork, secondReleaseWork);
-        launcherPublish = Path.Combine(secondReleaseWork, "launcher");
-        hostPublish = Path.Combine(secondReleaseWork, "rmm-bridge-host");
-        publishedBridge = Path.Combine(
-            launcherPublish,
-            "components",
-            "rmm-bridge",
-            "DSRRandomizer.RmmBridge.dll");
-        publishedHost = Path.Combine(
-            launcherPublish,
-            "components",
-            "rmm-bridge",
-            "DSRRandomizer.RmmBridgeHost.exe");
-        publishedManifest = Path.Combine(
-            launcherPublish,
-            "components",
-            "rmm-bridge",
-            "deployment-manifest.json");
-        selfContainedHost = Path.Combine(hostPublish, "DSRRandomizer.RmmBridgeHost.exe");
-        Assert.Equal(Sha256(nativeBridge), Sha256(publishedBridge));
-        Assert.Equal(Sha256(selfContainedHost), Sha256(publishedHost));
-        AssertStrictManifest(publishedManifest, Sha256(publishedBridge), Sha256(publishedHost));
+            build.ExitCode == 0,
+            $"build-release.ps1 failed with exit code {build.ExitCode}.\n{build.Output}");
+        Assert.Equal(existingWorkDirectories, ReleaseWorkDirectories(repositoryRoot));
 
         var zipPath = Path.Combine(
             _packageOutputRoot,
@@ -146,10 +69,70 @@ public sealed class PinnedArtifactPublishTests : IDisposable
             validation.ExitCode == 0,
             $"Extracted package validation failed with exit code {validation.ExitCode}.\n{validation.Output}");
 
+        var extractedBridge = Path.Combine(
+            extractedRoot,
+            "components",
+            "rmm-bridge",
+            "DSRRandomizer.RmmBridge.dll");
+        var extractedHost = Path.Combine(
+            extractedRoot,
+            "components",
+            "rmm-bridge",
+            "DSRRandomizer.RmmBridgeHost.exe");
+        AssertStrictManifest(
+            Path.Combine(
+                extractedRoot,
+                "components",
+                "rmm-bridge",
+                "deployment-manifest.json"),
+            Sha256(extractedBridge),
+            Sha256(extractedHost));
+        Assert.Equal(
+            Sha256(Path.Combine(
+                repositoryRoot,
+                "native",
+                "out",
+                "build",
+                "windows-x64-release",
+                "native",
+                "runtime",
+                "Release",
+                "DSRRandomizer.RmmBridge.dll")),
+            Sha256(extractedBridge));
+
         var zipHash = Sha256(zipPath).ToLowerInvariant();
         Assert.Equal(
             $"{zipHash}  {Path.GetFileName(zipPath)}\n",
             (await File.ReadAllTextAsync(checksumPath)).Replace("\r\n", "\n", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task OfficialReleaseBuildCleansWorkDirectoryAndPreservesOutputsOnControlledFailure()
+    {
+        var repositoryRoot = FindRepositoryRoot();
+        Directory.CreateDirectory(_packageOutputRoot);
+        var zipPath = Path.Combine(
+            _packageOutputRoot,
+            $"DSR-for-MOD-v{Version}-win-x64.zip");
+        var checksumPath = $"{zipPath}.sha256";
+        var originalZip = new byte[] { 1, 3, 3, 7 };
+        var originalChecksum = new byte[] { 4, 2 };
+        await File.WriteAllBytesAsync(zipPath, originalZip);
+        await File.WriteAllBytesAsync(checksumPath, originalChecksum);
+        var existingWorkDirectories = ReleaseWorkDirectories(repositoryRoot);
+
+        var build = await BuildReleaseAsync(
+            repositoryRoot,
+            new Dictionary<string, string>
+            {
+                ["MSBuildSDKsPath"] = Path.Combine(_packageOutputRoot, "missing-msbuild-sdks")
+            });
+
+        Assert.NotEqual(0, build.ExitCode);
+        Assert.Equal(existingWorkDirectories, ReleaseWorkDirectories(repositoryRoot));
+        Assert.Contains("Native Release build or tests failed", build.Output, StringComparison.Ordinal);
+        Assert.Equal(originalZip, await File.ReadAllBytesAsync(zipPath));
+        Assert.Equal(originalChecksum, await File.ReadAllBytesAsync(checksumPath));
     }
 
     [Theory]
@@ -217,10 +200,13 @@ public sealed class PinnedArtifactPublishTests : IDisposable
             $"Safe release-directory test failed with exit code {result.ExitCode}.\n{result.Output}");
     }
 
-    private Task<(int ExitCode, string Output)> BuildReleaseAsync(string repositoryRoot) =>
+    private Task<(int ExitCode, string Output)> BuildReleaseAsync(
+        string repositoryRoot,
+        IReadOnlyDictionary<string, string>? environment = null) =>
         RunProcessAsync(
             "pwsh.exe",
             repositoryRoot,
+            environment,
             "-NoProfile",
             "-ExecutionPolicy",
             "Bypass",
@@ -247,6 +233,13 @@ public sealed class PinnedArtifactPublishTests : IDisposable
     private static async Task<(int ExitCode, string Output)> RunProcessAsync(
         string fileName,
         string workingDirectory,
+        params string[] arguments) =>
+        await RunProcessAsync(fileName, workingDirectory, environment: null, arguments);
+
+    private static async Task<(int ExitCode, string Output)> RunProcessAsync(
+        string fileName,
+        string workingDirectory,
+        IReadOnlyDictionary<string, string>? environment,
         params string[] arguments)
     {
         var startInfo = new ProcessStartInfo(fileName)
@@ -260,6 +253,13 @@ public sealed class PinnedArtifactPublishTests : IDisposable
         foreach (var argument in arguments)
         {
             startInfo.ArgumentList.Add(argument);
+        }
+        if (environment is not null)
+        {
+            foreach (var (name, value) in environment)
+            {
+                startInfo.Environment[name] = value;
+            }
         }
 
         using var process = Process.Start(startInfo)
