@@ -125,7 +125,7 @@ internal sealed class LaunchArtifactLease : IDisposable
     private static SafeFileHandle OpenDirectoryHandle(string path)
     {
         var handle = CreateFileW(
-            path,
+            ToExtendedPath(path),
             FileReadAttributes,
             ShareRead | ShareWrite,
             IntPtr.Zero,
@@ -161,7 +161,7 @@ internal sealed class LaunchArtifactLease : IDisposable
     private static SafeFileHandle OpenFileHandle(string path)
     {
         var handle = CreateFileW(
-            path,
+            ToExtendedPath(path),
             GenericRead,
             ShareRead,
             IntPtr.Zero,
@@ -201,6 +201,21 @@ internal sealed class LaunchArtifactLease : IDisposable
         throw new IOException(
             $"Unable to lock launch artifact path: {path}",
             new System.ComponentModel.Win32Exception(error));
+    }
+
+    private static string ToExtendedPath(string path)
+    {
+        var fullPath = System.IO.Path.GetFullPath(path);
+        const string devicePrefix = @"\\?\";
+        if (fullPath.StartsWith(devicePrefix, StringComparison.Ordinal))
+        {
+            return fullPath;
+        }
+
+        const string uncPrefix = @"\\";
+        return fullPath.StartsWith(uncPrefix, StringComparison.Ordinal)
+            ? @"\\?\UNC\" + fullPath[uncPrefix.Length..]
+            : devicePrefix + fullPath;
     }
 
     private static ByHandleFileInformation GetInformation(SafeFileHandle handle)
