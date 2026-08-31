@@ -10,6 +10,11 @@
     <PublishTrimmed>false</PublishTrimmed>
   </PropertyGroup>
 
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+  </PropertyGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\DSRRandomizer.Foundation\DSRRandomizer.Foundation.csproj" />
     <ProjectReference Include="..\..\third_party\SoulsFormatsNEXT\SoulsFormats\SoulsFormats.csproj"
