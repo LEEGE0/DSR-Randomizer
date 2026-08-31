@@ -1,6 +1,9 @@
+using System.Runtime.InteropServices;
 using System.Security;
+using System.Text;
 using System.Text.Json;
 using DSRRandomizer.Launcher.Safety;
+using Microsoft.Win32.SafeHandles;
 
 namespace DSRRandomizer.Launcher.Services;
 
@@ -15,11 +18,24 @@ internal sealed class RmmBridgeBundleInstaller : IRmmBridgeBundleInstaller
 
     private readonly string _packageRoot;
     private readonly LaunchArtifactIdentities _identities;
+    private readonly Action? _onDestinationLocked;
+    private readonly Action? _beforeFinalVerification;
 
     public RmmBridgeBundleInstaller(string packageRoot, LaunchArtifactIdentities identities)
+        : this(packageRoot, identities, null, null)
+    {
+    }
+
+    internal RmmBridgeBundleInstaller(
+        string packageRoot,
+        LaunchArtifactIdentities identities,
+        Action? onDestinationLocked,
+        Action? beforeFinalVerification)
     {
         _packageRoot = packageRoot;
         _identities = identities ?? throw new ArgumentNullException(nameof(identities));
+        _onDestinationLocked = onDestinationLocked;
+        _beforeFinalVerification = beforeFinalVerification;
     }
 
     public RmmBridgeInstallResult EnsureInstalled(string externalRoot)
@@ -41,22 +57,33 @@ internal sealed class RmmBridgeBundleInstaller : IRmmBridgeBundleInstaller
         try
         {
             destination = ResolveDestination(externalRoot);
-            EnsureSafeDestination(destination, requireBundleDirectory: false);
+            using var destinationLease = DestinationDirectoryLease.Acquire(
+                destination.Root,
+                destination.BundleRoot);
+            _onDestinationLocked?.Invoke();
             if (InstalledMatches(destination, bundle))
             {
                 return RmmBridgeInstallResult.Ready(changed: false);
             }
-            PrepareDestination(destination);
+            RejectDestinationReparsePoints(destination);
             Install(destination, bundle);
+
+            try
+            {
+                _beforeFinalVerification?.Invoke();
+                return InstalledMatches(destination, bundle)
+                    ? RmmBridgeInstallResult.Ready(changed: true)
+                    : RmmBridgeInstallResult.Failed(InstallTampered);
+            }
+            catch (Exception exception) when (IsExpectedFailure(exception))
+            {
+                return RmmBridgeInstallResult.Failed(InstallTampered);
+            }
         }
         catch (Exception exception) when (IsExpectedFailure(exception))
         {
             return RmmBridgeInstallResult.Failed(InstallFailed);
         }
-
-        return InstalledMatches(destination, bundle)
-            ? RmmBridgeInstallResult.Ready(changed: true)
-            : RmmBridgeInstallResult.Failed(InstallTampered);
     }
 
     private bool TryOpenBundle(out Bundle bundle)
@@ -105,22 +132,6 @@ internal sealed class RmmBridgeBundleInstaller : IRmmBridgeBundleInstaller
             ResolveContained(root, ManifestRelativePath));
     }
 
-    private static void PrepareDestination(Destination destination)
-    {
-        if (!Directory.Exists(destination.Root))
-        {
-            throw new DirectoryNotFoundException(
-                $"The selected external root does not exist: {destination.Root}");
-        }
-
-        var components = Path.GetDirectoryName(destination.BundleRoot)
-            ?? throw new IOException("The bridge components directory is invalid.");
-        Directory.CreateDirectory(components);
-        EnsureNoReparseAncestors(components);
-        Directory.CreateDirectory(destination.BundleRoot);
-        EnsureSafeDestination(destination, requireBundleDirectory: true);
-    }
-
     private static void Install(Destination destination, Bundle bundle)
     {
         var bridgeTemporary = TemporarySibling(destination.BridgePath);
@@ -132,11 +143,11 @@ internal sealed class RmmBridgeBundleInstaller : IRmmBridgeBundleInstaller
             WriteTemporary(hostTemporary, bundle.HostBytes, bundle.HostSha256);
             WriteTemporary(manifestTemporary, bundle.ManifestBytes, bundle.ManifestSha256);
 
-            EnsureSafeDestination(destination, requireBundleDirectory: true);
+            RejectDestinationReparsePoints(destination);
             File.Move(bridgeTemporary, destination.BridgePath, overwrite: true);
-            EnsureSafeDestination(destination, requireBundleDirectory: true);
+            RejectDestinationReparsePoints(destination);
             File.Move(hostTemporary, destination.HostPath, overwrite: true);
-            EnsureSafeDestination(destination, requireBundleDirectory: true);
+            RejectDestinationReparsePoints(destination);
             File.Move(manifestTemporary, destination.ManifestPath, overwrite: true);
         }
         finally
@@ -149,7 +160,6 @@ internal sealed class RmmBridgeBundleInstaller : IRmmBridgeBundleInstaller
 
     private static void WriteTemporary(string path, byte[] bytes, string expectedSha256)
     {
-        EnsureNoReparseAncestors(path);
         using (var stream = new FileStream(
                    path,
                    new FileStreamOptions
@@ -231,23 +241,19 @@ internal sealed class RmmBridgeBundleInstaller : IRmmBridgeBundleInstaller
         }
     }
 
-    private static void EnsureSafeDestination(
-        Destination destination,
-        bool requireBundleDirectory)
+    private static void RejectDestinationReparsePoints(Destination destination)
     {
-        EnsureContained(destination.Root, destination.BundleRoot);
-        EnsureContained(destination.Root, destination.BridgePath);
-        EnsureContained(destination.Root, destination.HostPath);
-        EnsureContained(destination.Root, destination.ManifestPath);
-        EnsureNoReparseAncestors(destination.Root);
-        EnsureNoReparseAncestors(destination.BundleRoot);
-        EnsureNoReparseAncestors(destination.BridgePath);
-        EnsureNoReparseAncestors(destination.HostPath);
-        EnsureNoReparseAncestors(destination.ManifestPath);
-        if (requireBundleDirectory && !Directory.Exists(destination.BundleRoot))
+        RejectReparsePoint(destination.BridgePath);
+        RejectReparsePoint(destination.HostPath);
+        RejectReparsePoint(destination.ManifestPath);
+    }
+
+    private static void RejectReparsePoint(string path)
+    {
+        if ((File.Exists(path) || Directory.Exists(path))
+            && (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
         {
-            throw new DirectoryNotFoundException(
-                $"The bridge destination directory does not exist: {destination.BundleRoot}");
+            throw new UnauthorizedAccessException($"The bridge destination is redirected: {path}");
         }
     }
 
@@ -295,29 +301,6 @@ internal sealed class RmmBridgeBundleInstaller : IRmmBridgeBundleInstaller
         }
     }
 
-    private static void EnsureNoReparseAncestors(string path)
-    {
-        var fullPath = Path.GetFullPath(path);
-        var root = Path.GetPathRoot(fullPath)
-            ?? throw new IOException($"The path root is invalid: {fullPath}");
-        var current = root;
-        var relative = Path.GetRelativePath(root, fullPath);
-        foreach (var segment in relative.Split(
-                     Path.DirectorySeparatorChar,
-                     StringSplitOptions.RemoveEmptyEntries))
-        {
-            current = Path.Combine(current, segment);
-            if (!File.Exists(current) && !Directory.Exists(current))
-            {
-                continue;
-            }
-            if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
-            {
-                throw new UnauthorizedAccessException($"The bridge path is redirected: {current}");
-            }
-        }
-    }
-
     private static string TemporarySibling(string destinationPath) =>
         $"{destinationPath}.{Guid.NewGuid():N}.tmp";
 
@@ -354,4 +337,195 @@ internal sealed class RmmBridgeBundleInstaller : IRmmBridgeBundleInstaller
         string BridgePath,
         string HostPath,
         string ManifestPath);
+
+    private sealed class DestinationDirectoryLease : IDisposable
+    {
+        private readonly List<SafeFileHandle> _handles;
+
+        private DestinationDirectoryLease(List<SafeFileHandle> handles)
+        {
+            _handles = handles;
+        }
+
+        public static DestinationDirectoryLease Acquire(string externalRoot, string bundleRoot)
+        {
+            if (!Directory.Exists(externalRoot))
+            {
+                throw new DirectoryNotFoundException(
+                    $"The selected external root does not exist: {externalRoot}");
+            }
+            EnsureContained(externalRoot, bundleRoot);
+
+            var root = Path.GetPathRoot(externalRoot)
+                ?? throw new IOException($"The external root is invalid: {externalRoot}");
+            var handles = new List<SafeFileHandle>();
+            try
+            {
+                var current = root;
+                handles.Add(OpenVerifiedDirectory(current));
+                foreach (var segment in Path.GetRelativePath(root, externalRoot).Split(
+                             Path.DirectorySeparatorChar,
+                             StringSplitOptions.RemoveEmptyEntries))
+                {
+                    current = Path.Combine(current, segment);
+                    handles.Add(OpenVerifiedDirectory(current));
+                }
+
+                foreach (var segment in Path.GetRelativePath(externalRoot, bundleRoot).Split(
+                             Path.DirectorySeparatorChar,
+                             StringSplitOptions.RemoveEmptyEntries))
+                {
+                    current = Path.Combine(current, segment);
+                    if (!Directory.Exists(current))
+                    {
+                        Directory.CreateDirectory(current);
+                    }
+                    handles.Add(OpenVerifiedDirectory(current));
+                }
+                return new DestinationDirectoryLease(handles);
+            }
+            catch
+            {
+                DisposeHandles(handles);
+                throw;
+            }
+        }
+
+        public void Dispose() => DisposeHandles(_handles);
+
+        private static SafeFileHandle OpenVerifiedDirectory(string path)
+        {
+            var handle = CreateFileW(
+                path,
+                FileReadAttributes,
+                ShareRead | ShareWrite,
+                IntPtr.Zero,
+                OpenExisting,
+                BackupSemantics | OpenReparsePoint,
+                IntPtr.Zero);
+            if (handle.IsInvalid)
+            {
+                var error = Marshal.GetLastWin32Error();
+                handle.Dispose();
+                throw new IOException(
+                    $"Unable to lock bridge destination directory: {path}",
+                    new System.ComponentModel.Win32Exception(error));
+            }
+
+            try
+            {
+                if (!GetFileInformationByHandle(handle, out var information))
+                {
+                    throw new IOException(
+                        $"Unable to inspect bridge destination directory: {path}",
+                        new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error()));
+                }
+                var attributes = (FileAttributes)information.FileAttributes;
+                if ((attributes & FileAttributes.Directory) == 0
+                    || (attributes & FileAttributes.ReparsePoint) != 0
+                    || !ResolveFinalPath(handle).Equals(
+                        Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar),
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new UnauthorizedAccessException(
+                        $"The bridge destination directory is redirected: {path}");
+                }
+                return handle;
+            }
+            catch
+            {
+                handle.Dispose();
+                throw;
+            }
+        }
+
+        private static string ResolveFinalPath(SafeFileHandle handle)
+        {
+            var capacity = 512;
+            while (true)
+            {
+                var buffer = new StringBuilder(capacity);
+                var length = GetFinalPathNameByHandleW(handle, buffer, (uint)capacity, 0);
+                if (length == 0)
+                {
+                    throw new IOException(
+                        "Unable to resolve bridge destination identity.",
+                        new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error()));
+                }
+                if (length < capacity)
+                {
+                    var value = buffer.ToString();
+                    const string uncPrefix = @"\\?\UNC\";
+                    const string devicePrefix = @"\\?\";
+                    if (value.StartsWith(uncPrefix, StringComparison.OrdinalIgnoreCase))
+                    {
+                        value = @"\\" + value[uncPrefix.Length..];
+                    }
+                    else if (value.StartsWith(devicePrefix, StringComparison.OrdinalIgnoreCase))
+                    {
+                        value = value[devicePrefix.Length..];
+                    }
+                    return value.TrimEnd(Path.DirectorySeparatorChar);
+                }
+                capacity = checked((int)length + 1);
+            }
+        }
+
+        private static void DisposeHandles(List<SafeFileHandle> handles)
+        {
+            for (var index = handles.Count - 1; index >= 0; index--)
+            {
+                handles[index].Dispose();
+            }
+            handles.Clear();
+        }
+
+        private const uint FileReadAttributes = 0x00000080;
+        private const uint ShareRead = 0x00000001;
+        private const uint ShareWrite = 0x00000002;
+        private const uint OpenExisting = 3;
+        private const uint BackupSemantics = 0x02000000;
+        private const uint OpenReparsePoint = 0x00200000;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ByHandleFileInformation
+        {
+            public uint FileAttributes;
+            public uint CreationTimeLow;
+            public uint CreationTimeHigh;
+            public uint LastAccessTimeLow;
+            public uint LastAccessTimeHigh;
+            public uint LastWriteTimeLow;
+            public uint LastWriteTimeHigh;
+            public uint VolumeSerialNumber;
+            public uint FileSizeHigh;
+            public uint FileSizeLow;
+            public uint NumberOfLinks;
+            public uint FileIndexHigh;
+            public uint FileIndexLow;
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern SafeFileHandle CreateFileW(
+            string fileName,
+            uint desiredAccess,
+            uint shareMode,
+            IntPtr securityAttributes,
+            uint creationDisposition,
+            uint flagsAndAttributes,
+            IntPtr templateFile);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetFileInformationByHandle(
+            SafeFileHandle file,
+            out ByHandleFileInformation fileInformation);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern uint GetFinalPathNameByHandleW(
+            SafeFileHandle file,
+            StringBuilder filePath,
+            uint filePathLength,
+            uint flags);
+    }
 }

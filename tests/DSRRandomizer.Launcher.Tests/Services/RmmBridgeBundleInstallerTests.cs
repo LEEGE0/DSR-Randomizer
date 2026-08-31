@@ -18,6 +18,7 @@ public sealed class RmmBridgeBundleInstallerTests
         "7c133d47e5516e814f0d8a33976cc23237ac1aebae37bb6c9fd4f20ae8ba5b5e";
     private const string BundleInvalid = "RMM_BRIDGE_BUNDLE_INVALID";
     private const string InstallFailed = "RMM_BRIDGE_INSTALL_FAILED";
+    private const string InstallTampered = "RMM_BRIDGE_INSTALL_TAMPERED";
 
     [Fact]
     public void EnsureInstalled_InstallsPinnedBundleIntoFreshExternalRoot()
@@ -102,13 +103,30 @@ public sealed class RmmBridgeBundleInstallerTests
     }
 
     [Fact]
-    public void EnsureInstalled_RejectsAManifestThatDoesNotExactlyMatchPinnedIdentities()
+    public void EnsureInstalled_RejectsAnExactFourPropertyManifestWithTheWrongHostHash()
     {
         using var fixture = Fixture.Create();
         File.WriteAllText(
             fixture.PackagedManifestPath,
             $$"""
-              {"schemaVersion":1,"configuration":"Release","bridgeSha256":"{{BridgeSha256}}","hostSha256":"{{new string('0', 64)}}","extra":true}
+              {"schemaVersion":1,"configuration":"Release","bridgeSha256":"{{BridgeSha256}}","hostSha256":"{{new string('0', 64)}}"}
+              """,
+            new UTF8Encoding(false));
+
+        var result = fixture.Installer.EnsureInstalled(fixture.ExternalRoot);
+
+        Assert.Equal(RmmBridgeInstallResult.Failed(BundleInvalid), result);
+        Assert.False(Directory.Exists(fixture.InstalledBundleRoot));
+    }
+
+    [Fact]
+    public void EnsureInstalled_RejectsACorrectHashManifestWithAnExtraProperty()
+    {
+        using var fixture = Fixture.Create();
+        File.WriteAllText(
+            fixture.PackagedManifestPath,
+            $$"""
+              {"schemaVersion":1,"configuration":"Release","bridgeSha256":"{{BridgeSha256}}","hostSha256":"{{HostSha256}}","extra":true}
               """,
             new UTF8Encoding(false));
 
@@ -147,6 +165,37 @@ public sealed class RmmBridgeBundleInstallerTests
 
         Assert.Equal(RmmBridgeInstallResult.Failed(InstallFailed), result);
         Assert.Empty(Directory.EnumerateFileSystemEntries(escapedRoot));
+    }
+
+    [Fact]
+    public async Task EnsureInstalled_HeldDestinationAncestorCannotBeRenamedAndSwapped()
+    {
+        using var fixture = Fixture.Create();
+        using var destinationLocked = new ManualResetEventSlim();
+        using var continueInstall = new ManualResetEventSlim();
+        var installer = fixture.CreateInstaller(
+            onDestinationLocked: () =>
+            {
+                destinationLocked.Set();
+                Assert.True(continueInstall.Wait(TimeSpan.FromSeconds(10)));
+            });
+
+        var install = Task.Run(() => installer.EnsureInstalled(fixture.ExternalRoot));
+        Assert.True(destinationLocked.Wait(TimeSpan.FromSeconds(10)));
+        var components = Path.Combine(fixture.ExternalRoot, "components");
+        var displaced = Path.Combine(fixture.ExternalRoot, "components-displaced");
+        try
+        {
+            Assert.Throws<IOException>(() => Directory.Move(components, displaced));
+            Assert.True(Directory.Exists(components));
+            Assert.False(Directory.Exists(displaced));
+        }
+        finally
+        {
+            continueInstall.Set();
+        }
+
+        Assert.Equal(RmmBridgeInstallResult.Ready(changed: true), await install);
     }
 
     [Fact]
@@ -195,6 +244,27 @@ public sealed class RmmBridgeBundleInstallerTests
         Assert.Equal(content, File.ReadAllBytes(contentPath));
     }
 
+    [Fact]
+    public void EnsureInstalled_MapsExpectedFinalVerificationFailureToTampered()
+    {
+        using var fixture = Fixture.Create();
+        var verificationReached = false;
+        var installer = fixture.CreateInstaller(
+            beforeFinalVerification: () =>
+            {
+                verificationReached = true;
+                throw new IOException("Deterministic final verification failure.");
+            });
+
+        var result = installer.EnsureInstalled(fixture.ExternalRoot);
+
+        Assert.True(verificationReached);
+        Assert.Equal(RmmBridgeInstallResult.Failed(InstallTampered), result);
+        Assert.Equal(BridgeBytes, File.ReadAllBytes(fixture.InstalledBridgePath));
+        Assert.Equal(HostBytes, File.ReadAllBytes(fixture.InstalledHostPath));
+        Assert.Equal(fixture.ManifestBytes, File.ReadAllBytes(fixture.InstalledManifestPath));
+    }
+
     private sealed class Fixture : IDisposable
     {
         private readonly List<string> _junctions = [];
@@ -209,17 +279,18 @@ public sealed class RmmBridgeBundleInstallerTests
             File.WriteAllBytes(PackagedBridgePath, BridgeBytes);
             File.WriteAllBytes(PackagedHostPath, HostBytes);
             File.WriteAllBytes(PackagedManifestPath, ManifestBytes);
-            var identities = new LaunchArtifactIdentities(
+            Identities = new LaunchArtifactIdentities(
                 new string('0', 64),
                 new string('1', 64),
                 BridgeSha256,
                 HostSha256);
-            Installer = new RmmBridgeBundleInstaller(PackageRoot, identities);
+            Installer = CreateInstaller();
         }
 
         public string Container { get; }
         public string PackageRoot { get; }
         public string ExternalRoot { get; }
+        public LaunchArtifactIdentities Identities { get; }
         public RmmBridgeBundleInstaller Installer { get; }
         public string PackagedBundleRoot => Path.Combine(PackageRoot, "components", "rmm-bridge");
         public string PackagedBridgePath => Path.Combine(PackagedBundleRoot, "DSRRandomizer.RmmBridge.dll");
@@ -240,6 +311,14 @@ public sealed class RmmBridgeBundleInstallerTests
             Directory.CreateDirectory(container);
             return new Fixture(container);
         }
+
+        public RmmBridgeBundleInstaller CreateInstaller(
+            Action? onDestinationLocked = null,
+            Action? beforeFinalVerification = null) => new(
+                PackageRoot,
+                Identities,
+                onDestinationLocked,
+                beforeFinalVerification);
 
         public string[] TopLevelEntries() => Directory
             .EnumerateFileSystemEntries(ExternalRoot)
