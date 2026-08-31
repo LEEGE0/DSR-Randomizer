@@ -121,25 +121,6 @@ namespace DSRRandomizer.Packaging
             stream.Position = 0;
         }
 
-        public void CopyToNewAndFlush(string destinationPath)
-        {
-            ThrowIfDisposed();
-            stream.Position = 0;
-            using (var destination = new FileStream(destinationPath, new FileStreamOptions
-            {
-                Access = FileAccess.Write,
-                Mode = FileMode.CreateNew,
-                Share = FileShare.None,
-                Options = FileOptions.WriteThrough,
-                BufferSize = 1024 * 1024
-            }))
-            {
-                stream.CopyTo(destination, 1024 * 1024);
-                destination.Flush(true);
-            }
-            stream.Position = 0;
-        }
-
         public void Dispose()
         {
             if (disposed)
@@ -235,6 +216,420 @@ namespace DSRRandomizer.Packaging
         private static extern bool GetFileInformationByHandle(
             SafeFileHandle file,
             out ByHandleFileInformation fileInformation);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern uint GetFinalPathNameByHandleW(
+            SafeFileHandle file,
+            StringBuilder filePath,
+            uint filePathLength,
+            uint flags);
+    }
+
+    public sealed class RedistributableOwnedFile : IDisposable
+    {
+        private FileStream stream;
+        private bool disposed;
+
+        private RedistributableOwnedFile(
+            string path,
+            string description,
+            FileStream stream)
+        {
+            Path = path;
+            Description = description;
+            this.stream = stream;
+        }
+
+        public string Path { get; private set; }
+        public string Description { get; }
+        public Stream Stream
+        {
+            get
+            {
+                ThrowIfDisposed();
+                stream.Position = 0;
+                return stream;
+            }
+        }
+
+        public static RedistributableOwnedFile CreateFrom(
+            RedistributableArtifactLease source,
+            string path,
+            string description)
+        {
+            if (source == null)
+            {
+                throw new ArgumentNullException(nameof(source));
+            }
+            return Create(path, description, source.CopyTo);
+        }
+
+        public static RedistributableOwnedFile CreateFrom(
+            RedistributableOwnedFile source,
+            string path,
+            string description)
+        {
+            if (source == null)
+            {
+                throw new ArgumentNullException(nameof(source));
+            }
+            return Create(path, description, source.CopyTo);
+        }
+
+        public static RedistributableOwnedFile OpenExisting(
+            string path,
+            string description)
+        {
+            return Open(path, description, CreateDisposition.OpenExisting, null);
+        }
+
+        private static RedistributableOwnedFile Create(
+            string path,
+            string description,
+            Action<Stream> copy)
+        {
+            return Open(path, description, CreateDisposition.CreateNew, copy);
+        }
+
+        private static RedistributableOwnedFile Open(
+            string path,
+            string description,
+            CreateDisposition disposition,
+            Action<Stream> copy)
+        {
+            var fullPath = System.IO.Path.GetFullPath(path);
+            var creating = disposition == CreateDisposition.CreateNew;
+            var handle = CreateFileW(
+                ToExtendedPath(fullPath),
+                GenericRead | DeleteAccess | (creating ? GenericWrite : 0),
+                ShareRead,
+                IntPtr.Zero,
+                (uint)disposition,
+                OpenReparsePoint | SequentialScan | WriteThrough,
+                IntPtr.Zero);
+            if (handle.IsInvalid)
+            {
+                var error = Marshal.GetLastWin32Error();
+                handle.Dispose();
+                throw new IOException(
+                    $"Unable to open owned {description}: {fullPath}",
+                    new Win32Exception(error));
+            }
+
+            FileStream ownedStream = null;
+            try
+            {
+                AssertSafeRegularFile(handle, fullPath, description);
+                ownedStream = new FileStream(
+                    handle,
+                    creating ? FileAccess.ReadWrite : FileAccess.Read,
+                    1024 * 1024,
+                    false);
+                if (copy != null)
+                {
+                    copy(ownedStream);
+                    ownedStream.Flush(true);
+                    ownedStream.Position = 0;
+                }
+                return new RedistributableOwnedFile(
+                    fullPath,
+                    description,
+                    ownedStream);
+            }
+            catch
+            {
+                try
+                {
+                    if (creating)
+                    {
+                        SetDeleteDisposition(handle);
+                    }
+                }
+                catch
+                {
+                    // Preserve the original creation/copy failure.
+                }
+                if (ownedStream != null)
+                {
+                    ownedStream.Dispose();
+                }
+                else
+                {
+                    handle.Dispose();
+                }
+                throw;
+            }
+        }
+
+        public string ComputeSha256()
+        {
+            ThrowIfDisposed();
+            stream.Position = 0;
+            var result = Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+            stream.Position = 0;
+            return result;
+        }
+
+        public void CopyTo(Stream destination)
+        {
+            ThrowIfDisposed();
+            stream.Position = 0;
+            stream.CopyTo(destination, 1024 * 1024);
+            stream.Position = 0;
+        }
+
+        public void RenameTo(string destinationPath, bool replaceExisting)
+        {
+            ThrowIfDisposed();
+            var destination = System.IO.Path.GetFullPath(destinationPath);
+            if (!System.IO.Path.GetDirectoryName(Path).Equals(
+                    System.IO.Path.GetDirectoryName(destination),
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    "Owned release rename must remain inside one output directory.");
+            }
+            if (stream.CanWrite)
+            {
+                stream.Flush(true);
+            }
+            RenameByHandle(stream.SafeFileHandle, destination, replaceExisting);
+            var resolved = ResolveFinalPath(stream.SafeFileHandle);
+            if (!resolved.Equals(destination, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new IOException(
+                    $"Owned release rename resolved to an unexpected path: {resolved}");
+            }
+            Path = destination;
+            stream.Position = 0;
+        }
+
+        public void DeleteOnClose()
+        {
+            ThrowIfDisposed();
+            SetDeleteDisposition(stream.SafeFileHandle);
+        }
+
+        public void Dispose()
+        {
+            if (disposed)
+            {
+                return;
+            }
+            disposed = true;
+            stream.Dispose();
+            stream = null;
+        }
+
+        private void ThrowIfDisposed()
+        {
+            if (disposed)
+            {
+                throw new ObjectDisposedException(nameof(RedistributableOwnedFile));
+            }
+        }
+
+        private static void AssertSafeRegularFile(
+            SafeFileHandle handle,
+            string fullPath,
+            string description)
+        {
+            if (!GetFileInformationByHandle(handle, out var information))
+            {
+                throw new IOException(
+                    $"Unable to inspect owned {description}: {fullPath}",
+                    new Win32Exception(Marshal.GetLastWin32Error()));
+            }
+            var attributes = (FileAttributes)information.FileAttributes;
+            if ((attributes & FileAttributes.Directory) != 0
+                || (attributes & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new UnauthorizedAccessException(
+                    $"The owned {description} is a reparse point or not a regular file: {fullPath}");
+            }
+            if (information.NumberOfLinks != 1)
+            {
+                throw new UnauthorizedAccessException(
+                    $"The owned {description} has multiple hard links: {fullPath}");
+            }
+            if (!ResolveFinalPath(handle).Equals(
+                    fullPath,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new UnauthorizedAccessException(
+                    $"The owned {description} resolves outside its lexical path: {fullPath}");
+            }
+        }
+
+        private static void RenameByHandle(
+            SafeFileHandle handle,
+            string destinationPath,
+            bool replaceExisting)
+        {
+            var destination = ToExtendedPath(destinationPath);
+            var nameBytes = Encoding.Unicode.GetBytes(destination);
+            var rootOffset = IntPtr.Size == 8 ? 8 : 4;
+            var lengthOffset = IntPtr.Size == 8 ? 16 : 8;
+            var nameOffset = IntPtr.Size == 8 ? 20 : 12;
+            var bufferLength = checked(nameOffset + nameBytes.Length + sizeof(char));
+            var buffer = Marshal.AllocHGlobal(bufferLength);
+            try
+            {
+                for (var index = 0; index < bufferLength; index++)
+                {
+                    Marshal.WriteByte(buffer, index, 0);
+                }
+                Marshal.WriteInt32(buffer, 0, replaceExisting ? 1 : 0);
+                Marshal.WriteIntPtr(buffer, rootOffset, IntPtr.Zero);
+                Marshal.WriteInt32(buffer, lengthOffset, nameBytes.Length);
+                Marshal.Copy(nameBytes, 0, IntPtr.Add(buffer, nameOffset), nameBytes.Length);
+                if (!SetFileInformationByHandle(
+                        handle,
+                        FileRenameInfo,
+                        buffer,
+                        (uint)bufferLength))
+                {
+                    throw new IOException(
+                        $"Handle-based release publication rename failed: {destinationPath}",
+                        new Win32Exception(Marshal.GetLastWin32Error()));
+                }
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+
+        private static void SetDeleteDisposition(SafeFileHandle handle)
+        {
+            var buffer = Marshal.AllocHGlobal(sizeof(int));
+            try
+            {
+                Marshal.WriteInt32(buffer, 1);
+                if (!SetFileInformationByHandle(
+                        handle,
+                        FileDispositionInfo,
+                        buffer,
+                        sizeof(int)))
+                {
+                    throw new IOException(
+                        "Handle-based release deletion failed.",
+                        new Win32Exception(Marshal.GetLastWin32Error()));
+                }
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+
+        private static string ResolveFinalPath(SafeFileHandle handle)
+        {
+            var capacity = 512;
+            while (true)
+            {
+                var buffer = new StringBuilder(capacity);
+                var length = GetFinalPathNameByHandleW(handle, buffer, (uint)capacity, 0);
+                if (length == 0)
+                {
+                    throw new IOException(
+                        "Unable to resolve owned release file identity.",
+                        new Win32Exception(Marshal.GetLastWin32Error()));
+                }
+                if (length < capacity)
+                {
+                    return Normalize(buffer.ToString());
+                }
+                capacity = checked((int)length + 1);
+            }
+        }
+
+        private static string Normalize(string path)
+        {
+            const string uncPrefix = @"\\?\UNC\";
+            const string devicePrefix = @"\\?\";
+            var value = path;
+            if (value.StartsWith(uncPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                value = @"\\" + value.Substring(uncPrefix.Length);
+            }
+            else if (value.StartsWith(devicePrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                value = value.Substring(devicePrefix.Length);
+            }
+            return System.IO.Path.GetFullPath(value);
+        }
+
+        private static string ToExtendedPath(string path)
+        {
+            if (path.StartsWith(@"\\?\", StringComparison.Ordinal))
+            {
+                return path;
+            }
+            if (path.StartsWith(@"\\", StringComparison.Ordinal))
+            {
+                return @"\\?\UNC\" + path.Substring(2);
+            }
+            return @"\\?\" + path;
+        }
+
+        private enum CreateDisposition : uint
+        {
+            CreateNew = 1,
+            OpenExisting = 3
+        }
+
+        private const uint GenericRead = 0x80000000;
+        private const uint GenericWrite = 0x40000000;
+        private const uint DeleteAccess = 0x00010000;
+        private const uint ShareRead = 0x00000001;
+        private const uint SequentialScan = 0x08000000;
+        private const uint OpenReparsePoint = 0x00200000;
+        private const uint WriteThrough = 0x80000000;
+        private const int FileRenameInfo = 3;
+        private const int FileDispositionInfo = 4;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ByHandleFileInformation
+        {
+            public uint FileAttributes;
+            public uint CreationTimeLow;
+            public uint CreationTimeHigh;
+            public uint LastAccessTimeLow;
+            public uint LastAccessTimeHigh;
+            public uint LastWriteTimeLow;
+            public uint LastWriteTimeHigh;
+            public uint VolumeSerialNumber;
+            public uint FileSizeHigh;
+            public uint FileSizeLow;
+            public uint NumberOfLinks;
+            public uint FileIndexHigh;
+            public uint FileIndexLow;
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern SafeFileHandle CreateFileW(
+            string fileName,
+            uint desiredAccess,
+            uint shareMode,
+            IntPtr securityAttributes,
+            uint creationDisposition,
+            uint flagsAndAttributes,
+            IntPtr templateFile);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetFileInformationByHandle(
+            SafeFileHandle file,
+            out ByHandleFileInformation fileInformation);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetFileInformationByHandle(
+            SafeFileHandle file,
+            int fileInformationClass,
+            IntPtr fileInformation,
+            uint bufferSize);
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern uint GetFinalPathNameByHandleW(
@@ -421,53 +816,6 @@ namespace DSRRandomizer.Packaging
             uint flags);
     }
 
-    public static class RedistributableAtomicFile
-    {
-        public static void ReplaceWriteThrough(string sourcePath, string destinationPath)
-        {
-            var source = System.IO.Path.GetFullPath(sourcePath);
-            var destination = System.IO.Path.GetFullPath(destinationPath);
-            if (!System.IO.Path.GetDirectoryName(source).Equals(
-                    System.IO.Path.GetDirectoryName(destination),
-                    StringComparison.OrdinalIgnoreCase))
-            {
-                throw new InvalidOperationException(
-                    "Atomic release publication must remain on one filesystem.");
-            }
-            if (!MoveFileExW(
-                    ToExtendedPath(source),
-                    ToExtendedPath(destination),
-                    MoveFileReplaceExisting | MoveFileWriteThrough))
-            {
-                throw new IOException(
-                    $"Atomic release publication failed: {destination}",
-                    new Win32Exception(Marshal.GetLastWin32Error()));
-            }
-        }
-
-        private static string ToExtendedPath(string path)
-        {
-            if (path.StartsWith(@"\\?\", StringComparison.Ordinal))
-            {
-                return path;
-            }
-            if (path.StartsWith(@"\\", StringComparison.Ordinal))
-            {
-                return @"\\?\UNC\" + path.Substring(2);
-            }
-            return @"\\?\" + path;
-        }
-
-        private const uint MoveFileReplaceExisting = 0x00000001;
-        private const uint MoveFileWriteThrough = 0x00000008;
-
-        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool MoveFileExW(
-            string existingFileName,
-            string newFileName,
-            uint flags);
-    }
 }
 '@
 }
@@ -516,85 +864,98 @@ function Assert-RedistributableDescendant {
     }
 }
 
-function Assert-ReleaseRedistributableArchive {
+function Assert-ReleaseRedistributableStream {
     param(
-        [Parameter(Mandatory = $true)][string]$ArchivePath,
+        [Parameter(Mandatory = $true)][IO.Stream]$Stream,
+        [Parameter(Mandatory = $true)][string]$Description,
         [Parameter(Mandatory = $true)][string]$Version
     )
 
     $sourceName = "DSR-for-MOD-v$Version-source.zip"
     $binaryName = "DSR-for-MOD-v$Version-win-x64.zip"
     $expectedNames = @($sourceName, $binaryName, 'SHA256SUMS.txt')
+    $zip = [IO.Compression.ZipArchive]::new(
+        $Stream,
+        [IO.Compression.ZipArchiveMode]::Read,
+        $true)
+    try {
+        if ($zip.Entries.Count -ne $expectedNames.Count) {
+            throw "Redistributable archive must contain exactly three entries: $Description"
+        }
+        for ($index = 0; $index -lt $expectedNames.Count; $index++) {
+            $entry = $zip.Entries[$index]
+            if ($entry.FullName -cne $expectedNames[$index]) {
+                throw "Redistributable entry order/name is invalid at index $index."
+            }
+            if ($entry.FullName.Contains('/') `
+                    -or $entry.FullName.Contains('\') `
+                    -or $entry.FullName.Contains('..')) {
+                throw "Redistributable entry path is unsafe: $($entry.FullName)"
+            }
+            if ($entry.LastWriteTime.DateTime -ne [datetime]'1980-01-01') {
+                throw "Redistributable entry timestamp is not fixed: $($entry.FullName)"
+            }
+        }
+
+        $sourceStream = $zip.Entries[0].Open()
+        try {
+            $sourceHash = Get-ReleaseSha256 -Stream $sourceStream
+        }
+        finally {
+            $sourceStream.Dispose()
+        }
+        $binaryStream = $zip.Entries[1].Open()
+        try {
+            $binaryHash = Get-ReleaseSha256 -Stream $binaryStream
+        }
+        finally {
+            $binaryStream.Dispose()
+        }
+        $sumsStream = $zip.Entries[2].Open()
+        try {
+            $memory = [IO.MemoryStream]::new()
+            try {
+                $sumsStream.CopyTo($memory)
+                $sumsBytes = $memory.ToArray()
+            }
+            finally {
+                $memory.Dispose()
+            }
+        }
+        finally {
+            $sumsStream.Dispose()
+        }
+        $expectedText = "$sourceHash  $sourceName`n$binaryHash  $binaryName`n"
+        $expectedBytes = [Text.UTF8Encoding]::new($false).GetBytes($expectedText)
+        if ([Convert]::ToHexString($sumsBytes) -cne [Convert]::ToHexString($expectedBytes)) {
+            throw 'SHA256SUMS.txt does not strictly bind the two inner archives.'
+        }
+        [pscustomobject]@{
+            ArchiveSha256 = Get-ReleaseSha256 -Stream $Stream
+            SourceSha256 = $sourceHash
+            BinarySha256 = $binaryHash
+            Entries = $expectedNames
+        }
+    }
+    finally {
+        $zip.Dispose()
+    }
+}
+
+function Assert-ReleaseRedistributableArchive {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArchivePath,
+        [Parameter(Mandatory = $true)][string]$Version
+    )
+
     $lease = [DSRRandomizer.Packaging.RedistributableArtifactLease]::Acquire(
         $ArchivePath,
         'redistributable archive')
     try {
-        $zip = [IO.Compression.ZipArchive]::new(
-            $lease.Stream,
-            [IO.Compression.ZipArchiveMode]::Read,
-            $true)
-        try {
-            if ($zip.Entries.Count -ne $expectedNames.Count) {
-                throw "Redistributable archive must contain exactly three entries: $ArchivePath"
-            }
-            for ($index = 0; $index -lt $expectedNames.Count; $index++) {
-                $entry = $zip.Entries[$index]
-                if ($entry.FullName -cne $expectedNames[$index]) {
-                    throw "Redistributable entry order/name is invalid at index $index."
-                }
-                if ($entry.FullName.Contains('/') `
-                        -or $entry.FullName.Contains('\') `
-                        -or $entry.FullName.Contains('..')) {
-                    throw "Redistributable entry path is unsafe: $($entry.FullName)"
-                }
-                if ($entry.LastWriteTime.DateTime -ne [datetime]'1980-01-01') {
-                    throw "Redistributable entry timestamp is not fixed: $($entry.FullName)"
-                }
-            }
-
-            $sourceStream = $zip.Entries[0].Open()
-            try {
-                $sourceHash = Get-ReleaseSha256 -Stream $sourceStream
-            }
-            finally {
-                $sourceStream.Dispose()
-            }
-            $binaryStream = $zip.Entries[1].Open()
-            try {
-                $binaryHash = Get-ReleaseSha256 -Stream $binaryStream
-            }
-            finally {
-                $binaryStream.Dispose()
-            }
-            $sumsStream = $zip.Entries[2].Open()
-            try {
-                $memory = [IO.MemoryStream]::new()
-                try {
-                    $sumsStream.CopyTo($memory)
-                    $sumsBytes = $memory.ToArray()
-                }
-                finally {
-                    $memory.Dispose()
-                }
-            }
-            finally {
-                $sumsStream.Dispose()
-            }
-            $expectedText = "$sourceHash  $sourceName`n$binaryHash  $binaryName`n"
-            $expectedBytes = [Text.UTF8Encoding]::new($false).GetBytes($expectedText)
-            if ([Convert]::ToHexString($sumsBytes) -cne [Convert]::ToHexString($expectedBytes)) {
-                throw 'SHA256SUMS.txt does not strictly bind the two inner archives.'
-            }
-            [pscustomobject]@{
-                ArchiveSha256 = $lease.ComputeSha256()
-                SourceSha256 = $sourceHash
-                BinarySha256 = $binaryHash
-                Entries = $expectedNames
-            }
-        }
-        finally {
-            $zip.Dispose()
-        }
+        Assert-ReleaseRedistributableStream `
+            -Stream $lease.Stream `
+            -Description $ArchivePath `
+            -Version $Version
     }
     finally {
         $lease.Dispose()
@@ -711,11 +1072,15 @@ function Remove-ExactRegularFile {
     if (-not (Test-Path -LiteralPath $Path)) {
         return
     }
-    $lease = [DSRRandomizer.Packaging.RedistributableArtifactLease]::Acquire(
+    $owned = [DSRRandomizer.Packaging.RedistributableOwnedFile]::OpenExisting(
         $Path,
         $Description)
-    $lease.Dispose()
-    [IO.File]::Delete([IO.Path]::GetFullPath($Path))
+    try {
+        $owned.DeleteOnClose()
+    }
+    finally {
+        $owned.Dispose()
+    }
 }
 
 function Publish-ReleaseRedistributableArchive {
@@ -756,12 +1121,19 @@ function Publish-ReleaseRedistributableArchive {
                 if (-not (Test-Path -LiteralPath $finalPath -PathType Leaf)) {
                     throw "A whole-archive backup exists without its canonical archive: $backupPath"
                 }
-                Assert-ReleaseRedistributableArchive `
-                    -ArchivePath $backupPath `
-                    -Version $Version | Out-Null
-                Remove-ExactRegularFile `
-                    -Path $backupPath `
-                    -Description 'previous redistributable backup'
+                $staleBackup = [DSRRandomizer.Packaging.RedistributableOwnedFile]::OpenExisting(
+                    $backupPath,
+                    'previous redistributable backup')
+                try {
+                    Assert-ReleaseRedistributableStream `
+                        -Stream $staleBackup.Stream `
+                        -Description $backupPath `
+                        -Version $Version | Out-Null
+                    $staleBackup.DeleteOnClose()
+                }
+                finally {
+                    $staleBackup.Dispose()
+                }
             }
 
             $stagedLease = [DSRRandomizer.Packaging.RedistributableArtifactLease]::Acquire(
@@ -769,40 +1141,50 @@ function Publish-ReleaseRedistributableArchive {
                 'validated staged redistributable')
             $priorHash = $null
             $priorLease = $null
-            $backupCreated = $false
+            $pendingOwned = $null
+            $backupOwned = $null
+            $finalOwned = $null
+            $rollbackOwned = $null
             $replaced = $false
             try {
                 if ($stagedLease.ComputeSha256() -cne $ExpectedSha256) {
                     throw 'The staged redistributable does not match its expected gated SHA-256.'
                 }
-                Assert-ReleaseRedistributableArchive `
-                    -ArchivePath $StagedArchivePath `
+                Assert-ReleaseRedistributableStream `
+                    -Stream $stagedLease.Stream `
+                    -Description $StagedArchivePath `
                     -Version $Version | Out-Null
-                $stagedLease.CopyToNewAndFlush($pendingPath)
+                $pendingOwned = [DSRRandomizer.Packaging.RedistributableOwnedFile]::CreateFrom(
+                    $stagedLease,
+                    $pendingPath,
+                    'pending redistributable')
+                if ($pendingOwned.ComputeSha256() -cne $ExpectedSha256) {
+                    throw 'The owned pending redistributable is not byte-exact.'
+                }
+                Assert-ReleaseRedistributableStream `
+                    -Stream $pendingOwned.Stream `
+                    -Description $pendingPath `
+                    -Version $Version | Out-Null
 
                 if (Test-Path -LiteralPath $finalPath -PathType Leaf) {
                     $priorLease = [DSRRandomizer.Packaging.RedistributableArtifactLease]::Acquire(
                         $finalPath,
                         'prior redistributable')
                     $priorHash = $priorLease.ComputeSha256()
-                    Assert-ReleaseRedistributableArchive `
-                        -ArchivePath $finalPath `
+                    Assert-ReleaseRedistributableStream `
+                        -Stream $priorLease.Stream `
+                        -Description $finalPath `
                         -Version $Version | Out-Null
-                    $priorLease.CopyToNewAndFlush($backupPath)
-                    $backupCreated = $true
-                    $backupLease = [DSRRandomizer.Packaging.RedistributableArtifactLease]::Acquire(
+                    $backupOwned = [DSRRandomizer.Packaging.RedistributableOwnedFile]::CreateFrom(
+                        $priorLease,
                         $backupPath,
                         'whole redistributable backup')
-                    try {
-                        if ($backupLease.ComputeSha256() -cne $priorHash) {
-                            throw 'The whole redistributable backup is not byte-exact.'
-                        }
+                    if ($backupOwned.ComputeSha256() -cne $priorHash) {
+                        throw 'The whole redistributable backup is not byte-exact.'
                     }
-                    finally {
-                        $backupLease.Dispose()
-                    }
-                    Assert-ReleaseRedistributableArchive `
-                        -ArchivePath $backupPath `
+                    Assert-ReleaseRedistributableStream `
+                        -Stream $backupOwned.Stream `
+                        -Description $backupPath `
                         -Version $Version | Out-Null
                     $priorLease.Dispose()
                     $priorLease = $null
@@ -812,38 +1194,34 @@ function Publish-ReleaseRedistributableArchive {
                     -Hook $OperationHook `
                     -Phase 'BeforeAtomicReplace' `
                     -Path $finalPath
-                [DSRRandomizer.Packaging.RedistributableAtomicFile]::ReplaceWriteThrough(
-                    $pendingPath,
-                    $finalPath)
+                Invoke-RedistributableHook `
+                    -Hook $OperationHook `
+                    -Phase 'BeforeHandleRename' `
+                    -Path $pendingPath
+                $pendingOwned.RenameTo($finalPath, $true)
+                $finalOwned = $pendingOwned
+                $pendingOwned = $null
                 $replaced = $true
                 Invoke-RedistributableHook `
                     -Hook $OperationHook `
                     -Phase 'BeforeFinalVerification' `
                     -Path $finalPath
-                $finalLease = [DSRRandomizer.Packaging.RedistributableArtifactLease]::Acquire(
-                    $finalPath,
-                    'published redistributable')
-                try {
-                    if ($finalLease.ComputeSha256() -cne $ExpectedSha256) {
-                        throw 'Published redistributable SHA-256 does not match the gated input.'
-                    }
-                    Assert-ReleaseRedistributableArchive `
-                        -ArchivePath $finalPath `
-                        -Version $Version | Out-Null
+                if ($finalOwned.ComputeSha256() -cne $ExpectedSha256) {
+                    throw 'Published redistributable SHA-256 does not match the gated input.'
                 }
-                finally {
-                    $finalLease.Dispose()
-                }
-                if ($backupCreated) {
+                Assert-ReleaseRedistributableStream `
+                    -Stream $finalOwned.Stream `
+                    -Description $finalPath `
+                    -Version $Version | Out-Null
+                if ($null -ne $backupOwned) {
                     try {
                         Invoke-RedistributableHook `
                             -Hook $OperationHook `
                             -Phase 'BeforeBackupCleanup' `
                             -Path $backupPath
-                        Remove-ExactRegularFile `
-                            -Path $backupPath `
-                            -Description 'verified whole redistributable backup'
-                        $backupCreated = $false
+                        $backupOwned.DeleteOnClose()
+                        $backupOwned.Dispose()
+                        $backupOwned = $null
                     }
                     catch {
                         Write-Warning (
@@ -860,49 +1238,71 @@ function Publish-ReleaseRedistributableArchive {
                 }
                 if ($replaced) {
                     try {
-                        if ($backupCreated) {
-                            [DSRRandomizer.Packaging.RedistributableAtomicFile]::ReplaceWriteThrough(
-                                $backupPath,
-                                $finalPath)
-                            $backupCreated = $false
-                            $restored = [DSRRandomizer.Packaging.RedistributableArtifactLease]::Acquire(
-                                $finalPath,
-                                'restored redistributable')
+                        $failedPath = Join-Path $root.Path (
+                            ".$FileName.failed-" + [Guid]::NewGuid().ToString('N'))
+                        Assert-RedistributableDescendant `
+                            -Candidate $failedPath `
+                            -Root $root.Path
+                        $finalOwned.RenameTo($failedPath, $false)
+                        $finalOwned.DeleteOnClose()
+                        if ($null -ne $backupOwned) {
+                            $rollbackPath = Join-Path $root.Path (
+                                ".$FileName.rollback-" + [Guid]::NewGuid().ToString('N'))
+                            Assert-RedistributableDescendant `
+                                -Candidate $rollbackPath `
+                                -Root $root.Path
+                            $rollbackOwned = [DSRRandomizer.Packaging.RedistributableOwnedFile]::CreateFrom(
+                                $backupOwned,
+                                $rollbackPath,
+                                'rollback redistributable candidate')
+                            if ($rollbackOwned.ComputeSha256() -cne $priorHash) {
+                                throw 'Rollback candidate does not match the leased prior bytes.'
+                            }
+                            Assert-ReleaseRedistributableStream `
+                                -Stream $rollbackOwned.Stream `
+                                -Description $rollbackPath `
+                                -Version $Version | Out-Null
+                            Invoke-RedistributableHook `
+                                -Hook $OperationHook `
+                                -Phase 'BeforeRollback' `
+                                -Path $backupPath
+                            $rollbackOwned.RenameTo($finalPath, $false)
+                            if ($rollbackOwned.ComputeSha256() -cne $priorHash) {
+                                throw 'Restored redistributable does not match the leased prior bytes.'
+                            }
+                            Assert-ReleaseRedistributableStream `
+                                -Stream $rollbackOwned.Stream `
+                                -Description $finalPath `
+                                -Version $Version | Out-Null
                             try {
-                                if ($restored.ComputeSha256() -cne $priorHash) {
-                                    throw 'Restored redistributable does not match its whole backup.'
-                                }
+                                $backupOwned.DeleteOnClose()
+                                $backupOwned.Dispose()
+                                $backupOwned = $null
                             }
-                            finally {
-                                $restored.Dispose()
+                            catch {
+                                Write-Warning (
+                                    'Rollback restored the prior redistributable, but its ' +
+                                    "whole-file backup remains: $backupPath. $($_.Exception.Message)")
                             }
-                        }
-                        elseif (Test-Path -LiteralPath $finalPath -PathType Leaf) {
-                            $newLease = [DSRRandomizer.Packaging.RedistributableArtifactLease]::Acquire(
-                                $finalPath,
-                                'failed new redistributable')
-                            try {
-                                if ($newLease.ComputeSha256() -cne $ExpectedSha256) {
-                                    throw 'Refusing to remove an unrecognized failed publication.'
-                                }
-                            }
-                            finally {
-                                $newLease.Dispose()
-                            }
-                            [IO.File]::Delete($finalPath)
                         }
                     }
                     catch {
                         throw [AggregateException]::new(
-                            'Redistributable publication and whole-file rollback both failed.',
+                            'Redistributable publication and handle-owned rollback both failed.',
                             @($publicationError.Exception, $_.Exception))
                     }
                 }
-                elseif ($backupCreated) {
-                    Remove-ExactRegularFile `
-                        -Path $backupPath `
-                        -Description 'unused whole redistributable backup'
-                    $backupCreated = $false
+                elseif ($null -ne $backupOwned) {
+                    try {
+                        $backupOwned.DeleteOnClose()
+                        $backupOwned.Dispose()
+                        $backupOwned = $null
+                    }
+                    catch {
+                        Write-Warning (
+                            'Unused whole-file backup could not be removed after a ' +
+                            "pre-replace failure: $backupPath. $($_.Exception.Message)")
+                    }
                 }
                 throw $publicationError
             }
@@ -910,12 +1310,24 @@ function Publish-ReleaseRedistributableArchive {
                 if ($null -ne $priorLease) {
                     $priorLease.Dispose()
                 }
-                $stagedLease.Dispose()
-                if (Test-Path -LiteralPath $pendingPath -PathType Leaf) {
-                    Remove-ExactRegularFile `
-                        -Path $pendingPath `
-                        -Description 'pending redistributable'
+                if ($null -ne $pendingOwned) {
+                    try {
+                        $pendingOwned.DeleteOnClose()
+                    }
+                    finally {
+                        $pendingOwned.Dispose()
+                    }
                 }
+                if ($null -ne $backupOwned) {
+                    $backupOwned.Dispose()
+                }
+                if ($null -ne $finalOwned) {
+                    $finalOwned.Dispose()
+                }
+                if ($null -ne $rollbackOwned) {
+                    $rollbackOwned.Dispose()
+                }
+                $stagedLease.Dispose()
             }
         }
         finally {
@@ -930,18 +1342,23 @@ function Publish-ReleaseRedistributableArchive {
 function Remove-LegacyReleaseArtifacts {
     param(
         [Parameter(Mandatory = $true)][string]$OutputRoot,
-        [Parameter(Mandatory = $true)][string[]]$Names
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?$')]
+        [string]$Version
     )
 
+    $names = @(
+        "DSR-for-MOD-v$Version-win-x64.zip",
+        "DSR-for-MOD-v$Version-win-x64.zip.sha256",
+        "DSR-for-MOD-v$Version-source.zip",
+        "DSR-for-MOD-v$Version-source.zip.sha256"
+    )
     $root = Open-SafeReleaseRoot -Path $OutputRoot
     try {
         $lock = [DSRRandomizer.Packaging.RedistributablePublicationLock]::Acquire(
             $root.Path)
         try {
-            foreach ($name in $Names) {
-                if ([IO.Path]::GetFileName($name) -cne $name) {
-                    throw "Legacy artifact cleanup name is not a leaf: $name"
-                }
+            foreach ($name in $names) {
                 $path = Join-Path $root.Path $name
                 Assert-RedistributableDescendant -Candidate $path -Root $root.Path
                 try {

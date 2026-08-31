@@ -260,7 +260,7 @@ try {
         -Version $Version
     Remove-LegacyReleaseArtifacts `
         -OutputRoot $outputDirectory.Path `
-        -Names $privateArtifactNames
+        -Version $Version
 }
 finally {
     try {

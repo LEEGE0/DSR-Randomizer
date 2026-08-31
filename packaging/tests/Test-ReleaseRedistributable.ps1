@@ -128,6 +128,18 @@ function Assert-NoTransactionState {
     }
 }
 
+function Assert-NoPublicationResidue {
+    param([Parameter(Mandatory = $true)][string]$OutputRoot)
+    $unexpected = @(Get-ChildItem -LiteralPath $OutputRoot -File -Force | Where-Object {
+            $_.Name.Contains('.pending-', [StringComparison]::Ordinal) `
+                -or $_.Name.Contains('.failed-', [StringComparison]::Ordinal) `
+                -or $_.Name.Contains('.rollback-', [StringComparison]::Ordinal)
+        })
+    if ($unexpected.Count -ne 0) {
+        throw "Single-file publication left unsafe file residue: $($unexpected.FullName -join ', ')"
+    }
+}
+
 function Wait-ForSignal {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -257,6 +269,218 @@ try {
         -Expected $postOld.Bytes `
         -Path (Join-Path $postFailureCase.OutputRoot $outerName)
     Assert-NoTransactionState -OutputRoot $postFailureCase.OutputRoot
+
+    # Catches a publisher that validates one pending object, then renames a
+    # different object selected through the same mutable pathname.
+    $pendingSwapCase = New-Case -Root $testRoot -Name 'pending-path-swap'
+    $pendingExpected = New-OuterFixture -Case $pendingSwapCase -Prefix 'expected'
+    $pendingThirdRoot = Join-Path $pendingSwapCase.StagingRoot 'third'
+    $pendingThird = New-OuterFixture `
+        -Case $pendingSwapCase `
+        -Prefix 'third' `
+        -StagingRoot $pendingThirdRoot
+    $script:pendingSwapBlocked = $false
+    Publish-Fixture `
+        -Case $pendingSwapCase `
+        -Fixture $pendingExpected `
+        -OperationHook {
+            param($Phase, $Path)
+            if ($Phase -eq 'BeforeAtomicReplace') {
+                $pending = @(Get-ChildItem `
+                        -LiteralPath $pendingSwapCase.OutputRoot `
+                        -File `
+                        -Filter '.*.pending-*')
+                if ($pending.Count -ne 1) {
+                    throw "Expected one pending publication, found $($pending.Count)."
+                }
+                try {
+                    [IO.File]::Copy($pendingThird.Path, $pending[0].FullName, $true)
+                }
+                catch [IO.IOException] {
+                    $script:pendingSwapBlocked = $true
+                }
+            }
+        }
+    if (-not $script:pendingSwapBlocked) {
+        throw 'Pending-path replacement was not blocked by the owned handle.'
+    }
+    Assert-BytesEqual `
+        -Expected $pendingExpected.Bytes `
+        -Path (Join-Path $pendingSwapCase.OutputRoot $outerName)
+    Assert-NoPublicationResidue -OutputRoot $pendingSwapCase.OutputRoot
+
+    # Catches rollback that trusts a released .previous pathname instead of
+    # the exact prior bytes held by the publisher.
+    $backupSwapCase = New-Case -Root $testRoot -Name 'backup-path-swap'
+    $backupOld = New-OuterFixture -Case $backupSwapCase -Prefix 'old'
+    Publish-Fixture -Case $backupSwapCase -Fixture $backupOld
+    $backupNewRoot = Join-Path $backupSwapCase.StagingRoot 'new'
+    $backupNew = New-OuterFixture `
+        -Case $backupSwapCase `
+        -Prefix 'new' `
+        -StagingRoot $backupNewRoot
+    $backupThirdRoot = Join-Path $backupSwapCase.StagingRoot 'third'
+    $backupThird = New-OuterFixture `
+        -Case $backupSwapCase `
+        -Prefix 'third' `
+        -StagingRoot $backupThirdRoot
+    $script:backupSwapBlocked = $false
+    $script:rollbackBackupSwapBlocked = $false
+    $script:rollbackCandidateSwapBlocked = $false
+    Assert-Failed `
+        -Message 'controlled rollback verification failure' `
+        -Action {
+            Publish-Fixture `
+                -Case $backupSwapCase `
+                -Fixture $backupNew `
+                -OperationHook {
+                    param($Phase, $Path)
+                    if ($Phase -eq 'BeforeFinalVerification') {
+                        $backup = Join-Path `
+                            $backupSwapCase.OutputRoot `
+                            "$outerName.previous"
+                        try {
+                            [IO.File]::Copy($backupThird.Path, $backup, $true)
+                        }
+                        catch [IO.IOException] {
+                            $script:backupSwapBlocked = $true
+                        }
+                        throw 'controlled rollback verification failure'
+                    }
+                    if ($Phase -eq 'BeforeRollback') {
+                        try {
+                            [IO.File]::Copy($backupThird.Path, $Path, $true)
+                        }
+                        catch [IO.IOException] {
+                            $script:rollbackBackupSwapBlocked = $true
+                        }
+                        $rollback = @(Get-ChildItem `
+                                -LiteralPath $backupSwapCase.OutputRoot `
+                                -File `
+                                -Filter '.*.rollback-*')
+                        if ($rollback.Count -ne 1) {
+                            throw "Expected one rollback candidate, found $($rollback.Count)."
+                        }
+                        try {
+                            [IO.File]::Copy(
+                                $backupThird.Path,
+                                $rollback[0].FullName,
+                                $true)
+                        }
+                        catch [IO.IOException] {
+                            $script:rollbackCandidateSwapBlocked = $true
+                        }
+                    }
+                }
+        }
+    if (-not $script:backupSwapBlocked) {
+        throw 'Rollback-backup replacement was not blocked by its owned handle.'
+    }
+    if (-not $script:rollbackBackupSwapBlocked `
+            -or -not $script:rollbackCandidateSwapBlocked) {
+        throw 'Rollback did not retain stable handles for backup and restore candidate.'
+    }
+    Assert-BytesEqual `
+        -Expected $backupOld.Bytes `
+        -Path (Join-Path $backupSwapCase.OutputRoot $outerName)
+    Assert-NoPublicationResidue -OutputRoot $backupSwapCase.OutputRoot
+    if (Test-Path -LiteralPath (Join-Path $backupSwapCase.OutputRoot "$outerName.previous")) {
+        throw 'Successful rollback left a whole-file backup behind.'
+    }
+    Publish-Fixture -Case $backupSwapCase -Fixture $backupNew
+    Assert-BytesEqual `
+        -Expected $backupNew.Bytes `
+        -Path (Join-Path $backupSwapCase.OutputRoot $outerName)
+
+    # Catches releasing the final handle before whole-backup cleanup.
+    $finalSwapCase = New-Case -Root $testRoot -Name 'final-cleanup-path-swap'
+    $finalOld = New-OuterFixture -Case $finalSwapCase -Prefix 'old'
+    Publish-Fixture -Case $finalSwapCase -Fixture $finalOld
+    $finalNewRoot = Join-Path $finalSwapCase.StagingRoot 'new'
+    $finalNew = New-OuterFixture `
+        -Case $finalSwapCase `
+        -Prefix 'new' `
+        -StagingRoot $finalNewRoot
+    $finalThirdRoot = Join-Path $finalSwapCase.StagingRoot 'third'
+    $finalThird = New-OuterFixture `
+        -Case $finalSwapCase `
+        -Prefix 'third' `
+        -StagingRoot $finalThirdRoot
+    $script:finalSwapBlocked = $false
+    Publish-Fixture `
+        -Case $finalSwapCase `
+        -Fixture $finalNew `
+        -OperationHook {
+            param($Phase, $Path)
+            if ($Phase -eq 'BeforeBackupCleanup') {
+                $canonical = Join-Path $finalSwapCase.OutputRoot $outerName
+                try {
+                    [IO.File]::Copy($finalThird.Path, $canonical, $true)
+                }
+                catch [IO.IOException] {
+                    $script:finalSwapBlocked = $true
+                }
+            }
+        }
+    if (-not $script:finalSwapBlocked) {
+        throw 'Canonical replacement was not blocked during backup cleanup.'
+    }
+    Assert-BytesEqual `
+        -Expected $finalNew.Bytes `
+        -Path (Join-Path $finalSwapCase.OutputRoot $outerName)
+
+    $lockedCase = New-Case -Root $testRoot -Name 'locked-canonical'
+    $lockedOld = New-OuterFixture -Case $lockedCase -Prefix 'old'
+    Publish-Fixture -Case $lockedCase -Fixture $lockedOld
+    $lockedNewRoot = Join-Path $lockedCase.StagingRoot 'new'
+    $lockedNew = New-OuterFixture `
+        -Case $lockedCase `
+        -Prefix 'new' `
+        -StagingRoot $lockedNewRoot
+    $lockedCanonical = Join-Path $lockedCase.OutputRoot $outerName
+    $canonicalLock = [IO.FileStream]::new(
+        $lockedCanonical,
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::Read,
+        [IO.FileShare]::Read)
+    try {
+        Assert-Failed `
+            -Message 'publication' `
+            -Action {
+                Publish-Fixture -Case $lockedCase -Fixture $lockedNew
+            }
+        Assert-BytesEqual -Expected $lockedOld.Bytes -Path $lockedCanonical
+        Assert-NoPublicationResidue -OutputRoot $lockedCase.OutputRoot
+    }
+    finally {
+        $canonicalLock.Dispose()
+    }
+    Publish-Fixture -Case $lockedCase -Fixture $lockedNew
+    Assert-BytesEqual -Expected $lockedNew.Bytes -Path $lockedCanonical
+
+    $firstPostFailureCase = New-Case -Root $testRoot -Name 'first-post-rename-failure'
+    $firstPost = New-OuterFixture -Case $firstPostFailureCase -Prefix 'new'
+    Assert-Failed `
+        -Message 'controlled first post-rename failure' `
+        -Action {
+            Publish-Fixture `
+                -Case $firstPostFailureCase `
+                -Fixture $firstPost `
+                -OperationHook {
+                    param($Phase, $Path)
+                    if ($Phase -eq 'BeforeFinalVerification') {
+                        throw 'controlled first post-rename failure'
+                    }
+                }
+        }
+    if (Test-Path -LiteralPath (Join-Path $firstPostFailureCase.OutputRoot $outerName)) {
+        throw 'Failed first publication left a canonical archive.'
+    }
+    Assert-NoPublicationResidue -OutputRoot $firstPostFailureCase.OutputRoot
+    Publish-Fixture -Case $firstPostFailureCase -Fixture $firstPost
+    Assert-BytesEqual `
+        -Expected $firstPost.Bytes `
+        -Path (Join-Path $firstPostFailureCase.OutputRoot $outerName)
 
     $cleanupCase = New-Case -Root $testRoot -Name 'backup-cleanup-failure'
     $cleanupOld = New-OuterFixture -Case $cleanupCase -Prefix 'old'
@@ -431,12 +655,64 @@ catch {
             'legacy',
             [Text.UTF8Encoding]::new($false))
     }
+    $authoritativeFixture = New-OuterFixture -Case $legacyCase -Prefix 'authoritative'
+    Publish-Fixture -Case $legacyCase -Fixture $authoritativeFixture
+    Assert-Failed `
+        -Message 'Names' `
+        -Action {
+            Remove-LegacyReleaseArtifacts `
+                -OutputRoot $legacyCase.OutputRoot `
+                -Names @($outerName)
+        }
+    Assert-BytesEqual `
+        -Expected $authoritativeFixture.Bytes `
+        -Path (Join-Path $legacyCase.OutputRoot $outerName)
+    Assert-Failed `
+        -Message 'Version' `
+        -Action {
+            Remove-LegacyReleaseArtifacts `
+                -OutputRoot $legacyCase.OutputRoot `
+                -Version '../unsafe'
+        }
     Remove-LegacyReleaseArtifacts `
         -OutputRoot $legacyCase.OutputRoot `
-        -Names $legacyNames
+        -Version $version
     foreach ($name in $legacyNames) {
         if (Test-Path -LiteralPath (Join-Path $legacyCase.OutputRoot $name)) {
             throw "Legacy release artifact was not removed: $name"
+        }
+    }
+    Assert-BytesEqual `
+        -Expected $authoritativeFixture.Bytes `
+        -Path (Join-Path $legacyCase.OutputRoot $outerName)
+
+    $hardLinkCase = New-Case -Root $testRoot -Name 'legacy-hardlink'
+    $hardLinkedLegacy = Join-Path $hardLinkCase.OutputRoot $legacyNames[0]
+    [IO.File]::WriteAllText(
+        $hardLinkedLegacy,
+        'hard-linked legacy',
+        [Text.UTF8Encoding]::new($false))
+    $hardLinkAlias = Join-Path $hardLinkCase.OutputRoot 'preserved-hardlink.bin'
+    New-Item `
+        -ItemType HardLink `
+        -Path $hardLinkAlias `
+        -Target $hardLinkedLegacy | Out-Null
+    foreach ($name in $legacyNames[1..3]) {
+        [IO.File]::WriteAllText(
+            (Join-Path $hardLinkCase.OutputRoot $name),
+            'regular legacy',
+            [Text.UTF8Encoding]::new($false))
+    }
+    Remove-LegacyReleaseArtifacts `
+        -OutputRoot $hardLinkCase.OutputRoot `
+        -Version $version
+    if (-not (Test-Path -LiteralPath $hardLinkedLegacy -PathType Leaf) `
+            -or -not (Test-Path -LiteralPath $hardLinkAlias -PathType Leaf)) {
+        throw 'Unsafe hard-linked legacy artifact was not preserved.'
+    }
+    foreach ($name in $legacyNames[1..3]) {
+        if (Test-Path -LiteralPath (Join-Path $hardLinkCase.OutputRoot $name)) {
+            throw "Safe legacy artifact was not removed beside hard link: $name"
         }
     }
 }
