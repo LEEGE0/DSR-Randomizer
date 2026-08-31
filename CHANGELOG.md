@@ -21,10 +21,11 @@ All notable changes to DSR Randomizer are documented here.
 - The bridge-host Release publish contains no private absolute PDB path after the byte-level privacy gate rejected an earlier local-path disclosure.
 - The project-owned SoulsFormats subset omits TPF/DrSwizzler support and the unused BouncyCastle runtime while retaining the BND3/PARAM/DCX merge path; full ZstdNet/libzstd notices and SoulsFormatsNEXT corresponding-source obligations are included.
 - The release builder now fails closed unless the main repository is committed and clean and every recursive submodule is initialized, clean, and exactly at its pinned gitlink; it checks the same invariant again after binary staging and before source archiving.
+- Package identity validation uses extended Windows paths for its reparse-safe file leases, so deeply nested release staging remains verifiable beyond the legacy 260-character boundary.
 
 ### Verification
 
-- 444/444 managed Release tests and 15/15 native Release tests pass.
+- 445/445 managed Release tests and 15/15 native Release tests pass.
 - Clean-root bridge installation, tamper repair, extracted-binary-ZIP validation, parsed host bundle/dependency inspection, deterministic exact-three-submodule source-archive validation, clean source-state enforcement, strict manifest/hash validation, prohibited-content scans, exact-entry inspection, extracted-source host rebuild, and checksum recomputation are part of the release gate.
 
 ## [0.1.0-alpha.1] - 2026-08-24

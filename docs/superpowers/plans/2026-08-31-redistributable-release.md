@@ -19,7 +19,7 @@
 - Production pinned executable verification must not gain an environment, command-line, or external-file bypass.
 - Bridge installation must not require a runtime pointer, save/profile state, Steam ID, or third-party randomizer installation.
 - Use version `0.1.0-alpha.2` and output binary and source ZIPs under `artifacts`, each with a matching `.sha256`.
-- Do not claim full success unless all 444 managed tests, all 15 native tests, clean-root tests, staged-package validation, extracted binary/source validation, privacy scan, dependency/notice compliance, extracted-source build, and both checksum verifications pass freshly.
+- Do not claim full success unless all 445 managed tests, all 15 native tests, clean-root tests, staged-package validation, extracted binary/source validation, privacy scan, dependency/notice compliance, extracted-source build, and both checksum verifications pass freshly.
 
 ---
 
@@ -451,7 +451,7 @@ dotnet test DSR-Randomizer.sln -c Release --no-restore
 pwsh -NoProfile -File scripts/build-native.ps1 -Configuration Release -Test
 ```
 
-Expected: 444/444 managed tests and 15/15 native tests pass, plus successful binary/source package and checksum checks from Steps 4-5.
+Expected: 445/445 managed tests and 15/15 native tests pass, plus successful binary/source package and checksum checks from Steps 4-5.
 
 - [ ] **Step 7: Commit documentation and release metadata without committing generated ZIPs unless repository policy already tracks them**
 

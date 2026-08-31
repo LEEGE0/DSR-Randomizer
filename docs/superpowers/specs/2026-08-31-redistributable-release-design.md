@@ -204,6 +204,7 @@ A release is deliverable only after fresh evidence for all of the following:
 - `pwsh -NoProfile -File scripts/build-native.ps1 -Configuration Release -Test` passes all 15 native tests.
 - the clean-root bridge installer tests pass without using a pre-existing private runtime or an existing save/profile/runtime pointer.
 - the published package validator accepts the staged directory and the freshly extracted ZIP.
+- package identity leases remain reparse-safe and validate regular files whose absolute staging paths exceed the legacy Windows 260-character boundary.
 - ZIP inspection confirms the exact allowlist and no local game/personal artifacts.
 - the SHA-256 sidecar matches a fresh hash of the final ZIP.
 - the official host's parsed .NET v6 bundle manifest and embedded deps JSON contain neither DrSwizzler nor BouncyCastle, while every retained non-runtime dependency has a complete shipped notice.
