@@ -167,6 +167,8 @@ int main() {
     FakePlatform wrongLength;
     const auto savePath = Join(Join(Join(kRoot, L"saves"), L"146808034"),
                                L"DRAKS0005.rmm");
+    const auto metadataPath = Join(Join(Join(kRoot, L"saves"), L"146808034"),
+                                   L"save-metadata.json");
     wrongLength.inspections[savePath].length = 10;
     if (ResolveBridgeConfiguration(wrongLength).error
         != BridgeConfigurationError::SaveInvalid) {
@@ -188,9 +190,27 @@ int main() {
         return Fail("metadata/save hash mismatch was not rejected");
     }
 
+    FakePlatform uncleanSave;
+    uncleanSave.files[metadataPath] =
+        R"({"schemaVersion":1,"steamId":"146808034","fixedLength":4326608,"lastKnownSha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","activeSeedId":null,"placementSha256":null,"cleanExit":false})";
+    uncleanSave.hashes[savePath] =
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    const auto recoveredUncleanSave = ResolveBridgeConfiguration(uncleanSave);
+    if (!recoveredUncleanSave.ok) {
+        std::wcerr << L"unclean dedicated save was not accepted for recovery: "
+                   << recoveredUncleanSave.message << L'\n';
+        return 1;
+    }
+
+    FakePlatform malformedCleanExit;
+    malformedCleanExit.files[metadataPath] =
+        R"({"schemaVersion":1,"steamId":"146808034","fixedLength":4326608,"lastKnownSha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","activeSeedId":null,"placementSha256":null,"cleanExit":"false"})";
+    if (ResolveBridgeConfiguration(malformedCleanExit).error
+        != BridgeConfigurationError::MetadataInvalid) {
+        return Fail("non-boolean cleanExit metadata was not rejected");
+    }
+
     FakePlatform unsupportedSchema;
-    const auto metadataPath = Join(Join(Join(kRoot, L"saves"), L"146808034"),
-                                   L"save-metadata.json");
     unsupportedSchema.files[metadataPath] = R"({"schemaVersion":2})";
     if (ResolveBridgeConfiguration(unsupportedSchema).error
         != BridgeConfigurationError::UnsupportedMetadataSchema) {

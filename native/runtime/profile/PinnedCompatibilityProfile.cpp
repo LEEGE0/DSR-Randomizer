@@ -8,6 +8,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
@@ -303,7 +304,125 @@ void RetainDenyOnlyFatal(const char*) noexcept {
     // enters and retains deny-only mode before calling this reporter.
 }
 
+void PopulateSaveCallsiteProfile(
+    const HMODULE executableModule,
+    const std::shared_ptr<void>& identityLease,
+    Save::SaveCallsiteRedirectConfiguration& configuration) {
+    configuration = {};
+    configuration.identityLease = identityLease;
+    configuration.targets = {{
+        Save::SaveCallsiteRedirectTarget{
+            reinterpret_cast<std::byte*>(executableModule) + 0xD051DF,
+            {
+                0xff, 0x15, 0x57, 0x22, 0x31, 0x01,
+                0x48, 0x89, 0x46, 0x60, 0x48, 0x83, 0xf8, 0xff,
+            },
+            0,
+        },
+        Save::SaveCallsiteRedirectTarget{
+            reinterpret_cast<std::byte*>(executableModule) + 0xD045BF,
+            {
+                0x33, 0xd2, 0xff, 0x15, 0x75, 0x2e, 0x31, 0x01,
+                0x48, 0x8b, 0xf8, 0x40, 0xb6, 0x01,
+            },
+            2,
+        },
+    }};
+}
+
 }  // namespace
+
+#if defined(DSR_RANDOMIZER_RMM_BRIDGE_INTEGRATION_PROFILE)
+namespace {
+
+using IntegrationCallsiteProvider = bool (*) (
+    Save::SaveCallsiteRedirectTarget*, std::size_t);
+
+PinnedCompatibilityProfileStatus BuildIntegrationSaveCallsiteProfile(
+    Save::SaveCallsiteRedirectConfiguration& configuration) noexcept {
+    try {
+        configuration = {};
+        const auto executableModule = GetModuleHandleW(nullptr);
+        const auto provider = executableModule == nullptr
+            ? nullptr
+            : reinterpret_cast<IntegrationCallsiteProvider>(GetProcAddress(
+                executableModule, "DsrGetRmmBridgeIntegrationSaveCallsites"));
+        if (provider == nullptr
+            || !provider(configuration.targets.data(), configuration.targets.size())) {
+            configuration = {};
+            return PinnedCompatibilityProfileStatus::ProfileMismatch;
+        }
+        for (const auto& target : configuration.targets) {
+            if (target.address == nullptr
+                || target.callOffset > Save::kSaveCallsiteFingerprintSize - 6
+                || target.expected[target.callOffset] != 0xff
+                || target.expected[target.callOffset + 1] != 0x15
+                || std::memcmp(
+                    target.address,
+                    target.expected.data(),
+                    target.expected.size()) != 0) {
+                configuration = {};
+                return PinnedCompatibilityProfileStatus::ProfileMismatch;
+            }
+        }
+        return PinnedCompatibilityProfileStatus::Success;
+    }
+    catch (...) {
+        configuration = {};
+        return PinnedCompatibilityProfileStatus::InvalidConfiguration;
+    }
+}
+
+}  // namespace
+
+PinnedCompatibilityProfileStatus BuildPinnedSaveCallsiteProfile(
+    Save::SaveCallsiteRedirectConfiguration& configuration) noexcept {
+    return BuildIntegrationSaveCallsiteProfile(configuration);
+}
+#else
+PinnedCompatibilityProfileStatus BuildPinnedSaveCallsiteProfile(
+    Save::SaveCallsiteRedirectConfiguration& configuration) noexcept {
+    try {
+        using namespace Game::Generated;
+        configuration = {};
+        const auto executableModule = GetModuleHandleW(kExecutableModule);
+        if (executableModule == nullptr
+            || executableModule != GetModuleHandleW(nullptr)) {
+            return PinnedCompatibilityProfileStatus::ProfileMismatch;
+        }
+        const auto executablePath = ModulePath(executableModule);
+        if (executablePath.empty()) {
+            return PinnedCompatibilityProfileStatus::ProfileMismatch;
+        }
+        auto lease = std::make_shared<IdentityLease>();
+        lease->executable = OpenPinnedReadOnly(executablePath);
+        std::wstring executableCanonicalPath;
+        const ExpectedIdentity executableIdentity{
+            kExecutableLength,
+            kExecutableSha256,
+            kMachine,
+            kTimestamp,
+            kSizeOfImage,
+        };
+        if (lease->executable.value == INVALID_HANDLE_VALUE
+            || !ReadCanonicalPath(
+                lease->executable.value, executableCanonicalPath)
+            || !VerifyFile(lease->executable.value, executableIdentity)
+            || !VerifyMappedModule(
+                executableModule,
+                lease->executable.value,
+                executableIdentity)) {
+            return PinnedCompatibilityProfileStatus::ProfileMismatch;
+        }
+        PopulateSaveCallsiteProfile(executableModule, lease, configuration);
+        return PinnedCompatibilityProfileStatus::Success;
+    }
+    catch (...) {
+        configuration = {};
+        return PinnedCompatibilityProfileStatus::InvalidConfiguration;
+    }
+}
+#endif
 
 PinnedCompatibilityProfileStatus BuildPinnedCompatibilityProfile(
     PinnedCompatibilityProfile& profile) noexcept {
@@ -377,25 +496,8 @@ PinnedCompatibilityProfileStatus BuildPinnedCompatibilityProfile(
         }
 
         profile.identityLease = lease;
-        profile.saveRedirect.identityLease = lease;
-        profile.saveRedirect.targets = {{
-            Save::SaveCallsiteRedirectTarget{
-                reinterpret_cast<std::byte*>(executableModule) + 0xD051DF,
-                {
-                    0xff, 0x15, 0x57, 0x22, 0x31, 0x01,
-                    0x48, 0x89, 0x46, 0x60, 0x48, 0x83, 0xf8, 0xff,
-                },
-                0,
-            },
-            Save::SaveCallsiteRedirectTarget{
-                reinterpret_cast<std::byte*>(executableModule) + 0xD045BF,
-                {
-                    0x33, 0xd2, 0xff, 0x15, 0x75, 0x2e, 0x31, 0x01,
-                    0x48, 0x8b, 0xf8, 0x40, 0xb6, 0x01,
-                },
-                2,
-            },
-        }};
+        PopulateSaveCallsiteProfile(
+            executableModule, lease, profile.saveRedirect);
         profile.gameService.identityLease = lease;
         profile.gameService.images.push_back({
             kExecutableModule,

@@ -315,7 +315,8 @@ set_target_properties(RmmBridgeConfigurationTests PROPERTIES
 add_test(NAME RmmBridgeConfigurationTests COMMAND RmmBridgeConfigurationTests)
 
 add_executable(RmmBridgeBootstrapTests
-  tests/RmmBridgeBootstrapTests.cpp)
+  tests/RmmBridgeBootstrapTests.cpp
+  runtime/bridge/WindowsBridgePlatform.cpp)
 target_compile_features(RmmBridgeBootstrapTests PRIVATE cxx_std_20)
 target_link_libraries(RmmBridgeBootstrapTests
   PRIVATE
@@ -345,13 +346,38 @@ dsr_configure_target(DSRRandomizer.RmmBridgeLoaderFixture)
 set_target_properties(DSRRandomizer.RmmBridgeLoaderFixture PROPERTIES
   CXX_EXTENSIONS OFF)
 
+add_library(DSRRandomizer.RmmBridge.Integration SHARED
+  runtime/bridge/RmmBridgeEntry.cpp
+  runtime/bridge/WindowsBridgePlatform.cpp
+  runtime/bridge/WindowsBridgePlatform.h
+  runtime/profile/PinnedCompatibilityProfile.cpp)
+target_compile_features(DSRRandomizer.RmmBridge.Integration PRIVATE cxx_std_20)
+target_compile_definitions(DSRRandomizer.RmmBridge.Integration
+  PRIVATE
+    DSR_RANDOMIZER_RMM_BRIDGE_INTEGRATION_PROFILE=1)
+target_include_directories(DSRRandomizer.RmmBridge.Integration
+  PRIVATE
+    ${CMAKE_SOURCE_DIR}/native/runtime
+    ${CMAKE_SOURCE_DIR}/native/include
+    ${CMAKE_BINARY_DIR}/generated)
+target_link_libraries(DSRRandomizer.RmmBridge.Integration
+  PRIVATE
+    DSRRandomizer.RmmBridge.Core
+    DSRRandomizer.Runtime.Core
+    BCrypt
+    Shell32)
+dsr_configure_target(DSRRandomizer.RmmBridge.Integration)
+set_target_properties(DSRRandomizer.RmmBridge.Integration PROPERTIES
+  CXX_EXTENSIONS OFF
+  OUTPUT_NAME "DSRRandomizer.RmmBridge.Integration")
+
 add_test(
   NAME RmmBridgeIntegrationTests
   COMMAND pwsh -NoProfile -File
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/RunRmmBridgeIntegration.ps1
     -LoaderFixture $<TARGET_FILE:DSRRandomizer.RmmBridgeLoaderFixture>
     -HostFixture $<TARGET_FILE:DSRRandomizer.RmmBridgeHostFixture>
-    -BridgeDll $<TARGET_FILE:DSRRandomizer.RmmBridge>)
+    -BridgeDll $<TARGET_FILE:DSRRandomizer.RmmBridge.Integration>)
 
 add_executable(NetworkPolicyTests
   tests/NetworkPolicyTests.cpp)

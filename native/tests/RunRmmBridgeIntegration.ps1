@@ -16,6 +16,14 @@ $gamePath = Join-Path $runtimeRoot 'DarkSoulsRemastered.exe'
 $rmmPath = Join-Path $saveRoot 'DRAKS0005.rmm'
 $overhaulSource = Join-Path $runtimeRoot 'overhaul\GameParam.parambnd.dcx'
 $overhaulTarget = Join-Path $componentRoot 'content\overhaul\GameParam.parambnd.dcx'
+$documentsPath = [Environment]::GetFolderPath([Environment+SpecialFolder]::MyDocuments)
+$normalSavePath = Join-Path $documentsPath "NBGI\DARK SOULS REMASTERED\$steamId\DRAKS0005.sl2"
+$normalSaveExisted = Test-Path -LiteralPath $normalSavePath -PathType Leaf
+$normalSaveHash = if ($normalSaveExisted) {
+    (Get-FileHash -LiteralPath $normalSavePath -Algorithm SHA256).Hash
+} else {
+    $null
+}
 
 try {
     $virtualSaveRoot = Join-Path $testRoot "profile\NBGI\DARK SOULS REMASTERED\$steamId"
@@ -91,6 +99,12 @@ try {
     }
     if (Test-Path -LiteralPath (Join-Path $testRoot "profile\NBGI\DARK SOULS REMASTERED\$steamId\DRAKS0005.sl2")) {
         throw 'A virtual SL2 was created instead of redirecting to the RMM.'
+    }
+    if (-not $normalSaveExisted -and (Test-Path -LiteralPath $normalSavePath -PathType Leaf)) {
+        throw 'The normal Documents SL2 was created instead of redirecting to the RMM.'
+    }
+    if ($normalSaveExisted -and (Get-FileHash -LiteralPath $normalSavePath -Algorithm SHA256).Hash -cne $normalSaveHash) {
+        throw 'The pre-existing normal Documents SL2 changed instead of redirecting to the RMM.'
     }
 }
 finally {

@@ -10,14 +10,7 @@ $externalRootPath = [IO.Path]::GetFullPath($ExternalRoot).TrimEnd('\')
 if (-not (Test-Path -LiteralPath $externalRootPath -PathType Container)) {
     throw "External root does not exist: $externalRootPath"
 }
-
-function Read-StrictJson([string]$Path) {
-    $information = Get-Item -LiteralPath $Path
-    if ($information.Length -gt 65536) {
-        throw "Configuration is oversized: $Path"
-    }
-    return [IO.File]::ReadAllText($Path) | ConvertFrom-Json
-}
+Import-Module (Join-Path $PSScriptRoot 'RmmBridgeDeploymentState.psm1') -Force
 
 function Resolve-DeploymentState {
     $pointer = Read-StrictJson (Join-Path $externalRootPath 'runtime-current.json')
@@ -39,17 +32,10 @@ function Resolve-DeploymentState {
     }
     $saveRoot = Join-Path $externalRootPath "saves\$($selection.steamId)"
     $rmmPath = Join-Path $saveRoot 'DRAKS0005.rmm'
-    $metadata = Read-StrictJson (Join-Path $saveRoot 'save-metadata.json')
-    $rmm = Get-Item -LiteralPath $rmmPath
-    $rmmHash = (Get-FileHash -LiteralPath $rmmPath -Algorithm SHA256).Hash.ToLowerInvariant()
-    $metadataValid = $metadata.schemaVersion -eq 1 `
-        -and [string]$metadata.steamId -ceq [string]$selection.steamId `
-        -and $metadata.fixedLength -eq 4326608 `
-        -and $rmm.Length -eq 4326608 `
-        -and [string]$metadata.lastKnownSha256 -ceq $rmmHash
-    if (-not $metadataValid) {
-        throw 'The selected RMM and save metadata are not a clean matching pair.'
-    }
+    $saveState = Resolve-RmmBridgeDeploymentSaveState `
+        -RmmPath $rmmPath `
+        -MetadataPath (Join-Path $saveRoot 'save-metadata.json') `
+        -SteamId ([string]$selection.steamId)
     $tomlFiles = @(Get-ChildItem -LiteralPath (Join-Path $runtimeRoot 'Mods') `
         -Filter 'config_randomizer.toml' -File -Recurse | Where-Object {
             $_.Directory.Name -eq 'DS1EnemyRandomizer'
@@ -62,7 +48,7 @@ function Resolve-DeploymentState {
         RuntimeId = [string]$pointer.runtimeId
         SteamId = [string]$selection.steamId
         RmmPath = $rmmPath
-        RmmHash = $rmmHash
+        RmmHash = $saveState.ActualSha256
         TomlPath = $tomlFiles[0].FullName
     }
 }

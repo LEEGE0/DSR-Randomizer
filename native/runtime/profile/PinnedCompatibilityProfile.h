@@ -24,4 +24,8 @@ enum class PinnedCompatibilityProfileStatus {
 [[nodiscard]] PinnedCompatibilityProfileStatus
 BuildPinnedCompatibilityProfile(PinnedCompatibilityProfile& profile) noexcept;
 
+[[nodiscard]] PinnedCompatibilityProfileStatus
+BuildPinnedSaveCallsiteProfile(
+    Save::SaveCallsiteRedirectConfiguration& configuration) noexcept;
+
 }  // namespace DSRRandomizer::Profile
