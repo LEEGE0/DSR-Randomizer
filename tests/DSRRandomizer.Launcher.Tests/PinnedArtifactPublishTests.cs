@@ -238,6 +238,9 @@ public sealed class PinnedArtifactPublishTests : IDisposable
             Assert.Equal(entries.Length, entries.Distinct(StringComparer.Ordinal).Count());
             Assert.All(entries, entry => Assert.StartsWith(prefix, entry, StringComparison.Ordinal));
             Assert.Contains($"{prefix}DSR-Randomizer.sln", entries);
+            var revisionsEntry = Assert.Single(
+                archive.Entries,
+                entry => entry.FullName == $"{prefix}SOURCE_REVISIONS.json");
             Assert.Contains(
                 $"{prefix}src/DSRRandomizer.SoulsFormatsSubset/DSRRandomizer.SoulsFormatsSubset.csproj",
                 entries);
@@ -283,9 +286,28 @@ public sealed class PinnedArtifactPublishTests : IDisposable
                     .Where(path => !IsProhibitedSourceArchivePath(path))
                     .Select(path => $"{prefix}{submodulePath}/{path}"));
             }
+            expectedEntries.Add($"{prefix}SOURCE_REVISIONS.json");
             Assert.Equal(
                 expectedEntries.Order(StringComparer.Ordinal),
                 entries);
+
+            using var revisionsStream = revisionsEntry.Open();
+            using var revisions = await JsonDocument.ParseAsync(revisionsStream);
+            Assert.Equal(
+                ["schemaVersion", "mainRevision", "submodules"],
+                revisions.RootElement.EnumerateObject().Select(property => property.Name));
+            Assert.Equal(1, revisions.RootElement.GetProperty("schemaVersion").GetInt32());
+            Assert.Equal(
+                Assert.Single(await GitLinesAsync(repositoryRoot, "rev-parse", "HEAD")),
+                revisions.RootElement.GetProperty("mainRevision").GetString());
+            var submodules = revisions.RootElement.GetProperty("submodules");
+            Assert.Equal(
+                ExpectedSourceSubmodules.Select(submodule => submodule.Path),
+                submodules.EnumerateObject().Select(property => property.Name));
+            foreach (var (submodulePath, revision) in ExpectedSourceSubmodules)
+            {
+                Assert.Equal(revision, submodules.GetProperty(submodulePath).GetString());
+            }
         }
 
         AssertChecksumMatches(firstArchive);

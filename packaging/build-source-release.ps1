@@ -182,7 +182,21 @@ try {
             -DestinationPrefix "$rootPrefix$([string]$entry.Key)/"
     }
 
+    $revisionManifestSubmodules = [ordered]@{}
+    foreach ($entry in $submoduleRevisions.GetEnumerator()) {
+        $revisionManifestSubmodules[[string]$entry.Key] = [string]$entry.Value
+    }
+    $revisionManifest = [ordered]@{
+        schemaVersion = 1
+        mainRevision = $resolvedRevision
+        submodules = $revisionManifestSubmodules
+    } | ConvertTo-Json -Compress -Depth 3
+    $files.Add(
+        "${rootPrefix}SOURCE_REVISIONS.json",
+        [Text.UTF8Encoding]::new($false).GetBytes($revisionManifest))
+
     $requiredPaths = @(
+        "${rootPrefix}SOURCE_REVISIONS.json",
         "${rootPrefix}DSR-Randomizer.sln",
         "${rootPrefix}LICENSE",
         "${rootPrefix}packaging/build-source-release.ps1",
