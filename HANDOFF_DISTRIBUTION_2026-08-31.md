@@ -2,7 +2,7 @@
 
 ## 현재 상태
 
-재배포 파이프라인 구현과 Task 5 재검토는 코드 HEAD `478a0b3`에서 승인됐다. 승인 시 검증은 관리형 435/435, 네이티브 15/15였으며, 이전 계획의 385개는 역사적 기준선이다. Task 6 배포 검토에서 단일 파일 호스트의 무허가 DrSwizzler 포함을 발견했고, fix commit `a77a7d2`가 TPF/DrSwizzler 및 사용하지 않는 BouncyCastle 런타임을 제외하는 프로젝트 소유 SoulsFormats subset, 구조적 bundle/deps 검사, deterministic corresponding-source builder를 추가했다. 독립 privacy gate에서 subset의 Release CodeView path를 추가로 거부해 fix commit `4497070`이 Release-only symbol suppression과 Debug-PDB 보존 검사를 추가했다. 대응 소스 재검토 뒤 fix commit `24db7b0`이 ZstdNet/Zstandard의 정확한 upstream tree를 고정하고, 세 submodule 전체를 소스 ZIP에 넣으며, main/submodule 바이너리-소스 동일성 검사를 fail-closed로 추가했다. 최종 빌드가 260자를 넘는 staging 경로의 Win32 file lease 문제를 드러냈고 fix commit `8bfdf8d`가 extended-path 검증과 회귀 검사를 추가했다. 현재 전체 기준은 관리형 445개와 네이티브 15개다.
+재배포 파이프라인 구현과 Task 5 재검토는 코드 HEAD `478a0b3`에서 승인됐다. 승인 시 검증은 관리형 435/435, 네이티브 15/15였으며, 이전 계획의 385개는 역사적 기준선이다. Task 6 배포 검토에서 단일 파일 호스트의 무허가 DrSwizzler 포함을 발견했고, fix commit `a77a7d2`가 TPF/DrSwizzler 및 사용하지 않는 BouncyCastle 런타임을 제외하는 프로젝트 소유 SoulsFormats subset, 구조적 bundle/deps 검사, deterministic corresponding-source builder를 추가했다. 독립 privacy gate에서 subset의 Release CodeView path를 추가로 거부해 fix commit `4497070`이 Release-only symbol suppression과 Debug-PDB 보존 검사를 추가했다. 대응 소스 재검토 뒤 fix commit `24db7b0`이 ZstdNet/Zstandard의 정확한 upstream tree를 고정하고, 세 submodule 전체를 소스 ZIP에 넣으며, main/submodule 바이너리-소스 동일성 검사를 fail-closed로 추가했다. 최종 빌드가 260자를 넘는 staging 경로의 Win32 file lease 문제를 드러냈고 fix commit `8bfdf8d`가 extended-path 검증과 회귀 검사를 추가했다. 재검토에서 소스 fixture의 개인 식별자와 네 산출물의 순차 게시 위험을 발견해 fix commit `68a253f`가 중립 fixture, 다중 표현/인코딩 privacy gate, 목적지 로컬 4-file transaction과 완전 rollback 검사를 추가했다. 현재 전체 기준은 관리형 447개와 네이티브 15개다.
 
 배포 빌드는 저장소 루트에서 다음 한 경로로 만든다.
 
@@ -84,6 +84,8 @@ Steam Offline Mode는 수령자가 직접 설정해야 한다. 런처는 네트�
 - 브리지 호스트 Release 빌드는 private absolute PDB path를 넣지 않는다. Task 6의 byte-level privacy scan은 첫 빌드의 local PDB path를 거부했고, Debug build의 유용한 symbol 출력은 유지한다.
 - bridge-host 전용 SoulsFormats subset은 `Formats/TPF` 전체와 DrSwizzler를 제외한다. 사용하지 않는 BouncyCastle runtime도 제외하며, 필요한 BND3/PARAM/DCX_DFLT 경로와 ZstdNet/libzstd는 유지한다. official host의 .NET v6 bundle manifest와 embedded deps JSON을 직접 파싱해 제외 항목을 검증한다.
 - 공식 빌드 전에 main `HEAD`가 committed/clean인지 확인하고 nonignored untracked 입력을 거부한다. 재귀 submodule은 모두 초기화되고 각 gitlink와 정확히 일치하며 clean해야 한다. 바이너리 staging 뒤와 소스 archive 직전에도 동일 조건을 재검사하고, 네 산출물이 모두 성공하기 전에는 최종 경로로 게시하지 않는다. `artifacts`, `bin`, `obj` 같은 ignored 생성물은 이 검사에서 허용된다.
+- 소스와 바이너리 ZIP의 모든 엔트리는 알려진 reviewed profile/account marker를 plain, JSON-escaped, forward-slash/URI, UTF-8, UTF-16LE, UTF-16BE 형태로 검사한다. 프로젝트 소유 테스트 fixture는 중립 합성 값만 사용하며, 세 upstream submodule은 읽기 전용으로 별도 검사한다.
+- 네 산출물은 최종 출력과 같은 볼륨의 고유 transaction 디렉터리에 먼저 복사해 길이와 SHA-256을 확인한다. 기존 네 파일이 모두 있으면 전부 backup한 뒤 게시하고, 게시 중 실패하면 새로 옮긴 정확한 파일만 제거하고 기존 네 파일을 복구한다. 기존 파일이 일부만 있거나 stale transaction이 있으면 fail-closed다.
 - package validator의 Win32 file lease는 extended path를 사용한다. 따라서 reparse/identity 검사를 완화하지 않고도 260자를 넘는 안전한 고유 staging 경로를 검증한다.
 - staging과 새 ZIP 추출본 모두 패키지 validator를 통과해야 하며, ZIP 엔트리의 중복·루트 경로·역슬래시 별칭·점/상위 경로를 거부한다.
 

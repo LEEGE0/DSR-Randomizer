@@ -19,7 +19,7 @@
 - Production pinned executable verification must not gain an environment, command-line, or external-file bypass.
 - Bridge installation must not require a runtime pointer, save/profile state, Steam ID, or third-party randomizer installation.
 - Use version `0.1.0-alpha.2` and output binary and source ZIPs under `artifacts`, each with a matching `.sha256`.
-- Do not claim full success unless all 445 managed tests, all 15 native tests, clean-root tests, staged-package validation, extracted binary/source validation, privacy scan, dependency/notice compliance, extracted-source build, and both checksum verifications pass freshly.
+- Do not claim full success unless all 447 managed tests, all 15 native tests, clean-root tests, staged-package validation, extracted binary/source validation, privacy scan, dependency/notice compliance, extracted-source build, and both checksum verifications pass freshly.
 
 ---
 
@@ -422,7 +422,7 @@ The release helper must fail closed for dirty tracked or nonignored untracked ma
 
 - [ ] **Step 3: Run documentation and privacy preflight**
 
-Run fixed-string scans for each out-of-band private-root, private-worktree, and Steam-ID sentinel across every changed or added document. Also run:
+Run fixed-string scans for each out-of-band private-root, private-worktree, and Steam-ID sentinel across every changed or added document. The artifact privacy gate must also reject the reviewed local-profile and short-account sentinels in plain, JSON-escaped, forward-slash/URI, UTF-8, UTF-16LE, and UTF-16BE forms without storing a contiguous private marker in tracked scanner/test source. Also run:
 
 ```powershell
 $placeholderTerms = @(('T' + 'BD'), ('TO' + 'DO'), ('implement ' + 'later'))
@@ -442,7 +442,7 @@ Expected: the exact binary/source ZIP and `.sha256` paths from the spec.
 
 - [ ] **Step 5: Independently inspect the final ZIP and checksum**
 
-List every binary ZIP entry and compare it byte-for-byte with the 12-path allowlist. Extract to a new temporary directory, run the packaged launcher `--validate-package`, parse the official host's .NET v6 bundle manifest and embedded deps JSON, verify bundled dependencies have complete notices, and scan all extracted bytes for the out-of-band private-root, private-worktree, and Steam-ID sentinels. Independently inspect the source ZIP for a single prefix, sorted unique safe paths, fixed timestamps, a strict main/submodule revision manifest, committed subset/main solution/build scripts, full exact pinned SoulsFormatsNEXT, ZstdNet, and Zstandard source/build/license trees, and absence of Git/build/artifact/private state. Compare every archived file with the main tracked tree plus each pinned submodule tree. Extract to a short safe path and restore/build the bridge host. Recompute both ZIP SHA-256 values and compare them with their sidecars.
+List every binary ZIP entry and compare it byte-for-byte with the 12-path allowlist. Extract to a new temporary directory, run the packaged launcher `--validate-package`, parse the official host's .NET v6 bundle manifest and embedded deps JSON, verify bundled dependencies have complete notices, and scan all extracted bytes for the out-of-band private-root, private-worktree, and Steam-ID sentinels. Independently inspect the source ZIP for a single prefix, sorted unique safe paths, fixed timestamps, a strict main/submodule revision manifest, committed subset/main solution/build scripts, full exact pinned SoulsFormatsNEXT, ZstdNet, and Zstandard source/build/license trees, and absence of Git/build/artifact/private state. Compare every archived file with the main tracked tree plus each pinned submodule tree. Extract to a short safe path and restore/build the bridge host. Recompute both ZIP SHA-256 values and compare them with their sidecars. Exercise destination-local four-file publication with a controlled third-promotion fault and require byte-for-byte restoration of the complete prior set without transaction residue; also cover replacement, first publication, partial-set rejection, and stale-transaction rejection.
 
 - [ ] **Step 6: Run the final full verification gate**
 
@@ -451,7 +451,7 @@ dotnet test DSR-Randomizer.sln -c Release --no-restore
 pwsh -NoProfile -File scripts/build-native.ps1 -Configuration Release -Test
 ```
 
-Expected: 445/445 managed tests and 15/15 native tests pass, plus successful binary/source package and checksum checks from Steps 4-5.
+Expected: 447/447 managed tests and 15/15 native tests pass, plus successful binary/source package and checksum checks from Steps 4-5.
 
 - [ ] **Step 7: Commit documentation and release metadata without committing generated ZIPs unless repository policy already tracks them**
 

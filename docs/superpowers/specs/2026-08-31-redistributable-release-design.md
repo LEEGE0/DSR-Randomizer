@@ -70,7 +70,7 @@ The binary ZIP/checksum must be conveyed with this exact source ZIP/checksum, or
 
 Before any official binary build, the main repository must resolve to a committed `HEAD`; all tracked files and all nonignored untracked files must be clean. Ignored generated outputs such as `artifacts`, `bin`, and `obj` are permitted. Every recursive submodule must be initialized, at the exact gitlink revision, and clean, and the three release-contract revisions above must match exactly. Errors identify whether the main tree or a named submodule violates the invariant.
 
-The same invariant is checked after binary staging and again inside the source builder immediately before it archives committed objects. The builder stages the binary ZIP, source ZIP, and both sidecars privately and publishes none of the four final outputs until all construction and state checks succeed. Tests cover clean exact state, dirty tracked main state, a nonignored untracked compile input, an uninitialized submodule, a wrong submodule HEAD, and a dirty submodule using isolated temporary repositories.
+The same invariant is checked after binary staging and again inside the source builder immediately before it archives committed objects. The builder stages the binary ZIP, source ZIP, and both sidecars privately, then copies and hash-verifies all four within a unique transaction directory on the destination volume. A complete prior set is backed up before promotion; an ordinary failure removes only newly promoted exact outputs and restores all four prior files byte-for-byte. Partial prior sets and stale transactions fail closed. Tests cover clean exact state, dirty tracked main state, a nonignored untracked compile input, an uninitialized submodule, a wrong submodule HEAD, a dirty submodule, successful first/replacement publication, controlled third-promotion rollback, partial-set rejection, and stale-transaction rejection.
 
 The bridge manifest uses UTF-8 without a byte-order mark and this schema:
 
@@ -178,7 +178,7 @@ Release construction is one orchestration path that:
 
 The dependency manifest used to assemble .NET notices must come from the supplied launcher publish directory or its exact publish invocation, never the newest unrelated `obj/Release` file.
 
-Before delivery, an additional privacy scan checks the extracted package for the known private-root, private-worktree, and Steam-ID sentinels supplied outside committed documentation. The exact allowlist already excludes saves, logs, profiles, staging, seeds, spoilers, game files, and randomizer executables.
+Before delivery, an additional privacy scan checks every binary/source archive entry for reviewed local-profile and account sentinels. It covers plain Windows paths, JSON-escaped backslashes, forward-slash paths, file URIs, UTF-8, UTF-16LE, and UTF-16BE, while constructing the reviewed values from noncontiguous fragments in tracked scanner source. Project-owned fixtures use neutral synthetic identities; pinned upstream trees are audited read-only. The exact binary allowlist already excludes saves, logs, profiles, staging, seeds, spoilers, game files, and randomizer executables.
 
 ## Korean Installation Guide
 
