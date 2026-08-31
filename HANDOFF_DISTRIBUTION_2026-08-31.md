@@ -2,7 +2,7 @@
 
 ## 현재 상태
 
-재배포 파이프라인 구현과 Task 5 재검토는 코드 HEAD `478a0b3`에서 승인됐다. 승인 시 검증은 관리형 435/435, 네이티브 15/15였으며, 이전 계획의 385개는 역사적 기준선이다. Task 6 배포 검토에서 단일 파일 호스트의 무허가 DrSwizzler 포함을 발견했고, fix commit `a77a7d2`가 TPF/DrSwizzler 및 사용하지 않는 BouncyCastle 런타임을 제외하는 프로젝트 소유 SoulsFormats subset, 구조적 bundle/deps 검사, deterministic corresponding-source builder를 추가했다. 현재 전체 기준은 관리형 438개와 네이티브 15개다.
+재배포 파이프라인 구현과 Task 5 재검토는 코드 HEAD `478a0b3`에서 승인됐다. 승인 시 검증은 관리형 435/435, 네이티브 15/15였으며, 이전 계획의 385개는 역사적 기준선이다. Task 6 배포 검토에서 단일 파일 호스트의 무허가 DrSwizzler 포함을 발견했고, fix commit `a77a7d2`가 TPF/DrSwizzler 및 사용하지 않는 BouncyCastle 런타임을 제외하는 프로젝트 소유 SoulsFormats subset, 구조적 bundle/deps 검사, deterministic corresponding-source builder를 추가했다. 독립 privacy gate에서 subset의 Release CodeView path를 추가로 거부해 fix commit `4497070`이 Release-only symbol suppression과 Debug-PDB 보존 검사를 추가했다. 현재 전체 기준은 관리형 438개와 네이티브 15개다.
 
 배포 빌드는 저장소 루트에서 다음 한 경로로 만든다.
 
