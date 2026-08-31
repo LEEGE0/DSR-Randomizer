@@ -161,13 +161,15 @@ function New-RecoveryTransactionFixture {
             [byte[]]$PriorArtifacts.Bytes[$artifactNames[$index]])
     }
     $state = [ordered]@{
-        schemaVersion = 3
+        schemaVersion = 4
         phase = $Phase
         hadPriorSet = $true
         artifactNames = $artifactNames
         expectedArchiveHashes = $FinalArtifacts.ExpectedArchiveHashes
         expectedFinalBlobHashes = Get-ArtifactBlobHashes -Bytes $FinalArtifacts.Bytes
         backupBlobHashes = Get-ArtifactBlobHashes -Bytes $PriorArtifacts.Bytes
+        progress = if ($Phase -ceq 'Committed') { 'FinalVerified' } else { 'FinalsWritten' }
+        promotedIdentities = @('', '', '', '')
     }
     [IO.File]::WriteAllText(
         (Join-Path $transactionPath 'transaction-state.json'),
@@ -216,6 +218,57 @@ function Assert-PublicationFailed {
     if (-not $failed) {
         throw "Publication did not reject: $ExpectedMessage"
     }
+}
+
+function Wait-ForSignalFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][Diagnostics.Process]$Process
+    )
+
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    while (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        if ($Process.HasExited) {
+            $errorText = $Process.StandardError.ReadToEnd()
+            throw "Concurrent winner exited before acquiring the publication lock: $errorText"
+        }
+        if ($stopwatch.Elapsed -gt [TimeSpan]::FromSeconds(15)) {
+            throw "Timed out waiting for publication lock signal: $Path"
+        }
+        [Threading.Thread]::Sleep(20)
+    }
+}
+
+function Start-SynchronizedPublisher {
+    param(
+        [Parameter(Mandatory = $true)][string]$WorkerPath,
+        [Parameter(Mandatory = $true)][string]$StagingRoot,
+        [Parameter(Mandatory = $true)][string]$OutputRoot,
+        [Parameter(Mandatory = $true)][object]$Artifacts,
+        [Parameter(Mandatory = $true)][string]$ReadyPath,
+        [Parameter(Mandatory = $true)][string]$ReleasePath
+    )
+
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = Join-Path $PSHOME 'pwsh.exe'
+    $start.UseShellExecute = $false
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    foreach ($argument in @(
+            '-NoLogo',
+            '-NoProfile',
+            '-File',
+            $WorkerPath,
+            $modulePath,
+            $StagingRoot,
+            $OutputRoot,
+            [string]$Artifacts.ExpectedArchiveHashes[$artifactNames[0]],
+            [string]$Artifacts.ExpectedArchiveHashes[$artifactNames[2]],
+            $ReadyPath,
+            $ReleasePath)) {
+        $start.ArgumentList.Add($argument)
+    }
+    return [Diagnostics.Process]::Start($start)
 }
 
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) (
@@ -505,6 +558,141 @@ try {
     Assert-ArtifactSet -Expected $replacementArtifacts.Bytes -Root $replacementCase.OutputRoot
     Assert-NoTransactionResidue -OutputRoot $replacementCase.OutputRoot
 
+    $workerPath = Join-Path $testRoot 'synchronized-publisher.ps1'
+    $workerSource = @'
+param(
+    [string]$ModulePath,
+    [string]$StagingRoot,
+    [string]$OutputRoot,
+    [string]$BinaryHash,
+    [string]$SourceHash,
+    [string]$ReadyPath,
+    [string]$ReleasePath
+)
+$ErrorActionPreference = 'Stop'
+Import-Module $ModulePath -Force
+$names = @('binary.zip', 'binary.zip.sha256', 'source.zip', 'source.zip.sha256')
+$hashes = [ordered]@{
+    'binary.zip' = $BinaryHash
+    'source.zip' = $SourceHash
+}
+try {
+    Publish-ReleaseArtifactSet `
+        -StagingRoot $StagingRoot `
+        -OutputRoot $OutputRoot `
+        -ArtifactNames $names `
+        -ExpectedArchiveHashes $hashes `
+        -OperationHook {
+            param($Phase, $Index, $Name)
+            if ($Phase -eq 'AfterPublicationLockAcquired') {
+                [IO.File]::WriteAllText(
+                    $ReadyPath,
+                    'ready',
+                    [Text.UTF8Encoding]::new($false))
+                while (-not (Test-Path -LiteralPath $ReleasePath -PathType Leaf)) {
+                    [Threading.Thread]::Sleep(20)
+                }
+            }
+        }
+    exit 0
+}
+catch {
+    [Console]::Error.WriteLine($_.Exception.Message)
+    exit 1
+}
+'@
+    [IO.File]::WriteAllText(
+        $workerPath,
+        $workerSource,
+        [Text.UTF8Encoding]::new($false))
+
+    foreach ($withPriorSet in @($false, $true)) {
+        $caseName = if ($withPriorSet) {
+            'concurrent-with-prior'
+        }
+        else {
+            'concurrent-no-prior'
+        }
+        $concurrentCase = New-CaseDirectories -Root $testRoot -Name $caseName
+        $concurrentPrior = if ($withPriorSet) {
+            Write-ArtifactSet -Root $concurrentCase.OutputRoot -Prefix 'prior'
+        }
+        else {
+            $null
+        }
+        $winnerArtifacts = Write-ArtifactSet `
+            -Root $concurrentCase.StagingRoot `
+            -Prefix 'winner-a'
+        $loserStaging = Join-Path ([IO.Path]::GetDirectoryName($concurrentCase.StagingRoot)) 'staging-b'
+        [IO.Directory]::CreateDirectory($loserStaging) | Out-Null
+        $loserArtifacts = Write-ArtifactSet -Root $loserStaging -Prefix 'loser-b'
+        $loserCase = [pscustomobject]@{
+            StagingRoot = $loserStaging
+            OutputRoot = $concurrentCase.OutputRoot
+        }
+        $readyPath = Join-Path ([IO.Path]::GetDirectoryName($concurrentCase.StagingRoot)) 'winner.ready'
+        $releasePath = Join-Path ([IO.Path]::GetDirectoryName($concurrentCase.StagingRoot)) 'winner.release'
+        $winner = Start-SynchronizedPublisher `
+            -WorkerPath $workerPath `
+            -StagingRoot $concurrentCase.StagingRoot `
+            -OutputRoot $concurrentCase.OutputRoot `
+            -Artifacts $winnerArtifacts `
+            -ReadyPath $readyPath `
+            -ReleasePath $releasePath
+        try {
+            Wait-ForSignalFile -Path $readyPath -Process $winner
+            Assert-PublicationFailed `
+                -ExpectedMessage 'PUBLICATION_IN_PROGRESS' `
+                -Action {
+                    Invoke-TestPublication `
+                        -Case $loserCase `
+                        -ExpectedArchiveHashes $loserArtifacts.ExpectedArchiveHashes
+                }
+            if ($withPriorSet) {
+                Assert-ArtifactSet `
+                    -Expected $concurrentPrior.Bytes `
+                    -Root $concurrentCase.OutputRoot
+            }
+            else {
+                foreach ($name in $artifactNames) {
+                    if (Test-Path -LiteralPath (Join-Path $concurrentCase.OutputRoot $name)) {
+                        throw 'Concurrent loser changed the no-prior output set.'
+                    }
+                }
+            }
+            Assert-NoTransactionResidue -OutputRoot $concurrentCase.OutputRoot
+            [IO.File]::WriteAllText(
+                $releasePath,
+                'release',
+                [Text.UTF8Encoding]::new($false))
+            if (-not $winner.WaitForExit(15000)) {
+                $winner.Kill($true)
+                throw 'Concurrent winner did not exit after release.'
+            }
+            $winnerError = $winner.StandardError.ReadToEnd()
+            if ($winner.ExitCode -ne 0) {
+                throw "Concurrent winner failed: $winnerError"
+            }
+        }
+        finally {
+            if (-not $winner.HasExited) {
+                $winner.Kill($true)
+                $winner.WaitForExit()
+            }
+            $winner.Dispose()
+        }
+        Assert-ArtifactSet `
+            -Expected $winnerArtifacts.Bytes `
+            -Root $concurrentCase.OutputRoot
+        Invoke-TestPublication `
+            -Case $loserCase `
+            -ExpectedArchiveHashes $loserArtifacts.ExpectedArchiveHashes
+        Assert-ArtifactSet `
+            -Expected $loserArtifacts.Bytes `
+            -Root $concurrentCase.OutputRoot
+        Assert-NoTransactionResidue -OutputRoot $concurrentCase.OutputRoot
+    }
+
     foreach ($lockedBackupIndex in @(0, 3)) {
         $committedCleanupCase = New-CaseDirectories `
             -Root $testRoot `
@@ -583,6 +771,153 @@ try {
         Assert-OneCommittedTransaction -OutputRoot $cleanupFaultCase.OutputRoot
     }
 
+    foreach ($actualCleanupLockKind in @('journal', 'directory-ads')) {
+        $actualCleanupCase = New-CaseDirectories `
+            -Root $testRoot `
+            -Name "actual-cleanup-lock-$actualCleanupLockKind"
+        Write-ArtifactSet -Root $actualCleanupCase.OutputRoot -Prefix 'old' | Out-Null
+        $actualCleanupNew = Write-ArtifactSet `
+            -Root $actualCleanupCase.StagingRoot `
+            -Prefix 'new'
+        $actualCleanupLock = $null
+        try {
+            Assert-PublicationFailed `
+                -ExpectedMessage 'committed' `
+                -Action {
+                    Invoke-TestPublication `
+                        -Case $actualCleanupCase `
+                        -ExpectedArchiveHashes $actualCleanupNew.ExpectedArchiveHashes `
+                        -OperationHook {
+                            param($Phase, $Index, $Name)
+                            if ($actualCleanupLockKind -ceq 'journal' `
+                                    -and $Phase -eq 'BeforeCommittedJournalCleanup') {
+                                $transactionPath = @(Get-PublicationResidue `
+                                    -OutputRoot $actualCleanupCase.OutputRoot)[0].FullName
+                                $script:actualCleanupLock = [IO.File]::Open(
+                                    (Join-Path $transactionPath 'transaction-state.json'),
+                                    [IO.FileMode]::Open,
+                                    [IO.FileAccess]::Read,
+                                    [IO.FileShare]::Read)
+                            }
+                            elseif ($actualCleanupLockKind -ceq 'directory-ads' `
+                                    -and $Phase -eq 'BeforeCommittedDirectoryCleanup') {
+                                $transactionPath = @(Get-PublicationResidue `
+                                    -OutputRoot $actualCleanupCase.OutputRoot)[0].FullName
+                                $script:actualCleanupLock = [IO.File]::Open(
+                                    ($transactionPath + ':round6-cleanup-lock'),
+                                    [IO.FileMode]::OpenOrCreate,
+                                    [IO.FileAccess]::ReadWrite,
+                                    [IO.FileShare]::Read)
+                            }
+                        }
+                }
+            Assert-ArtifactSet `
+                -Expected $actualCleanupNew.Bytes `
+                -Root $actualCleanupCase.OutputRoot
+            Assert-OneCommittedTransaction -OutputRoot $actualCleanupCase.OutputRoot
+        }
+        finally {
+            if ($null -ne $actualCleanupLock) {
+                $actualCleanupLock.Dispose()
+            }
+        }
+        Invoke-TestPublication `
+            -Case $actualCleanupCase `
+            -ExpectedArchiveHashes $actualCleanupNew.ExpectedArchiveHashes
+        Assert-ArtifactSet `
+            -Expected $actualCleanupNew.Bytes `
+            -Root $actualCleanupCase.OutputRoot
+        Assert-NoTransactionResidue -OutputRoot $actualCleanupCase.OutputRoot
+    }
+
+    $journalMoveFailureCase = New-CaseDirectories `
+        -Root $testRoot `
+        -Name 'committed-journal-move-failure'
+    $journalMoveFailureOld = Write-ArtifactSet `
+        -Root $journalMoveFailureCase.OutputRoot `
+        -Prefix 'old'
+    $journalMoveFailureNew = Write-ArtifactSet `
+        -Root $journalMoveFailureCase.StagingRoot `
+        -Prefix 'new'
+    $journalMoveLock = $null
+    try {
+        Assert-PublicationFailed `
+            -ExpectedMessage 'Durable release transaction journal replacement failed' `
+            -Action {
+                Invoke-TestPublication `
+                    -Case $journalMoveFailureCase `
+                    -ExpectedArchiveHashes $journalMoveFailureNew.ExpectedArchiveHashes `
+                    -OperationHook {
+                        param($Phase, $Index, $Name)
+                        if ($Phase -eq 'BeforeJournalMove' -and $Name -ceq 'Committed') {
+                            $transactionPath = @(Get-PublicationResidue `
+                                -OutputRoot $journalMoveFailureCase.OutputRoot)[0].FullName
+                            $script:journalMoveLock = [IO.File]::Open(
+                                (Join-Path $transactionPath 'transaction-state.json'),
+                                [IO.FileMode]::Open,
+                                [IO.FileAccess]::Read,
+                                [IO.FileShare]::Read)
+                        }
+                        elseif ($Phase -eq 'AfterJournalMoveFailure' `
+                                -and $Name -ceq 'Committed' `
+                                -and $null -ne $script:journalMoveLock) {
+                            $script:journalMoveLock.Dispose()
+                            $script:journalMoveLock = $null
+                        }
+                    }
+            }
+    }
+    finally {
+        if ($null -ne $journalMoveLock) {
+            $journalMoveLock.Dispose()
+        }
+    }
+    Assert-ArtifactSet `
+        -Expected $journalMoveFailureOld.Bytes `
+        -Root $journalMoveFailureCase.OutputRoot
+    Assert-NoTransactionResidue -OutputRoot $journalMoveFailureCase.OutputRoot
+
+    $journalVerificationCase = New-CaseDirectories `
+        -Root $testRoot `
+        -Name 'committed-journal-verification-failure'
+    $journalVerificationOld = Write-ArtifactSet `
+        -Root $journalVerificationCase.OutputRoot `
+        -Prefix 'old'
+    $journalVerificationNew = Write-ArtifactSet `
+        -Root $journalVerificationCase.StagingRoot `
+        -Prefix 'new'
+    $sawRecoverablePreparedState = $false
+    Assert-PublicationFailed `
+        -ExpectedMessage 'controlled committed journal verification failure' `
+        -Action {
+            Invoke-TestPublication `
+                -Case $journalVerificationCase `
+                -ExpectedArchiveHashes $journalVerificationNew.ExpectedArchiveHashes `
+                -OperationHook {
+                    param($Phase, $Index, $Name)
+                    if ($Phase -eq 'BeforeJournalVerification' -and $Name -ceq 'Committed') {
+                        throw 'controlled committed journal verification failure'
+                    }
+                    if ($Phase -eq 'BeforePreparedRecovery') {
+                        $transactionPath = @(Get-PublicationResidue `
+                            -OutputRoot $journalVerificationCase.OutputRoot)[0].FullName
+                        $journal = Get-Content `
+                            -LiteralPath (Join-Path $transactionPath 'transaction-state.json') `
+                            -Raw | ConvertFrom-Json
+                        if ([string]$journal.phase -ceq 'Prepared') {
+                            $script:sawRecoverablePreparedState = $true
+                        }
+                    }
+                }
+        }
+    if (-not $sawRecoverablePreparedState) {
+        throw 'Committed journal verification failure did not retain recoverable Prepared state.'
+    }
+    Assert-ArtifactSet `
+        -Expected $journalVerificationOld.Bytes `
+        -Root $journalVerificationCase.OutputRoot
+    Assert-NoTransactionResidue -OutputRoot $journalVerificationCase.OutputRoot
+
     $newCase = New-CaseDirectories -Root $testRoot -Name 'new'
     $newArtifacts = Write-ArtifactSet -Root $newCase.StagingRoot -Prefix 'first'
     Invoke-TestPublication `
@@ -608,6 +943,91 @@ try {
         -Expected $partialBytes `
         -Path (Join-Path $partialCase.OutputRoot $artifactNames[0])
     Assert-NoTransactionResidue -OutputRoot $partialCase.OutputRoot
+
+    $unrelatedRecoveryCase = New-CaseDirectories `
+        -Root $testRoot `
+        -Name 'prepared-unrelated-current-set'
+    $unrelatedRecoveryOld = Write-ArtifactSet `
+        -Root $unrelatedRecoveryCase.OutputRoot `
+        -Prefix 'old-a'
+    $unrelatedRecoveryNew = Write-ArtifactSet `
+        -Root $unrelatedRecoveryCase.StagingRoot `
+        -Prefix 'expected-b'
+    New-RecoveryTransactionFixture `
+        -OutputRoot $unrelatedRecoveryCase.OutputRoot `
+        -Phase 'Prepared' `
+        -PriorArtifacts $unrelatedRecoveryOld `
+        -FinalArtifacts $unrelatedRecoveryNew | Out-Null
+    $unrelatedFixtureRoot = Join-Path $testRoot 'unrelated-current-c'
+    [IO.Directory]::CreateDirectory($unrelatedFixtureRoot) | Out-Null
+    $unrelatedCurrent = Write-ArtifactSet `
+        -Root $unrelatedFixtureRoot `
+        -Prefix 'unrelated-c'
+    Write-ArtifactBytes `
+        -Root $unrelatedRecoveryCase.OutputRoot `
+        -Bytes $unrelatedCurrent.Bytes
+    Assert-PublicationFailed `
+        -ExpectedMessage 'does not belong to the Prepared transaction' `
+        -Action {
+            Invoke-TestPublication `
+                -Case $unrelatedRecoveryCase `
+                -ExpectedArchiveHashes $unrelatedRecoveryNew.ExpectedArchiveHashes
+        }
+    Assert-ArtifactSet `
+        -Expected $unrelatedCurrent.Bytes `
+        -Root $unrelatedRecoveryCase.OutputRoot
+    $unrelatedResidue = @(Get-PublicationResidue `
+        -OutputRoot $unrelatedRecoveryCase.OutputRoot)
+    if ($unrelatedResidue.Count -ne 1) {
+        throw 'Unrelated Prepared recovery did not retain exactly one fail-closed transaction.'
+    }
+    $unrelatedJournal = Get-Content `
+        -LiteralPath (Join-Path $unrelatedResidue[0].FullName 'transaction-state.json') `
+        -Raw | ConvertFrom-Json
+    if ([string]$unrelatedJournal.phase -cne 'Prepared') {
+        throw 'Unrelated Prepared recovery did not retain Prepared state.'
+    }
+
+    $partialRecoveryCase = New-CaseDirectories `
+        -Root $testRoot `
+        -Name 'prepared-partial-owned-set'
+    $partialRecoveryOld = Write-ArtifactSet `
+        -Root $partialRecoveryCase.OutputRoot `
+        -Prefix 'old'
+    $partialRecoveryNew = Write-ArtifactSet `
+        -Root $partialRecoveryCase.StagingRoot `
+        -Prefix 'new'
+    New-RecoveryTransactionFixture `
+        -OutputRoot $partialRecoveryCase.OutputRoot `
+        -Phase 'Prepared' `
+        -PriorArtifacts $partialRecoveryOld `
+        -FinalArtifacts $partialRecoveryNew | Out-Null
+    foreach ($name in $artifactNames) {
+        [IO.File]::Delete((Join-Path $partialRecoveryCase.OutputRoot $name))
+    }
+    [IO.File]::WriteAllBytes(
+        (Join-Path $partialRecoveryCase.OutputRoot $artifactNames[0]),
+        [byte[]]$partialRecoveryOld.Bytes[$artifactNames[0]])
+    [IO.File]::WriteAllBytes(
+        (Join-Path $partialRecoveryCase.OutputRoot $artifactNames[2]),
+        [byte[]]$partialRecoveryNew.Bytes[$artifactNames[2]])
+    Assert-PublicationFailed `
+        -ExpectedMessage 'controlled stop after recovery' `
+        -Action {
+            Invoke-TestPublication `
+                -Case $partialRecoveryCase `
+                -ExpectedArchiveHashes $partialRecoveryNew.ExpectedArchiveHashes `
+                -OperationHook {
+                    param($Phase, $Index, $Name)
+                    if ($Phase -eq 'AfterRecovery') {
+                        throw 'controlled stop after recovery'
+                    }
+                }
+        }
+    Assert-ArtifactSet `
+        -Expected $partialRecoveryOld.Bytes `
+        -Root $partialRecoveryCase.OutputRoot
+    Assert-NoTransactionResidue -OutputRoot $partialRecoveryCase.OutputRoot
 
     $preparedRecoveryCase = New-CaseDirectories -Root $testRoot -Name 'prepared-recovery'
     $preparedRecoveryOld = Write-ArtifactSet `

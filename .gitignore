@@ -37,6 +37,7 @@ seed-*/
 spoiler-*.txt
 *.zip
 *.sha256
+.dsr-release-publication.lock
 
 # Operating-system files
 Thumbs.db

@@ -247,6 +247,246 @@ namespace DSRRandomizer.Packaging
             uint filePathLength,
             uint flags);
     }
+
+    public sealed class ReleasePublicationLock : IDisposable
+    {
+        private FileStream stream;
+        private bool disposed;
+
+        private ReleasePublicationLock(string path, FileStream stream)
+        {
+            Path = path;
+            this.stream = stream;
+        }
+
+        public string Path { get; }
+
+        public static ReleasePublicationLock Acquire(string outputRoot)
+        {
+            var canonicalRoot = System.IO.Path.TrimEndingDirectorySeparator(
+                System.IO.Path.GetFullPath(outputRoot));
+            var lockPath = System.IO.Path.Combine(
+                canonicalRoot,
+                ".dsr-release-publication.lock");
+            var handle = CreateFileW(
+                lockPath,
+                GenericRead | GenericWrite,
+                0,
+                IntPtr.Zero,
+                OpenAlways,
+                OpenReparsePoint | WriteThrough,
+                IntPtr.Zero);
+            if (handle.IsInvalid)
+            {
+                var error = Marshal.GetLastWin32Error();
+                handle.Dispose();
+                if (error == SharingViolation || error == LockViolation)
+                {
+                    throw new InvalidOperationException(
+                        $"PUBLICATION_IN_PROGRESS: another release publication owns the output root lock: {canonicalRoot}");
+                }
+                throw new IOException(
+                    $"Unable to acquire the release publication lock: {lockPath}",
+                    new Win32Exception(error));
+            }
+
+            FileStream lockStream = null;
+            try
+            {
+                if (!GetFileInformationByHandle(handle, out var information))
+                {
+                    throw new IOException(
+                        $"Unable to inspect the release publication lock: {lockPath}",
+                        new Win32Exception(Marshal.GetLastWin32Error()));
+                }
+                var attributes = (FileAttributes)information.FileAttributes;
+                if ((attributes & FileAttributes.Directory) != 0
+                    || (attributes & FileAttributes.ReparsePoint) != 0)
+                {
+                    throw new UnauthorizedAccessException(
+                        $"The release publication lock is a reparse point or not a regular file: {lockPath}");
+                }
+                if (information.NumberOfLinks != 1)
+                {
+                    throw new UnauthorizedAccessException(
+                        $"The release publication lock has multiple hard links: {lockPath}");
+                }
+                var finalPath = ResolveFinalPath(handle);
+                if (!finalPath.Equals(
+                        System.IO.Path.GetFullPath(lockPath),
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new UnauthorizedAccessException(
+                        $"The release publication lock resolves outside its lexical path: {lockPath}");
+                }
+
+                lockStream = new FileStream(handle, FileAccess.ReadWrite, 4096, false);
+                if (lockStream.Length != 0)
+                {
+                    throw new InvalidDataException(
+                        $"The persistent release publication lock must be empty: {lockPath}");
+                }
+                return new ReleasePublicationLock(lockPath, lockStream);
+            }
+            catch
+            {
+                if (lockStream != null)
+                {
+                    lockStream.Dispose();
+                }
+                else
+                {
+                    handle.Dispose();
+                }
+                throw;
+            }
+        }
+
+        public void Dispose()
+        {
+            if (disposed)
+            {
+                return;
+            }
+            disposed = true;
+            stream.Dispose();
+            stream = null;
+        }
+
+        private static string ResolveFinalPath(SafeFileHandle handle)
+        {
+            var capacity = 512;
+            while (true)
+            {
+                var buffer = new StringBuilder(capacity);
+                var length = GetFinalPathNameByHandleW(handle, buffer, (uint)capacity, 0);
+                if (length == 0)
+                {
+                    throw new IOException(
+                        "Unable to resolve the release publication lock identity.",
+                        new Win32Exception(Marshal.GetLastWin32Error()));
+                }
+                if (length < capacity)
+                {
+                    return Normalize(buffer.ToString());
+                }
+                capacity = checked((int)length + 1);
+            }
+        }
+
+        private static string Normalize(string path)
+        {
+            const string uncPrefix = @"\\?\UNC\";
+            const string devicePrefix = @"\\?\";
+            var value = path;
+            if (value.StartsWith(uncPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                value = @"\\" + value.Substring(uncPrefix.Length);
+            }
+            else if (value.StartsWith(devicePrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                value = value.Substring(devicePrefix.Length);
+            }
+            return System.IO.Path.GetFullPath(value);
+        }
+
+        private const uint GenericRead = 0x80000000;
+        private const uint GenericWrite = 0x40000000;
+        private const uint OpenAlways = 4;
+        private const uint OpenReparsePoint = 0x00200000;
+        private const uint WriteThrough = 0x80000000;
+        private const int SharingViolation = 32;
+        private const int LockViolation = 33;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ByHandleFileInformation
+        {
+            public uint FileAttributes;
+            public uint CreationTimeLow;
+            public uint CreationTimeHigh;
+            public uint LastAccessTimeLow;
+            public uint LastAccessTimeHigh;
+            public uint LastWriteTimeLow;
+            public uint LastWriteTimeHigh;
+            public uint VolumeSerialNumber;
+            public uint FileSizeHigh;
+            public uint FileSizeLow;
+            public uint NumberOfLinks;
+            public uint FileIndexHigh;
+            public uint FileIndexLow;
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern SafeFileHandle CreateFileW(
+            string fileName,
+            uint desiredAccess,
+            uint shareMode,
+            IntPtr securityAttributes,
+            uint creationDisposition,
+            uint flagsAndAttributes,
+            IntPtr templateFile);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetFileInformationByHandle(
+            SafeFileHandle file,
+            out ByHandleFileInformation fileInformation);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern uint GetFinalPathNameByHandleW(
+            SafeFileHandle file,
+            StringBuilder filePath,
+            uint filePathLength,
+            uint flags);
+    }
+
+    public static class ReleaseJournalPersistence
+    {
+        public static void ReplaceWriteThrough(string sourcePath, string destinationPath)
+        {
+            var source = System.IO.Path.GetFullPath(sourcePath);
+            var destination = System.IO.Path.GetFullPath(destinationPath);
+            if (!System.IO.Path.GetDirectoryName(source).Equals(
+                    System.IO.Path.GetDirectoryName(destination),
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    "Release journal replacement must stay within one transaction directory.");
+            }
+            if (!MoveFileExW(
+                    ToExtendedPath(source),
+                    ToExtendedPath(destination),
+                    MoveFileReplaceExisting | MoveFileWriteThrough))
+            {
+                throw new IOException(
+                    $"Durable release transaction journal replacement failed: {destination}",
+                    new Win32Exception(Marshal.GetLastWin32Error()));
+            }
+        }
+
+        private static string ToExtendedPath(string path)
+        {
+            if (path.StartsWith(@"\\?\", StringComparison.Ordinal))
+            {
+                return path;
+            }
+            if (path.StartsWith(@"\\", StringComparison.Ordinal))
+            {
+                return @"\\?\UNC\" + path.Substring(2);
+            }
+            return @"\\?\" + path;
+        }
+
+        private const uint MoveFileReplaceExisting = 0x00000001;
+        private const uint MoveFileWriteThrough = 0x00000008;
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool MoveFileExW(
+            string existingFileName,
+            string newFileName,
+            uint flags);
+    }
 }
 '@
 }
@@ -269,7 +509,9 @@ function Assert-RegularArtifactFile {
 function Set-ReleaseTransactionState {
     param(
         [Parameter(Mandatory = $true)][string]$TransactionRoot,
-        [Parameter(Mandatory = $true)][Collections.IDictionary]$State
+        [Parameter(Mandatory = $true)][Collections.IDictionary]$State,
+        [Parameter(Mandatory = $false)][scriptblock]$OperationHook,
+        [Parameter(Mandatory = $false)][Collections.IDictionary]$FallbackState
     )
 
     $statePath = Join-Path $TransactionRoot 'transaction-state.json'
@@ -277,6 +519,7 @@ function Set-ReleaseTransactionState {
         'transaction-state.' + [Guid]::NewGuid().ToString('N') + '.next')
     $json = $State | ConvertTo-Json -Compress -Depth 4
     $bytes = [Text.UTF8Encoding]::new($false).GetBytes($json)
+    $phase = [string]$State.phase
     try {
         $stream = [IO.FileStream]::new(
             $temporaryStatePath,
@@ -296,7 +539,73 @@ function Set-ReleaseTransactionState {
             $temporaryStatePath,
             'temporary release transaction journal')
         $journalLease.Dispose()
-        [IO.File]::Move($temporaryStatePath, $statePath, $true)
+        Invoke-PromotionHook `
+            -OperationHook $OperationHook `
+            -Phase 'BeforeJournalMove' `
+            -Index -1 `
+            -Name $phase
+        try {
+            [DSRRandomizer.Packaging.ReleaseJournalPersistence]::ReplaceWriteThrough(
+                $temporaryStatePath,
+                $statePath)
+        }
+        catch {
+            try {
+                Invoke-PromotionHook `
+                    -OperationHook $OperationHook `
+                    -Phase 'AfterJournalMoveFailure' `
+                    -Index -1 `
+                    -Name $phase
+            }
+            catch {
+                # Preserve the durable-move failure as the primary publication error.
+            }
+            throw
+        }
+
+        try {
+            Invoke-PromotionHook `
+                -OperationHook $OperationHook `
+                -Phase 'BeforeJournalVerification' `
+                -Index -1 `
+                -Name $phase
+            $liveLease = [DSRRandomizer.Packaging.ReleaseArtifactLease]::Acquire(
+                $statePath,
+                'durably replaced release transaction journal')
+            try {
+                $expectedHash = [Convert]::ToHexString(
+                    [Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+                if ($liveLease.ComputeSha256() -cne $expectedHash) {
+                    throw 'Durably replaced release transaction journal bytes do not match the requested state.'
+                }
+            }
+            finally {
+                $liveLease.Dispose()
+            }
+            $verifiedState = Read-ReleaseTransactionState `
+                -TransactionRoot $TransactionRoot `
+                -Names @($State.artifactNames)
+            if ($verifiedState.Phase -cne $phase) {
+                throw "Durably replaced release transaction journal did not verify phase '$phase'."
+            }
+            return $verifiedState
+        }
+        catch {
+            $verificationFailure = $_.Exception
+            if ($null -ne $FallbackState) {
+                try {
+                    Set-ReleaseTransactionState `
+                        -TransactionRoot $TransactionRoot `
+                        -State $FallbackState | Out-Null
+                }
+                catch {
+                    throw [IO.IOException]::new(
+                        "Release transaction journal verification failed and durable Prepared fallback also failed. Verification failure: $($verificationFailure.Message) Fallback failure: $($_.Exception.Message)",
+                        $verificationFailure)
+                }
+            }
+            throw $verificationFailure
+        }
     }
     finally {
         if (Test-Path -LiteralPath $temporaryStatePath -PathType Leaf) {
@@ -508,13 +817,15 @@ function Read-ReleaseTransactionState {
         'artifactNames',
         'expectedArchiveHashes',
         'expectedFinalBlobHashes',
-        'backupBlobHashes')
+        'backupBlobHashes',
+        'progress',
+        'promotedIdentities')
     $actualProperties = @($state.PSObject.Properties.Name)
     if ($actualProperties.Count -ne $expectedProperties.Count `
             -or @(Compare-Object $expectedProperties $actualProperties -CaseSensitive).Count -ne 0) {
         throw 'Release transaction journal has an unexpected schema.'
     }
-    if ([int]$state.schemaVersion -ne 3 `
+    if ([int]$state.schemaVersion -ne 4 `
             -or @('Prepared', 'Committed') -cnotcontains [string]$state.phase `
             -or $state.hadPriorSet -isnot [bool]) {
         throw 'Release transaction journal has invalid version, phase, or prior-set state.'
@@ -551,6 +862,26 @@ function Read-ReleaseTransactionState {
         }
         $backupBlobHashes = [ordered]@{}
     }
+    $progress = [string]$state.progress
+    if (@(
+            'BackupsVerified',
+            'PriorRemoved',
+            'Publishing',
+            'FinalsWritten',
+            'FinalVerified') -cnotcontains $progress) {
+        throw 'Release transaction journal has invalid output progress.'
+    }
+    $promotedIdentities = @($state.promotedIdentities)
+    if ($promotedIdentities.Count -ne $Names.Count) {
+        throw 'Release transaction journal has an invalid promoted identity count.'
+    }
+    for ($index = 0; $index -lt $promotedIdentities.Count; $index++) {
+        $identity = [string]$promotedIdentities[$index]
+        if ($identity.Length -ne 0 -and $identity -cnotmatch '^[0-9a-f]{8}:[0-9a-f]{16}$') {
+            throw "Release transaction journal has an invalid promoted identity at index $index."
+        }
+        $promotedIdentities[$index] = $identity
+    }
 
     return [pscustomobject]@{
         Phase = [string]$state.phase
@@ -558,6 +889,19 @@ function Read-ReleaseTransactionState {
         ExpectedArchiveHashes = $expectedArchiveHashes
         ExpectedFinalBlobHashes = $expectedFinalBlobHashes
         BackupBlobHashes = $backupBlobHashes
+        Progress = $progress
+        PromotedIdentities = $promotedIdentities
+        SerializableState = [ordered]@{
+            schemaVersion = 4
+            phase = [string]$state.phase
+            hadPriorSet = [bool]$state.hadPriorSet
+            artifactNames = @($journalNames)
+            expectedArchiveHashes = $expectedArchiveHashes
+            expectedFinalBlobHashes = $expectedFinalBlobHashes
+            backupBlobHashes = $backupBlobHashes
+            progress = $progress
+            promotedIdentities = @($promotedIdentities)
+        }
     }
 }
 
@@ -661,6 +1005,99 @@ function Open-VerifiedBackupLeases {
     }
 }
 
+function Assert-PreparedCurrentArtifactOwnership {
+    param(
+        [Parameter(Mandatory = $true)][string]$OutputRoot,
+        [Parameter(Mandatory = $true)][string[]]$Names,
+        [Parameter(Mandatory = $true)][object]$State
+    )
+
+    $current = [Collections.Generic.List[object]]::new()
+    try {
+        for ($index = 0; $index -lt $Names.Count; $index++) {
+            $path = Join-Path $OutputRoot $Names[$index]
+            if (-not (Test-Path -LiteralPath $path)) {
+                continue
+            }
+            $lease = [DSRRandomizer.Packaging.ReleaseArtifactLease]::Acquire(
+                $path,
+                'current artifact inspected for Prepared recovery')
+            $current.Add([pscustomobject]@{
+                    Index = $index
+                    Lease = $lease
+                    Hash = $lease.ComputeSha256()
+                })
+        }
+
+        foreach ($item in $current) {
+            $name = $Names[$item.Index]
+            $matchesNew = $item.Hash -ceq $State.ExpectedFinalBlobHashes[$name]
+            $matchesPrior = $State.HadPriorSet `
+                -and $item.Hash -ceq $State.BackupBlobHashes[$name]
+            $matchesPromotedIdentity = `
+                -not [string]::IsNullOrEmpty($State.PromotedIdentities[$item.Index]) `
+                -and $item.Lease.Identity -ceq $State.PromotedIdentities[$item.Index]
+            if (-not $matchesNew -and -not $matchesPrior -and -not $matchesPromotedIdentity) {
+                throw "Current release artifact '$name' does not belong to the Prepared transaction."
+            }
+        }
+
+        if ($current.Count -eq $Names.Count) {
+            $allNew = $true
+            $allPrior = $State.HadPriorSet
+            foreach ($item in $current) {
+                $name = $Names[$item.Index]
+                $allNew = $allNew `
+                    -and $item.Hash -ceq $State.ExpectedFinalBlobHashes[$name]
+                $allPrior = $allPrior `
+                    -and $item.Hash -ceq $State.BackupBlobHashes[$name]
+            }
+            if ($allNew) {
+                $orderedLeases = [Collections.Generic.List[object]]::new()
+                foreach ($item in $current | Sort-Object Index) {
+                    $orderedLeases.Add($item.Lease)
+                }
+                $hashes = Assert-LeasedArtifactSet `
+                    -Names $Names `
+                    -Leases $orderedLeases `
+                    -ExpectedArchiveHashes $State.ExpectedArchiveHashes `
+                    -Description 'Prepared current new release'
+                Assert-BlobHashesEqual `
+                    -Names $Names `
+                    -Actual $hashes `
+                    -Expected $State.ExpectedFinalBlobHashes `
+                    -Description 'Prepared current new release'
+            }
+            elseif ($allPrior) {
+                $orderedLeases = [Collections.Generic.List[object]]::new()
+                foreach ($item in $current | Sort-Object Index) {
+                    $orderedLeases.Add($item.Lease)
+                }
+                $priorArchiveHashes = [ordered]@{
+                    $Names[0] = $State.BackupBlobHashes[$Names[0]]
+                    $Names[2] = $State.BackupBlobHashes[$Names[2]]
+                }
+                $hashes = Assert-LeasedArtifactSet `
+                    -Names $Names `
+                    -Leases $orderedLeases `
+                    -ExpectedArchiveHashes $priorArchiveHashes `
+                    -Description 'Prepared current prior release'
+                Assert-BlobHashesEqual `
+                    -Names $Names `
+                    -Actual $hashes `
+                    -Expected $State.BackupBlobHashes `
+                    -Description 'Prepared current prior release'
+            }
+        }
+    }
+    finally {
+        for ($index = $current.Count - 1; $index -ge 0; $index--) {
+            $current[$index].Lease.Dispose()
+        }
+        $current.Clear()
+    }
+}
+
 function Restore-PreparedReleaseTransaction {
     param(
         [Parameter(Mandatory = $true)][object]$Transaction,
@@ -673,12 +1110,21 @@ function Restore-PreparedReleaseTransaction {
     $backupLeases = [Collections.Generic.List[object]]::new()
     $restoredLeases = [Collections.Generic.List[object]]::new()
     try {
+        Invoke-PromotionHook `
+            -OperationHook $OperationHook `
+            -Phase 'BeforePreparedRecovery' `
+            -Index -1 `
+            -Name ''
         if ($State.HadPriorSet) {
             $backupLeases = Open-VerifiedBackupLeases `
                 -Transaction $Transaction `
                 -Names $Names `
                 -BackupBlobHashes $State.BackupBlobHashes
         }
+        Assert-PreparedCurrentArtifactOwnership `
+            -OutputRoot $OutputRoot `
+            -Names $Names `
+            -State $State
         Remove-ExactReleaseArtifacts `
             -Root $OutputRoot `
             -Names $Names `
@@ -732,6 +1178,7 @@ function Remove-CommittedReleaseTransaction {
     param(
         [Parameter(Mandatory = $true)][object]$Transaction,
         [Parameter(Mandatory = $true)][string[]]$Names,
+        [Parameter(Mandatory = $true)][Collections.IDictionary]$State,
         [Parameter(Mandatory = $false)][scriptblock]$OperationHook
     )
 
@@ -759,7 +1206,34 @@ function Remove-CommittedReleaseTransaction {
         -Phase 'BeforeCommittedDirectoryCleanup' `
         -Index -1 `
         -Name ''
-    Remove-SafeReleaseDirectory -Directory $Transaction
+    try {
+        Remove-SafeReleaseDirectory -Directory $Transaction
+    }
+    catch {
+        $cleanupFailure = $_.Exception
+        if (Test-Path -LiteralPath $Transaction.Path -PathType Container) {
+            if ($null -eq $Transaction.Lease) {
+                $reopened = Open-ExistingReleaseTransaction `
+                    -Path $Transaction.Path `
+                    -OutputRoot $Transaction.Root
+                $Transaction.Lease = $reopened.Lease
+            }
+            $statePath = Join-Path $Transaction.Path 'transaction-state.json'
+            if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
+                try {
+                    Set-ReleaseTransactionState `
+                        -TransactionRoot $Transaction.Path `
+                        -State $State | Out-Null
+                }
+                catch {
+                    throw [IO.IOException]::new(
+                        "Committed transaction cleanup failed and its durable Committed journal could not be recreated. Cleanup failure: $($cleanupFailure.Message) Journal failure: $($_.Exception.Message)",
+                        $cleanupFailure)
+                }
+            }
+        }
+        throw $cleanupFailure
+    }
 }
 
 function Repair-ReleasePublicationState {
@@ -817,6 +1291,7 @@ function Repair-ReleasePublicationState {
             Remove-CommittedReleaseTransaction `
                 -Transaction $transaction `
                 -Names $Names `
+                -State $state.SerializableState `
                 -OperationHook $OperationHook
             $transaction = $null
         }
@@ -874,6 +1349,7 @@ function Publish-ReleaseArtifactSet {
     $priorLeases = [Collections.Generic.List[object]]::new()
     $backupLeases = [Collections.Generic.List[object]]::new()
     $finalLeases = [Collections.Generic.List[object]]::new()
+    $publicationLock = $null
     $committed = $false
     try {
         $outputDirectory = Open-SafeReleaseRoot -Path $OutputRoot
@@ -882,6 +1358,14 @@ function Publish-ReleaseArtifactSet {
                 [StringComparison]::OrdinalIgnoreCase)) {
             throw 'Release staging and output roots must be different directories.'
         }
+
+        $publicationLock = [DSRRandomizer.Packaging.ReleasePublicationLock]::Acquire(
+            $outputDirectory.Path)
+        Invoke-PromotionHook `
+            -OperationHook $OperationHook `
+            -Phase 'AfterPublicationLockAcquired' `
+            -Index -1 `
+            -Name ''
 
         Repair-ReleasePublicationState `
             -OutputDirectory $outputDirectory `
@@ -951,17 +1435,20 @@ function Publish-ReleaseArtifactSet {
             }
 
             $state = [ordered]@{
-                schemaVersion = 3
+                schemaVersion = 4
                 phase = 'Prepared'
                 hadPriorSet = $hasPriorSet
                 artifactNames = @($names)
                 expectedArchiveHashes = $validatedExpectedHashes
                 expectedFinalBlobHashes = $stagedBlobHashes
                 backupBlobHashes = $priorBlobHashes
+                progress = 'BackupsVerified'
+                promotedIdentities = @('', '', '', '')
             }
             Set-ReleaseTransactionState `
                 -TransactionRoot $transaction.Path `
-                -State $state
+                -State $state `
+                -OperationHook $OperationHook | Out-Null
 
             Close-ReleaseArtifactLeases -Leases $priorLeases
             for ($index = 0; $index -lt $names.Count; $index++) {
@@ -982,6 +1469,11 @@ function Publish-ReleaseArtifactSet {
                     [IO.File]::Delete($outputPath)
                 }
             }
+            $state.progress = 'PriorRemoved'
+            Set-ReleaseTransactionState `
+                -TransactionRoot $transaction.Path `
+                -State $state `
+                -OperationHook $OperationHook | Out-Null
 
             for ($index = 0; $index -lt $names.Count; $index++) {
                 Invoke-PromotionHook `
@@ -994,7 +1486,29 @@ function Publish-ReleaseArtifactSet {
                     throw "The exact publication destination unexpectedly exists: $outputPath"
                 }
                 $stagedLeases[$index].CopyToNewAndFlush($outputPath)
+                $promotedLease = [DSRRandomizer.Packaging.ReleaseArtifactLease]::Acquire(
+                    $outputPath,
+                    'newly promoted release artifact')
+                try {
+                    if ($promotedLease.ComputeSha256() -cne $stagedBlobHashes[$names[$index]]) {
+                        throw "Newly promoted release artifact hash mismatch: $($names[$index])"
+                    }
+                    $state.promotedIdentities[$index] = $promotedLease.Identity
+                }
+                finally {
+                    $promotedLease.Dispose()
+                }
+                $state.progress = 'Publishing'
+                Set-ReleaseTransactionState `
+                    -TransactionRoot $transaction.Path `
+                    -State $state `
+                    -OperationHook $OperationHook | Out-Null
             }
+            $state.progress = 'FinalsWritten'
+            Set-ReleaseTransactionState `
+                -TransactionRoot $transaction.Path `
+                -State $state `
+                -OperationHook $OperationHook | Out-Null
 
             Invoke-PromotionHook `
                 -OperationHook $OperationHook `
@@ -1016,10 +1530,24 @@ function Publish-ReleaseArtifactSet {
                 -Expected $stagedBlobHashes `
                 -Description 'Published release'
 
+            $preparedFallback = [ordered]@{
+                schemaVersion = 4
+                phase = 'Prepared'
+                hadPriorSet = $state.hadPriorSet
+                artifactNames = @($state.artifactNames)
+                expectedArchiveHashes = $state.expectedArchiveHashes
+                expectedFinalBlobHashes = $state.expectedFinalBlobHashes
+                backupBlobHashes = $state.backupBlobHashes
+                progress = 'FinalsWritten'
+                promotedIdentities = @($state.promotedIdentities)
+            }
             $state.phase = 'Committed'
+            $state.progress = 'FinalVerified'
             Set-ReleaseTransactionState `
                 -TransactionRoot $transaction.Path `
-                -State $state
+                -State $state `
+                -OperationHook $OperationHook `
+                -FallbackState $preparedFallback | Out-Null
             $committed = $true
             $transaction = Convert-ToCommittedReleaseTransaction -Transaction $transaction
 
@@ -1027,6 +1555,7 @@ function Publish-ReleaseArtifactSet {
             Remove-CommittedReleaseTransaction `
                 -Transaction $transaction `
                 -Names @($names) `
+                -State $state `
                 -OperationHook $OperationHook
             $transaction = $null
         }
@@ -1106,6 +1635,9 @@ function Publish-ReleaseArtifactSet {
         Close-ReleaseArtifactLeases -Leases $stagedLeases
         if ($null -ne $transaction -and $null -ne $transaction.Lease) {
             $transaction.Lease.Dispose()
+        }
+        if ($null -ne $publicationLock) {
+            $publicationLock.Dispose()
         }
         if ($null -ne $outputDirectory) {
             $outputDirectory.Lease.Dispose()
