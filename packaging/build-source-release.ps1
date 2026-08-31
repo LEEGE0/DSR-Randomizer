@@ -15,6 +15,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 Import-Module (Join-Path $PSScriptRoot 'SafeReleaseDirectories.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'ReleaseSourceState.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'ReleasePrivacy.psm1') -Force
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
@@ -216,6 +217,7 @@ try {
             throw "The committed corresponding-source tree is incomplete: $requiredPath"
         }
     }
+    Assert-ReleasePrivacyBytes -Files $files
 
     $archiveName = "DSR-for-MOD-v$Version-source.zip"
     $temporaryArchive = Join-Path $workDirectory.Path $archiveName

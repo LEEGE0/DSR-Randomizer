@@ -27,11 +27,11 @@ public:
         return {true,
                 BridgeConfiguration{
                     LR"(D:\root\runtimes\runtime-id)", LR"(D:\root)", L"runtime-id",
-                    L"146808034", LR"(D:\root\profile)",
-                    LR"(D:\root\profile\NBGI\DARK SOULS REMASTERED\146808034\DRAKS0005.sl2)",
+                    L"424242424", LR"(D:\root\profile)",
+                    LR"(D:\root\profile\NBGI\DARK SOULS REMASTERED\424242424\DRAKS0005.sl2)",
                     LR"(C:\Users\FixtureUser\Documents\NBGI\DARK SOULS REMASTERED)",
-                    LR"(D:\root\saves\146808034)",
-                    LR"(D:\root\saves\146808034\DRAKS0005.rmm)",
+                    LR"(D:\root\saves\424242424)",
+                    LR"(D:\root\saves\424242424\DRAKS0005.rmm)",
                     LR"(D:\root\components\rmm-bridge\DSRRandomizer.RmmBridgeHost.exe)",
                     "save-id", "metadata-id",
                     LR"(C:\Steam\DARK SOULS REMASTERED\overhaul\GameParam.parambnd.dcx)",
@@ -90,7 +90,7 @@ int main() {
 
     const BridgeConfiguration commandConfiguration{
         LR"(D:\root with spaces\runtimes\runtime-id)", LR"(D:\root with spaces)",
-        L"runtime-id", L"146808034", L"", L"", L"", L"", L"",
+        L"runtime-id", L"424242424", L"", L"", L"", L"", L"",
         LR"(D:\root with spaces\components\rmm-bridge\DSRRandomizer.RmmBridgeHost.exe)",
         "", ""};
     const auto commandLine = BuildHostCommandLine(
@@ -113,7 +113,7 @@ int main() {
         return Fail("bootstrap did not preserve callsite preparation order");
     }
     if (success.installedCallsiteRmm
-        != LR"(D:\root\saves\146808034\DRAKS0005.rmm)") {
+        != LR"(D:\root\saves\424242424\DRAKS0005.rmm)") {
         return Fail("bootstrap installed the wrong save-callsite redirect");
     }
 

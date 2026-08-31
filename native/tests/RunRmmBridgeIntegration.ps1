@@ -7,7 +7,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ("dsr-rmm-bridge-" + [Guid]::NewGuid().ToString('N'))
 $runtimeId = 'runtime-0123456789abcdef'
-$steamId = '146808034'
+$steamId = '424242424'
 $runtimeRoot = Join-Path $testRoot "runtimes\$runtimeId"
 $componentRoot = Join-Path $testRoot 'components\rmm-bridge'
 $deployedBridge = Join-Path $componentRoot 'DSRRandomizer.RmmBridge.dll'

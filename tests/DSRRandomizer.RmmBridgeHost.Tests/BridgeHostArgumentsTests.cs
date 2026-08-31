@@ -11,14 +11,14 @@ public sealed class BridgeHostArgumentsTests
             "--game-pid", "4242",
             "--external-root", @"D:\DSR MOD",
             "--runtime-id", "runtime-a39cb5e0",
-            "--steam-id", "146808034",
+            "--steam-id", "424242424",
             "--ready-event", @"Local\DSRRandomizer.RmmBridge.0123456789abcdef0123456789abcdef"
         ]);
 
         Assert.Equal((uint)4242, parsed.GamePid);
         Assert.Equal(@"D:\DSR MOD", parsed.ExternalRoot);
         Assert.Equal("runtime-a39cb5e0", parsed.RuntimeId);
-        Assert.Equal("146808034", parsed.SteamId);
+        Assert.Equal("424242424", parsed.SteamId);
     }
 
     [Theory]
@@ -33,7 +33,7 @@ public sealed class BridgeHostArgumentsTests
             "--game-pid", "4242",
             "--external-root", @"D:\DSR MOD",
             "--runtime-id", "runtime-a39cb5e0",
-            "--steam-id", "146808034",
+            "--steam-id", "424242424",
             "--ready-event", @"Local\DSRRandomizer.RmmBridge.0123456789abcdef0123456789abcdef"
         };
 

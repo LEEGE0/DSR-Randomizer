@@ -29,7 +29,7 @@ public sealed class BridgeHostFailureLogIntegrationTests : IDisposable
             "--game-pid", "4242",
             "--external-root", ExternalRoot,
             "--runtime-id", "runtime-a39cb5e0",
-            "--steam-id", "146808034",
+            "--steam-id", "424242424",
             "--ready-event", @"Local\DSRRandomizer.RmmBridge.0123456789abcdef0123456789abcdef"
         };
 

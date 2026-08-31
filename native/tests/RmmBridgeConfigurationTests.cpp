@@ -28,18 +28,18 @@ public:
         const auto pointerPath = Join(kRoot, L"runtime-current.json");
         const auto selectionPath = Join(Join(kRoot, L"config"),
                                         L"selected-save-profile.json");
-        const auto metadataPath = Join(Join(Join(kRoot, L"saves"), L"146808034"),
+        const auto metadataPath = Join(Join(Join(kRoot, L"saves"), L"424242424"),
                                        L"save-metadata.json");
-        const auto savePath = Join(Join(Join(kRoot, L"saves"), L"146808034"),
+        const auto savePath = Join(Join(Join(kRoot, L"saves"), L"424242424"),
                                    L"DRAKS0005.rmm");
         hashes[processImage] =
             "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
         files[pointerPath] =
             R"({"runtimeId":"runtime-a39cb5e0","relativeRuntimePath":"runtimes/runtime-a39cb5e0","manifestSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})";
         files[selectionPath] =
-            R"({"steamId":"146808034","sourcePath":"C:\\Users\\User\\Documents\\NBGI\\DARK SOULS REMASTERED\\146808034\\DRAKS0005.sl2"})";
+            R"({"steamId":"424242424","sourcePath":"C:\\Users\\FixtureUser\\Documents\\NBGI\\DARK SOULS REMASTERED\\424242424\\DRAKS0005.sl2"})";
         files[metadataPath] =
-            R"({"schemaVersion":1,"steamId":"146808034","fixedLength":4326608,"lastKnownSha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","activeSeedId":null,"placementSha256":null,"cleanExit":true})";
+            R"({"schemaVersion":1,"steamId":"424242424","fixedLength":4326608,"lastKnownSha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","activeSeedId":null,"placementSha256":null,"cleanExit":true})";
         inspections[savePath] = FileInspection{true, true, false, 1, 4'326'608};
         hashes[savePath] =
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -110,9 +110,9 @@ int main() {
     }
     if (valid.value.externalRoot != kRoot
         || valid.value.runtimeId != kRuntimeId
-        || valid.value.steamId != L"146808034"
+        || valid.value.steamId != L"424242424"
         || valid.value.dedicatedRmm
-            != LR"(D:\DSR MOD\saves\146808034\DRAKS0005.rmm)"
+            != LR"(D:\DSR MOD\saves\424242424\DRAKS0005.rmm)"
         || valid.value.overhaulGameParamSource
             != LR"(D:\DSR MOD\runtimes\runtime-a39cb5e0\overhaul\GameParam.parambnd.dcx)"
         || valid.value.overhaulGameParamTarget
@@ -165,9 +165,9 @@ int main() {
     }
 
     FakePlatform wrongLength;
-    const auto savePath = Join(Join(Join(kRoot, L"saves"), L"146808034"),
+    const auto savePath = Join(Join(Join(kRoot, L"saves"), L"424242424"),
                                L"DRAKS0005.rmm");
-    const auto metadataPath = Join(Join(Join(kRoot, L"saves"), L"146808034"),
+    const auto metadataPath = Join(Join(Join(kRoot, L"saves"), L"424242424"),
                                    L"save-metadata.json");
     wrongLength.inspections[savePath].length = 10;
     if (ResolveBridgeConfiguration(wrongLength).error
@@ -192,7 +192,7 @@ int main() {
 
     FakePlatform uncleanSave;
     uncleanSave.files[metadataPath] =
-        R"({"schemaVersion":1,"steamId":"146808034","fixedLength":4326608,"lastKnownSha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","activeSeedId":null,"placementSha256":null,"cleanExit":false})";
+        R"({"schemaVersion":1,"steamId":"424242424","fixedLength":4326608,"lastKnownSha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","activeSeedId":null,"placementSha256":null,"cleanExit":false})";
     uncleanSave.hashes[savePath] =
         "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
     const auto recoveredUncleanSave = ResolveBridgeConfiguration(uncleanSave);
@@ -204,7 +204,7 @@ int main() {
 
     FakePlatform malformedCleanExit;
     malformedCleanExit.files[metadataPath] =
-        R"({"schemaVersion":1,"steamId":"146808034","fixedLength":4326608,"lastKnownSha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","activeSeedId":null,"placementSha256":null,"cleanExit":"false"})";
+        R"({"schemaVersion":1,"steamId":"424242424","fixedLength":4326608,"lastKnownSha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","activeSeedId":null,"placementSha256":null,"cleanExit":"false"})";
     if (ResolveBridgeConfiguration(malformedCleanExit).error
         != BridgeConfigurationError::MetadataInvalid) {
         return Fail("non-boolean cleanExit metadata was not rejected");

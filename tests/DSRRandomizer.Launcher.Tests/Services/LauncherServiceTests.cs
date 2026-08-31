@@ -69,7 +69,7 @@ public sealed class LauncherServiceTests : IDisposable
     [Fact]
     public async Task DiscoverSaveProfilesAsync_ExternalOnlyRmmIsReusableWithoutNormalRoot()
     {
-        const string shortSteamId = "146808034";
+        const string shortSteamId = "424242424";
         var documents = Path.Combine(_container, "missing-documents");
         var local = Path.Combine(_container, "local");
         var destination = CreateValidDedicatedSave(local, shortSteamId, 0x52);

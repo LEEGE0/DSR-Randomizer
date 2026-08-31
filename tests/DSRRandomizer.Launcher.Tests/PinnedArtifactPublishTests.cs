@@ -408,6 +408,50 @@ public sealed class PinnedArtifactPublishTests : IDisposable
             $"Safe release-directory test failed with exit code {result.ExitCode}.\n{result.Output}");
     }
 
+    [Fact]
+    public async Task ReleaseArtifactPromotionIsTransactionalAcrossAllFourOutputs()
+    {
+        var repositoryRoot = FindRepositoryRoot();
+        var result = await RunProcessAsync(
+            "pwsh.exe",
+            repositoryRoot,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            Path.Combine(
+                repositoryRoot,
+                "packaging",
+                "tests",
+                "Test-ReleaseArtifactPromotion.ps1"));
+
+        Assert.True(
+            result.ExitCode == 0,
+            $"Release artifact-promotion test failed with exit code {result.ExitCode}.\n{result.Output}");
+    }
+
+    [Fact]
+    public async Task ReleasePrivacyScannerRejectsEscapedAndEncodedFixtureLeaks()
+    {
+        var repositoryRoot = FindRepositoryRoot();
+        var result = await RunProcessAsync(
+            "pwsh.exe",
+            repositoryRoot,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            Path.Combine(
+                repositoryRoot,
+                "packaging",
+                "tests",
+                "Test-ReleasePrivacy.ps1"));
+
+        Assert.True(
+            result.ExitCode == 0,
+            $"Release privacy test failed with exit code {result.ExitCode}.\n{result.Output}");
+    }
+
     private Task<(int ExitCode, string Output)> BuildReleaseAsync(
         string repositoryRoot,
         IReadOnlyDictionary<string, string>? environment = null) =>

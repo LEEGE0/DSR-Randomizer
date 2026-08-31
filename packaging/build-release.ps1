@@ -12,6 +12,8 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 Import-Module (Join-Path $PSScriptRoot 'SafeReleaseDirectories.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'ReleaseSourceState.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'ReleasePrivacy.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'ReleaseArtifactPromotion.psm1') -Force
 
 function Invoke-CheckedCommand {
     param(
@@ -188,12 +190,14 @@ try {
             throw "The verified release pair is incomplete: $stagedPath"
         }
     }
-    foreach ($name in $releaseArtifactNames) {
-        [IO.File]::Move(
-            (Join-Path $releaseOutput $name),
-            (Join-Path $outputDirectory.Path $name),
-            $true)
-    }
+    Assert-ReleaseArchivePrivacy -ArchivePath (
+        Join-Path $releaseOutput $releaseArtifactNames[0])
+    Assert-ReleaseArchivePrivacy -ArchivePath (
+        Join-Path $releaseOutput $releaseArtifactNames[2])
+    Publish-ReleaseArtifactSet `
+        -StagingRoot $releaseOutput `
+        -OutputRoot $outputDirectory.Path `
+        -ArtifactNames $releaseArtifactNames
 }
 finally {
     try {

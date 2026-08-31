@@ -82,7 +82,7 @@ public sealed class BridgeSessionCoordinatorTests
         4242,
         @"D:\DSR MOD",
         "runtime-a39cb5e0",
-        "146808034",
+        "424242424",
         @"Local\DSRRandomizer.RmmBridge.0123456789abcdef0123456789abcdef");
 
     private sealed class FakePlatform(List<string> calls) : IBridgeHostPlatform
@@ -123,7 +123,7 @@ public sealed class BridgeSessionCoordinatorTests
         {
             calls.Add("prepare");
             return Task.FromResult(new DedicatedSaveResult(
-                true, true, @"D:\DSR MOD\saves\146808034\DRAKS0005.rmm",
+                true, true, @"D:\DSR MOD\saves\424242424\DRAKS0005.rmm",
                 SaveErrorCode.None, "")
             {
                 SaveIdentity = "save-id",
