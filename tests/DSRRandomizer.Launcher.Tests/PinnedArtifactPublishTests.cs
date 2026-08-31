@@ -124,6 +124,7 @@ public sealed class PinnedArtifactPublishTests : IDisposable
             "-c",
             "Release",
             "--no-restore",
+            "-nr:false",
             "-o",
             publishRoot);
         Assert.True(
@@ -150,11 +151,44 @@ public sealed class PinnedArtifactPublishTests : IDisposable
         Assert.DoesNotContain("DrSwizzler", depsJson, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("BouncyCastle", depsJson, StringComparison.OrdinalIgnoreCase);
 
-        // Defense in depth: catch an accidental renamed/copy-local payload even if it is not
-        // represented as an assembly or dependency in the bundle manifest.
-        AssertBinaryDoesNotContainUtf8(hostPath, "DrSwizzler.dll");
-        AssertBinaryDoesNotContainUtf8(hostPath, "DrSwizzler");
-        AssertBinaryDoesNotContainUtf8(hostPath, "BouncyCastle.Cryptography.dll");
+        var soulsFormatsEntry = Assert.Single(
+            bundle.Entries,
+            entry => string.Equals(entry.RelativePath, "SoulsFormats.dll", StringComparison.Ordinal));
+        AssertBytesDoNotContainEncoded(
+            ReadBundleEntry(hostPath, soulsFormatsEntry),
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+
+        var subsetProject = Path.Combine(
+            repositoryRoot,
+            "src",
+            "DSRRandomizer.SoulsFormatsSubset",
+            "DSRRandomizer.SoulsFormatsSubset.csproj");
+        var subsetReleaseRoot = Path.Combine(_packageOutputRoot, "subset-release");
+        var subsetDebugRoot = Path.Combine(_packageOutputRoot, "subset-debug");
+        foreach (var (configuration, output) in new[]
+                 {
+                     ("Release", subsetReleaseRoot),
+                     ("Debug", subsetDebugRoot)
+                 })
+        {
+            var build = await RunProcessAsync(
+                "dotnet.exe",
+                repositoryRoot,
+                "build",
+                subsetProject,
+                "-c",
+                configuration,
+                "--no-restore",
+                "-nr:false",
+                "-o",
+                output);
+            Assert.True(
+                build.ExitCode == 0,
+                $"Subset {configuration} build failed with exit code {build.ExitCode}.\n{build.Output}");
+        }
+
+        Assert.False(File.Exists(Path.Combine(subsetReleaseRoot, "SoulsFormats.pdb")));
+        Assert.True(File.Exists(Path.Combine(subsetDebugRoot, "SoulsFormats.pdb")));
     }
 
     [Fact]
@@ -423,41 +457,42 @@ public sealed class PinnedArtifactPublishTests : IDisposable
         Assert.Equal(expected, actual);
     }
 
-    private static void AssertBinaryDoesNotContainUtf8(string path, string value)
+    private static void AssertBytesDoNotContainEncoded(byte[] bytes, string value)
     {
-        var bytes = File.ReadAllBytes(path);
-        var needle = Encoding.UTF8.GetBytes(value);
-        Assert.True(
-            bytes.AsSpan().IndexOf(needle) < 0,
-            $"Published binary unexpectedly contains UTF-8 marker '{value}'.");
+        foreach (var encoding in new[] { Encoding.UTF8, Encoding.Unicode, Encoding.BigEndianUnicode })
+        {
+            Assert.True(
+                bytes.AsSpan().IndexOf(encoding.GetBytes(value)) < 0,
+                $"Published binary unexpectedly contains local profile marker using {encoding.WebName}.");
+        }
     }
 
     private static SingleFileBundle ReadSingleFileBundle(string path)
     {
         // This is Bundler.BundleHeaderSignature from Microsoft.NET.HostModel 8.0.
-        // The Int64 immediately before it is the manifest header offset.
-        ReadOnlySpan<byte> signature =
+        // BinaryUtils performs the same memory-mapped KMP search used by HostModel;
+        // the Int64 immediately before the signature is the manifest header offset.
+        byte[] signature =
         [
             0x8b, 0x12, 0x02, 0xb9, 0x6a, 0x61, 0x20, 0x38,
             0x72, 0x7b, 0x93, 0x02, 0x14, 0xd7, 0xa0, 0x32,
             0x13, 0xf5, 0xb9, 0xe6, 0xef, 0xae, 0x33, 0x18,
             0xee, 0x3b, 0x2d, 0xce, 0x24, 0xb3, 0x6a, 0xae,
         ];
-
-        var bytes = File.ReadAllBytes(path);
-        var signatureOffset = bytes.AsSpan().IndexOf(signature);
+        var signatureOffset = Microsoft.NET.HostModel.AppHost.BinaryUtils.SearchInFile(path, signature);
         if (signatureOffset < sizeof(long))
         {
             throw new InvalidDataException("The .NET single-file bundle signature was not found.");
         }
-
-        var headerOffset = BitConverter.ToInt64(bytes, signatureOffset - sizeof(long));
-        if (headerOffset <= 0 || headerOffset >= bytes.LongLength)
+        using var stream = File.OpenRead(path);
+        stream.Position = signatureOffset - sizeof(long);
+        using var offsetReader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: true);
+        var headerOffset = offsetReader.ReadInt64();
+        if (headerOffset <= 0 || headerOffset >= stream.Length)
         {
             throw new InvalidDataException($"Invalid single-file bundle header offset: {headerOffset}.");
         }
 
-        using var stream = new MemoryStream(bytes, writable: false);
         using var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: false);
         stream.Position = headerOffset;
 
