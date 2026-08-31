@@ -29,7 +29,7 @@ public:
                     LR"(D:\root\runtimes\runtime-id)", LR"(D:\root)", L"runtime-id",
                     L"146808034", LR"(D:\root\profile)",
                     LR"(D:\root\profile\NBGI\DARK SOULS REMASTERED\146808034\DRAKS0005.sl2)",
-                    LR"(C:\Users\User\Documents\NBGI\DARK SOULS REMASTERED)",
+                    LR"(C:\Users\FixtureUser\Documents\NBGI\DARK SOULS REMASTERED)",
                     LR"(D:\root\saves\146808034)",
                     LR"(D:\root\saves\146808034\DRAKS0005.rmm)",
                     LR"(D:\root\components\rmm-bridge\DSRRandomizer.RmmBridgeHost.exe)",

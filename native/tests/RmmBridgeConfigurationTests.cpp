@@ -24,7 +24,7 @@ public:
     FakePlatform() {
         processImage = Join(Join(Join(kRoot, L"runtimes"), kRuntimeId),
                             L"DarkSoulsRemastered.exe");
-        documents = LR"(C:\Users\User\Documents)";
+        documents = LR"(C:\Users\FixtureUser\Documents)";
         const auto pointerPath = Join(kRoot, L"runtime-current.json");
         const auto selectionPath = Join(Join(kRoot, L"config"),
                                         L"selected-save-profile.json");
