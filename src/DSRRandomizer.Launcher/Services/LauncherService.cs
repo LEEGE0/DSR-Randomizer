@@ -591,6 +591,23 @@ public sealed class LauncherService : ILauncherService
 
         var (bridgePath, heapPatchPath) = RandomizerRuntimeIntegration
             .GetRequiredModEngineDllPaths(tools, _externalRoot);
+        var bridgeHostPath = Path.Combine(
+            Path.GetDirectoryName(bridgePath)!,
+            "DSRRandomizer.RmmBridgeHost.exe");
+        using var bridgeArtifact = LaunchArtifactLease.TryOpen(bridgePath);
+        using var bridgeHostArtifact = LaunchArtifactLease.TryOpen(bridgeHostPath);
+        if (bridgeArtifact is null
+            || bridgeHostArtifact is null
+            || !bridgeArtifact.Sha256.Equals(
+                _artifactIdentities.BridgeSha256,
+                StringComparison.OrdinalIgnoreCase)
+            || !bridgeHostArtifact.Sha256.Equals(
+                _artifactIdentities.HostSha256,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return SafetyLaunchResult.Failed("RMM_BRIDGE_INSTALL_TAMPERED");
+        }
+
         var bridgedConfiguration = Path.GetFullPath(Path.Combine(
             _externalRoot,
             "staging",
@@ -598,12 +615,10 @@ public sealed class LauncherService : ILauncherService
             "config-randomizer-bridged.toml"));
         using var sourceConfigurationArtifact = LaunchArtifactLease.TryOpen(
             tools.ModEngineConfiguration);
-        using var bridgeArtifact = LaunchArtifactLease.TryOpen(bridgePath);
         using var heapPatchArtifact = LaunchArtifactLease.TryOpen(heapPatchPath);
         using var modEngineLauncherArtifact = LaunchArtifactLease.TryOpen(tools.ModEngineLauncher);
         using var modEngineLibraryArtifact = LaunchArtifactLease.TryOpen(tools.ModEngineLibrary);
         if (sourceConfigurationArtifact is null
-            || bridgeArtifact is null
             || heapPatchArtifact is null
             || modEngineLauncherArtifact is null
             || modEngineLibraryArtifact is null

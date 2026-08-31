@@ -337,6 +337,48 @@ public sealed class LauncherServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task LaunchModdedAsync_WhenBridgeInstallationFails_DoesNotPersistSaveSelection()
+    {
+        using var fixture = await LaunchFixture.CreateAsync(
+            existingRmm: true,
+            persistNormalSelection: false);
+        fixture.InstallRandomizer();
+        fixture.BridgeInstaller.Result = RmmBridgeInstallResult.Failed(
+            "RMM_BRIDGE_INSTALL_FAILED");
+        var selectionPath = Path.Combine(
+            fixture.ExternalRoot,
+            "config",
+            "selected-save-profile.json");
+        Assert.False(File.Exists(selectionPath));
+
+        var result = await fixture.Service.LaunchModdedAsync(SteamId, CancellationToken.None);
+
+        Assert.False(result.Started);
+        Assert.Equal("RMM_BRIDGE_INSTALL_FAILED", result.ErrorCode);
+        Assert.False(File.Exists(selectionPath));
+        Assert.Empty(fixture.RandomizerProcesses.ModEngineStarts);
+    }
+
+    [Theory]
+    [InlineData("DSRRandomizer.RmmBridge.dll")]
+    [InlineData("DSRRandomizer.RmmBridgeHost.exe")]
+    public async Task LaunchModdedAsync_WhenInstalledBridgePairIsReplacedBeforeLauncherLease_FailsTampered(
+        string artifactName)
+    {
+        using var fixture = await LaunchFixture.CreateAsync(existingRmm: true);
+        fixture.InstallRandomizer();
+        fixture.BridgeInstaller.AfterEnsureInstalled = externalRoot => File.WriteAllText(
+            Path.Combine(externalRoot, "components", "rmm-bridge", artifactName),
+            "replaced-after-install");
+
+        var result = await fixture.Service.LaunchModdedAsync(SteamId, CancellationToken.None);
+
+        Assert.False(result.Started);
+        Assert.Equal("RMM_BRIDGE_INSTALL_TAMPERED", result.ErrorCode);
+        Assert.Empty(fixture.RandomizerProcesses.ModEngineStarts);
+    }
+
+    [Fact]
     public async Task LaunchModdedAsync_FreshExternalRootInstallsBridgePairWithoutExistingSaveOrProfile()
     {
         using var fixture = await LaunchFixture.CreateAsync(
@@ -436,7 +478,8 @@ public sealed class LauncherServiceTests : IDisposable
             Path.Combine(randomizer, "dist1", "DLL", "DS1HeapPatch.dll"),
             Path.Combine(randomizer, "dist1", "ModEngine", "modengine2_launcher.exe"),
             Path.Combine(randomizer, "dist1", "ModEngine", "modengine2", "bin", "modengine2.dll"),
-            Path.Combine(fixture.ExternalRoot, "components", "rmm-bridge", "DSRRandomizer.RmmBridge.dll")
+            Path.Combine(fixture.ExternalRoot, "components", "rmm-bridge", "DSRRandomizer.RmmBridge.dll"),
+            Path.Combine(fixture.ExternalRoot, "components", "rmm-bridge", "DSRRandomizer.RmmBridgeHost.exe")
         };
         bool[]? replacements = null;
         fixture.RandomizerProcesses.OnModEngineLaunch = () =>
@@ -1503,6 +1546,8 @@ public sealed class LauncherServiceTests : IDisposable
 
         public Action<string>? OnEnsureInstalled { get; set; }
 
+        public Action<string>? AfterEnsureInstalled { get; set; }
+
         public string BridgePath(string externalRoot) => Path.Combine(
             externalRoot,
             "components",
@@ -1526,6 +1571,7 @@ public sealed class LauncherServiceTests : IDisposable
             Directory.CreateDirectory(Path.GetDirectoryName(BridgePath(externalRoot))!);
             File.WriteAllText(BridgePath(externalRoot), "bridge");
             File.WriteAllText(HostPath(externalRoot), "host");
+            AfterEnsureInstalled?.Invoke(externalRoot);
             return Result;
         }
     }
