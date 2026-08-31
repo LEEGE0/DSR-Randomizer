@@ -14,6 +14,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 Import-Module (Join-Path $PSScriptRoot 'SafeReleaseDirectories.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'ReleaseSourceState.psm1') -Force
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
@@ -105,7 +106,10 @@ function Add-ArchiveFiles {
 }
 
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$submoduleRoot = Join-Path $repositoryRoot 'third_party/SoulsFormatsNEXT'
+$releaseSourceContract = Get-ReleaseSourceContract
+$releaseState = Assert-ReleaseSourceState `
+    -RepositoryRoot $repositoryRoot `
+    -RequiredSubmodules $releaseSourceContract
 $artifactsDirectory = Open-SafeReleaseRoot -Path (Join-Path $repositoryRoot 'artifacts')
 $outputDirectory = $null
 $workDirectory = $null
@@ -119,40 +123,64 @@ try {
         -WorkingDirectory $repositoryRoot `
         -Arguments @('rev-parse', '--verify', "$SourceRevision^{commit}") `
         -FailureMessage "Source revision '$SourceRevision' is not a committed tree."
-    $submoduleRevision = Invoke-GitCapture `
-        -WorkingDirectory $repositoryRoot `
-        -Arguments @('rev-parse', "$resolvedRevision`:third_party/SoulsFormatsNEXT") `
-        -FailureMessage 'The source revision does not pin SoulsFormatsNEXT.'
-    $submoduleTreeEntry = Invoke-GitCapture `
-        -WorkingDirectory $repositoryRoot `
-        -Arguments @('ls-tree', $resolvedRevision, 'third_party/SoulsFormatsNEXT') `
-        -FailureMessage 'Unable to inspect the SoulsFormatsNEXT gitlink.'
-    if (-not $submoduleTreeEntry.StartsWith(
-            "160000 commit $submoduleRevision`t",
-            [StringComparison]::Ordinal)) {
-        throw "SoulsFormatsNEXT is not pinned as a gitlink at source revision $resolvedRevision."
+    if ($resolvedRevision -cne $releaseState.MainRevision) {
+        throw "Source revision must equal the verified main HEAD $($releaseState.MainRevision); resolved $resolvedRevision."
     }
-    if (-not (Test-Path -LiteralPath $submoduleRoot -PathType Container)) {
-        throw "The pinned SoulsFormatsNEXT checkout is missing: $submoduleRoot"
+
+    $submoduleRevisions = [ordered]@{}
+    foreach ($contractEntry in $releaseSourceContract.GetEnumerator()) {
+        $submodulePath = [string]$contractEntry.Key
+        $expectedRevision = [string]$contractEntry.Value
+        $submoduleRevision = Invoke-GitCapture `
+            -WorkingDirectory $repositoryRoot `
+            -Arguments @('rev-parse', "$resolvedRevision`:$submodulePath") `
+            -FailureMessage "The source revision does not pin $submodulePath."
+        if ($submoduleRevision -cne $expectedRevision) {
+            throw "Source revision pins $submodulePath at $submoduleRevision; expected $expectedRevision."
+        }
+
+        $submoduleTreeEntry = Invoke-GitCapture `
+            -WorkingDirectory $repositoryRoot `
+            -Arguments @('ls-tree', $resolvedRevision, $submodulePath) `
+            -FailureMessage "Unable to inspect the $submodulePath gitlink."
+        if (-not $submoduleTreeEntry.StartsWith(
+                "160000 commit $submoduleRevision`t",
+                [StringComparison]::Ordinal)) {
+            throw "$submodulePath is not pinned as a gitlink at source revision $resolvedRevision."
+        }
+
+        $submoduleRoot = Join-Path $repositoryRoot $submodulePath
+        Invoke-GitCapture `
+            -WorkingDirectory $submoduleRoot `
+            -Arguments @('cat-file', '-e', "$submoduleRevision^{commit}") `
+            -FailureMessage "The pinned $submodulePath commit is unavailable: $submoduleRevision" | Out-Null
+        $submoduleRevisions[$submodulePath] = $submoduleRevision
     }
-    Invoke-GitCapture `
-        -WorkingDirectory $submoduleRoot `
-        -Arguments @('cat-file', '-e', "$submoduleRevision^{commit}") `
-        -FailureMessage "The pinned SoulsFormatsNEXT commit is unavailable: $submoduleRevision" | Out-Null
 
     $mainArchive = Join-Path $workDirectory.Path 'main.zip'
-    $submoduleArchive = Join-Path $workDirectory.Path 'soulsformats.zip'
     Invoke-GitArchive -WorkingDirectory $repositoryRoot -Revision $resolvedRevision -OutputFile $mainArchive
-    Invoke-GitArchive -WorkingDirectory $submoduleRoot -Revision $submoduleRevision -OutputFile $submoduleArchive
+    $submoduleArchives = [ordered]@{}
+    $submoduleIndex = 0
+    foreach ($entry in $submoduleRevisions.GetEnumerator()) {
+        $submoduleArchive = Join-Path $workDirectory.Path "submodule-$submoduleIndex.zip"
+        Invoke-GitArchive `
+            -WorkingDirectory (Join-Path $repositoryRoot ([string]$entry.Key)) `
+            -Revision ([string]$entry.Value) `
+            -OutputFile $submoduleArchive
+        $submoduleArchives[[string]$entry.Key] = $submoduleArchive
+        $submoduleIndex++
+    }
 
     $rootPrefix = "DSR-for-MOD-v$Version-source/"
     $files = [Collections.Generic.SortedDictionary[string, byte[]]]::new(
         [StringComparer]::Ordinal)
     Add-ArchiveFiles -Files $files -ArchivePath $mainArchive -DestinationPrefix $rootPrefix
-    Add-ArchiveFiles `
-        -Files $files `
-        -ArchivePath $submoduleArchive `
-        -DestinationPrefix "${rootPrefix}third_party/SoulsFormatsNEXT/"
+    foreach ($entry in $submoduleArchives.GetEnumerator()) {
+        Add-ArchiveFiles `
+            -Files $files `
+            -ArchivePath ([string]$entry.Value) `
+            -DestinationPrefix "$rootPrefix$([string]$entry.Key)/"
+    }
 
     $requiredPaths = @(
         "${rootPrefix}DSR-Randomizer.sln",
@@ -160,7 +188,14 @@ try {
         "${rootPrefix}packaging/build-source-release.ps1",
         "${rootPrefix}src/DSRRandomizer.SoulsFormatsSubset/DSRRandomizer.SoulsFormatsSubset.csproj",
         "${rootPrefix}third_party/SoulsFormatsNEXT/LICENSE",
-        "${rootPrefix}third_party/SoulsFormatsNEXT/SoulsFormats/SoulsFormats.csproj"
+        "${rootPrefix}third_party/SoulsFormatsNEXT/SoulsFormats/SoulsFormats.csproj",
+        "${rootPrefix}third_party/ZstdNet/LICENSE",
+        "${rootPrefix}third_party/ZstdNet/ZstdNet/ZstdNet.csproj",
+        "${rootPrefix}third_party/ZstdNet/ZstdNet/Compressor.cs",
+        "${rootPrefix}third_party/zstd/LICENSE",
+        "${rootPrefix}third_party/zstd/build/cmake/CMakeLists.txt",
+        "${rootPrefix}third_party/zstd/lib/zstd.h",
+        "${rootPrefix}third_party/zstd/lib/compress/zstd_compress.c"
     )
     foreach ($requiredPath in $requiredPaths) {
         if (-not $files.ContainsKey($requiredPath)) {
@@ -203,7 +238,9 @@ try {
     [IO.File]::Move($temporaryChecksum, $finalChecksum, $true)
 
     Write-Output "Source revision: $resolvedRevision"
-    Write-Output "SoulsFormatsNEXT revision: $submoduleRevision"
+    foreach ($entry in $submoduleRevisions.GetEnumerator()) {
+        Write-Output "$([string]$entry.Key) revision: $([string]$entry.Value)"
+    }
     Write-Output "Corresponding-source archive: $finalArchive"
     Write-Output "Corresponding-source SHA-256: $hash"
 }

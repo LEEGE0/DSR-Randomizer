@@ -24,6 +24,12 @@ public sealed class PinnedArtifactPublishTests : IDisposable
         "native/DSRRandomizer.Runtime.dll",
         "native/DSRRandomizer.Runtime.dll.sha256"
     ];
+    private static readonly (string Path, string Revision)[] ExpectedSourceSubmodules =
+    [
+        ("third_party/SoulsFormatsNEXT", "55b08a3c02a03777cf19958d8f6aa18d7af59da1"),
+        ("third_party/ZstdNet", "c90152918f633e945f163652e6368001556784e7"),
+        ("third_party/zstd", "b706286adbba780006a47ef92df0ad7a785666b6")
+    ];
 
     private readonly string _packageOutputRoot = Path.Combine(
         Path.GetTempPath(),
@@ -239,12 +245,47 @@ public sealed class PinnedArtifactPublishTests : IDisposable
             Assert.Contains(
                 $"{prefix}third_party/SoulsFormatsNEXT/SoulsFormats/Formats/Binder/BND3/BND3.cs",
                 entries);
+            Assert.Contains($"{prefix}third_party/ZstdNet/LICENSE", entries);
+            Assert.Contains($"{prefix}third_party/ZstdNet/ZstdNet/ZstdNet.csproj", entries);
+            Assert.Contains($"{prefix}third_party/ZstdNet/ZstdNet/Compressor.cs", entries);
+            Assert.Contains($"{prefix}third_party/zstd/LICENSE", entries);
+            Assert.Contains($"{prefix}third_party/zstd/build/cmake/CMakeLists.txt", entries);
+            Assert.Contains($"{prefix}third_party/zstd/lib/zstd.h", entries);
+            Assert.Contains($"{prefix}third_party/zstd/lib/compress/zstd_compress.c", entries);
             Assert.DoesNotContain(entries, IsProhibitedSourceArchivePath);
             Assert.All(
                 archive.Entries,
                 entry => Assert.Equal(
                     new DateTime(1980, 1, 1, 0, 0, 0, DateTimeKind.Unspecified),
                     entry.LastWriteTime.DateTime));
+
+            var expectedEntries = new List<string>();
+            var mainPaths = await GitLinesAsync(repositoryRoot, "ls-tree", "-r", "--name-only", "HEAD");
+            expectedEntries.AddRange(mainPaths
+                .Where(path => !ExpectedSourceSubmodules.Any(
+                    submodule => string.Equals(path, submodule.Path, StringComparison.Ordinal)))
+                .Where(path => !IsProhibitedSourceArchivePath(path))
+                .Select(path => $"{prefix}{path}"));
+            foreach (var (submodulePath, revision) in ExpectedSourceSubmodules)
+            {
+                var pinnedRevision = Assert.Single(await GitLinesAsync(
+                    repositoryRoot,
+                    "rev-parse",
+                    $"HEAD:{submodulePath}"));
+                Assert.Equal(revision, pinnedRevision);
+                var submodulePaths = await GitLinesAsync(
+                    Path.Combine(repositoryRoot, submodulePath.Replace('/', Path.DirectorySeparatorChar)),
+                    "ls-tree",
+                    "-r",
+                    "--name-only",
+                    revision);
+                expectedEntries.AddRange(submodulePaths
+                    .Where(path => !IsProhibitedSourceArchivePath(path))
+                    .Select(path => $"{prefix}{submodulePath}/{path}"));
+            }
+            Assert.Equal(
+                expectedEntries.Order(StringComparer.Ordinal),
+                entries);
         }
 
         AssertChecksumMatches(firstArchive);
@@ -445,8 +486,21 @@ public sealed class PinnedArtifactPublishTests : IDisposable
             || segment.Equals("bin", StringComparison.OrdinalIgnoreCase)
             || segment.Equals("obj", StringComparison.OrdinalIgnoreCase)
             || segment.Equals("artifacts", StringComparison.OrdinalIgnoreCase)
+            || segment.Equals(".superpowers", StringComparison.OrdinalIgnoreCase)
             || segment.Equals("private", StringComparison.OrdinalIgnoreCase)
             || segment.Equals("generated", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static async Task<string[]> GitLinesAsync(
+        string workingDirectory,
+        params string[] arguments)
+    {
+        var result = await RunProcessAsync("git.exe", workingDirectory, arguments);
+        Assert.True(
+            result.ExitCode == 0,
+            $"git {string.Join(' ', arguments)} failed with exit code {result.ExitCode}.\n{result.Output}");
+        return result.Output
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
     }
 
     private static void AssertChecksumMatches(string archivePath)

@@ -11,6 +11,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 Import-Module (Join-Path $PSScriptRoot 'SafeReleaseDirectories.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'ReleaseSourceState.psm1') -Force
 
 function Invoke-CheckedCommand {
     param(
@@ -26,6 +27,10 @@ function Invoke-CheckedCommand {
 }
 
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$releaseSourceContract = Get-ReleaseSourceContract
+Assert-ReleaseSourceState `
+    -RepositoryRoot $repositoryRoot `
+    -RequiredSubmodules $releaseSourceContract | Out-Null
 $artifactsDirectory = Open-SafeReleaseRoot -Path (Join-Path $repositoryRoot 'artifacts')
 $outputDirectory = $null
 $releaseWorkDirectory = $null
@@ -37,8 +42,10 @@ try {
     $releaseWork = $releaseWorkDirectory.Path
     $hostPublish = Join-Path $releaseWork 'rmm-bridge-host'
     $launcherPublish = Join-Path $releaseWork 'launcher'
+    $releaseOutput = Join-Path $releaseWork 'release-output'
     [IO.Directory]::CreateDirectory($hostPublish) | Out-Null
     [IO.Directory]::CreateDirectory($launcherPublish) | Out-Null
+    [IO.Directory]::CreateDirectory($releaseOutput) | Out-Null
 
     $nativeBuildScript = Join-Path $repositoryRoot 'scripts/build-native.ps1'
     Invoke-CheckedCommand `
@@ -149,8 +156,12 @@ try {
             '-DependencyManifestPath',
             $dependencyManifest,
             '-OutputPath',
-            $outputDirectory.Path) `
+            $releaseOutput) `
         -FailureMessage 'Verified release packaging failed.'
+
+    Assert-ReleaseSourceState `
+        -RepositoryRoot $repositoryRoot `
+        -RequiredSubmodules $releaseSourceContract | Out-Null
 
     $sourcePackageScript = Join-Path $repositoryRoot 'packaging/build-source-release.ps1'
     Invoke-CheckedCommand `
@@ -162,8 +173,27 @@ try {
             '-Version',
             $Version,
             '-OutputPath',
-            $outputDirectory.Path) `
+            $releaseOutput) `
         -FailureMessage 'Corresponding-source packaging failed.'
+
+    $releaseArtifactNames = @(
+        "DSR-for-MOD-v$Version-win-x64.zip",
+        "DSR-for-MOD-v$Version-win-x64.zip.sha256",
+        "DSR-for-MOD-v$Version-source.zip",
+        "DSR-for-MOD-v$Version-source.zip.sha256"
+    )
+    foreach ($name in $releaseArtifactNames) {
+        $stagedPath = Join-Path $releaseOutput $name
+        if (-not (Test-Path -LiteralPath $stagedPath -PathType Leaf)) {
+            throw "The verified release pair is incomplete: $stagedPath"
+        }
+    }
+    foreach ($name in $releaseArtifactNames) {
+        [IO.File]::Move(
+            (Join-Path $releaseOutput $name),
+            (Join-Path $outputDirectory.Path $name),
+            $true)
+    }
 }
 finally {
     try {

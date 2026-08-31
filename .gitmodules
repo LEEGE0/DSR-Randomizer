@@ -1,3 +1,9 @@
 [submodule "third_party/SoulsFormatsNEXT"]
 	path = third_party/SoulsFormatsNEXT
 	url = https://github.com/soulsmods/SoulsFormatsNEXT.git
+[submodule "third_party/ZstdNet"]
+	path = third_party/ZstdNet
+	url = https://github.com/skbkontur/ZstdNet.git
+[submodule "third_party/zstd"]
+	path = third_party/zstd
+	url = https://github.com/facebook/zstd.git
