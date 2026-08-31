@@ -24,21 +24,14 @@ BridgeBootstrapResult BootstrapRmmBridge(BridgeBootstrapPlatform& platform) noex
             platform.WriteFailureLog(&resolved.value, message);
             return Failure(102, std::move(message));
         }
-
-        const Save::SaveHookConfiguration hooks{
-            resolved.value.virtualDocuments,
-            resolved.value.virtualLogicalSave,
-            resolved.value.realSaveRoot,
-            resolved.value.externalSaveRoot,
-            resolved.value.dedicatedRmm,
-            true,
-            false,
-            resolved.value.overhaulGameParamSource,
-            resolved.value.overhaulGameParamTarget,
-        };
-        if (!platform.InstallHooks(hooks, message)) {
+        if (!platform.PrepareCallsiteRedirect(
+                resolved.value.dedicatedRmm, message)) {
             platform.WriteFailureLog(&resolved.value, message);
-            return Failure(103, std::move(message));
+            return Failure(106, std::move(message));
+        }
+        if (!platform.InstallCallsiteRedirect(message)) {
+            platform.WriteFailureLog(&resolved.value, message);
+            return Failure(107, std::move(message));
         }
         return BridgeBootstrapResult{true, 0, L""};
     } catch (const std::exception&) {

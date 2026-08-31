@@ -1,15 +1,22 @@
 #pragma once
 
+#include <optional>
+
 #include "bridge/RmmBridgeBootstrap.h"
 #include "bridge/RmmBridgeConfiguration.h"
+#include "save/SaveCallsiteRedirect.h"
 
 namespace DSRRandomizer::Bridge {
+
+[[nodiscard]] std::wstring DeriveExternalRootFromBridgeModulePath(
+    std::wstring_view modulePath);
 
 class WindowsBridgePlatform final
     : public BridgeConfigurationPlatform,
       public BridgeBootstrapPlatform {
 public:
     [[nodiscard]] std::wstring ProcessImagePath() const override;
+    [[nodiscard]] std::wstring ExternalRootPath() const override;
     [[nodiscard]] std::wstring DocumentsPath() const override;
     [[nodiscard]] bool ReadBoundedUtf8(
         const std::wstring& path,
@@ -29,12 +36,17 @@ public:
     [[nodiscard]] bool StartHostAndWaitReady(
         const BridgeConfiguration& configuration,
         std::wstring& message) override;
-    [[nodiscard]] bool InstallHooks(
-        const Save::SaveHookConfiguration& configuration,
+    [[nodiscard]] bool PrepareCallsiteRedirect(
+        const std::wstring& dedicatedRmm,
+        std::wstring& message) override;
+    [[nodiscard]] bool InstallCallsiteRedirect(
         std::wstring& message) override;
     void WriteFailureLog(
         const BridgeConfiguration* configuration,
         std::wstring_view message) override;
+
+private:
+    std::optional<Save::SaveCallsiteRedirectConfiguration> preparedCallsite_;
 };
 
 }  // namespace DSRRandomizer::Bridge

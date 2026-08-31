@@ -4,7 +4,6 @@
 #include <string_view>
 
 #include "bridge/RmmBridgeConfiguration.h"
-#include "save/SaveHooks.h"
 
 namespace DSRRandomizer::Bridge {
 
@@ -21,8 +20,10 @@ public:
     [[nodiscard]] virtual bool StartHostAndWaitReady(
         const BridgeConfiguration& configuration,
         std::wstring& message) = 0;
-    [[nodiscard]] virtual bool InstallHooks(
-        const Save::SaveHookConfiguration& configuration,
+    [[nodiscard]] virtual bool PrepareCallsiteRedirect(
+        const std::wstring& dedicatedRmm,
+        std::wstring& message) = 0;
+    [[nodiscard]] virtual bool InstallCallsiteRedirect(
         std::wstring& message) = 0;
     virtual void WriteFailureLog(
         const BridgeConfiguration* configuration,

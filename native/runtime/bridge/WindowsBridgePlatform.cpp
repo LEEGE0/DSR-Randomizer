@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "bridge/RmmBridgeHostClient.h"
+#include "profile/PinnedCompatibilityProfile.h"
 
 namespace DSRRandomizer::Bridge {
 namespace {
@@ -55,6 +56,29 @@ std::wstring DeriveExternalRoot(std::wstring processImage) {
     return Parent(runtimesRoot);
 }
 
+std::wstring BridgeModulePath() {
+    HMODULE module = nullptr;
+    if (!GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+                | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(&DeriveExternalRootFromBridgeModulePath),
+            &module)) {
+        return {};
+    }
+    std::vector<wchar_t> buffer(512);
+    while (true) {
+        const auto length = GetModuleFileNameW(
+            module, buffer.data(), static_cast<DWORD>(buffer.size()));
+        if (length == 0) {
+            return {};
+        }
+        if (length < buffer.size() - 1) {
+            return std::wstring(buffer.data(), length);
+        }
+        buffer.resize(buffer.size() * 2);
+    }
+}
+
 bool ReadAll(HANDLE file, std::vector<unsigned char>& bytes) {
     DWORD read{};
     std::size_t offset = 0;
@@ -73,6 +97,17 @@ bool ReadAll(HANDLE file, std::vector<unsigned char>& bytes) {
 
 }  // namespace
 
+std::wstring DeriveExternalRootFromBridgeModulePath(
+    const std::wstring_view modulePath) {
+    const auto bridgeDirectory = Parent(std::wstring(modulePath));
+    const auto componentsDirectory = Parent(bridgeDirectory);
+    if (_wcsicmp(Leaf(bridgeDirectory).c_str(), L"rmm-bridge") != 0
+        || _wcsicmp(Leaf(componentsDirectory).c_str(), L"components") != 0) {
+        return {};
+    }
+    return Parent(componentsDirectory);
+}
+
 std::wstring WindowsBridgePlatform::ProcessImagePath() const {
     std::vector<wchar_t> buffer(512);
     while (true) {
@@ -86,6 +121,10 @@ std::wstring WindowsBridgePlatform::ProcessImagePath() const {
         }
         buffer.resize(buffer.size() * 2);
     }
+}
+
+std::wstring WindowsBridgePlatform::ExternalRootPath() const {
+    return DeriveExternalRootFromBridgeModulePath(BridgeModulePath());
 }
 
 std::wstring WindowsBridgePlatform::DocumentsPath() const {
@@ -254,28 +293,63 @@ BridgeConfigurationResult WindowsBridgePlatform::ResolveConfiguration() {
 bool WindowsBridgePlatform::StartHostAndWaitReady(
     const BridgeConfiguration& configuration,
     std::wstring& message) {
-    return StartRmmBridgeHostAndWaitReady(configuration, message);
+    const auto ready = StartRmmBridgeHostAndWaitReady(configuration, message);
+    if (ready) {
+        WriteFailureLog(&configuration, L"DIAGNOSTIC host-ready");
+    }
+    return ready;
 }
 
-bool WindowsBridgePlatform::InstallHooks(
-    const Save::SaveHookConfiguration& configuration,
+bool WindowsBridgePlatform::PrepareCallsiteRedirect(
+    const std::wstring& dedicatedRmm,
     std::wstring& message) {
-    const auto status = Save::InstallSaveHooks(configuration);
-    if (status != Save::SaveHookInstallStatus::Success) {
-        message = status == Save::SaveHookInstallStatus::InvalidConfiguration
-            ? L"The RMM save-hook configuration was rejected."
-            : L"The RMM save-hook detours could not be installed.";
+    WriteFailureLog(nullptr, L"DIAGNOSTIC callsite-prepare-start");
+    Save::SaveCallsiteRedirectConfiguration profile;
+    const auto profileStatus = Profile::BuildPinnedSaveCallsiteProfile(profile);
+    if (profileStatus != Profile::PinnedCompatibilityProfileStatus::Success) {
+        message = profileStatus
+                == Profile::PinnedCompatibilityProfileStatus::ProfileMismatch
+            ? L"The copied game does not match the pinned save-callsite profile."
+            : L"The pinned save-callsite profile is invalid.";
         return false;
     }
+    profile.dedicatedRmm = dedicatedRmm;
+    preparedCallsite_ = std::move(profile);
+    WriteFailureLog(nullptr, L"DIAGNOSTIC callsite-prepared");
+    return true;
+}
+
+bool WindowsBridgePlatform::InstallCallsiteRedirect(
+    std::wstring& message) {
+    WriteFailureLog(nullptr, L"DIAGNOSTIC callsite-install-start");
+    if (!preparedCallsite_.has_value()) {
+        message = L"The RMM save-callsite redirect was not prepared.";
+        return false;
+    }
+    auto profile = std::move(*preparedCallsite_);
+    preparedCallsite_.reset();
+    const auto redirectStatus = Save::InstallSaveCallsiteRedirect(
+        profile);
+    if (redirectStatus != Save::SaveCallsiteRedirectInstallStatus::Success) {
+        message = redirectStatus
+                == Save::SaveCallsiteRedirectInstallStatus::ProfileMismatch
+            ? L"The RMM save-callsite profile does not match the copied game."
+            : L"The RMM save-callsite redirect could not be installed.";
+        return false;
+    }
+    WriteFailureLog(nullptr, L"DIAGNOSTIC callsite-installed");
     return true;
 }
 
 void WindowsBridgePlatform::WriteFailureLog(
     const BridgeConfiguration* configuration,
     const std::wstring_view message) {
-    const auto externalRoot = configuration != nullptr
+    auto externalRoot = configuration != nullptr
         ? configuration->externalRoot
         : DeriveExternalRoot(ProcessImagePath());
+    if (externalRoot.empty()) {
+        externalRoot = DeriveExternalRootFromBridgeModulePath(BridgeModulePath());
+    }
     if (externalRoot.empty()) {
         return;
     }

@@ -16,7 +16,6 @@ using DSRRandomizer::Bridge::BridgeConfigurationResult;
 using DSRRandomizer::Bridge::BootstrapRmmBridge;
 using DSRRandomizer::Bridge::BuildHostCommandLine;
 using DSRRandomizer::Bridge::DeriveExternalRootFromBridgeModulePath;
-using DSRRandomizer::Save::SaveHookConfiguration;
 
 class FakePlatform final : public BridgeBootstrapPlatform {
 public:
@@ -47,12 +46,18 @@ public:
         return hostSucceeds;
     }
 
-    bool InstallHooks(const SaveHookConfiguration& configuration,
-                      std::wstring& message) override {
-        calls.emplace_back("install-hooks");
-        installedConfiguration = configuration;
-        message = hooksSucceed ? L"" : L"hooks failed";
-        return hooksSucceed;
+    bool PrepareCallsiteRedirect(const std::wstring& dedicatedRmm,
+                                 std::wstring& message) override {
+        calls.emplace_back("prepare-callsite");
+        installedCallsiteRmm = dedicatedRmm;
+        message = prepareCallsiteSucceeds ? L"" : L"prepare callsite failed";
+        return prepareCallsiteSucceeds;
+    }
+
+    bool InstallCallsiteRedirect(std::wstring& message) override {
+        calls.emplace_back("install-callsite");
+        message = callsiteSucceeds ? L"" : L"callsite failed";
+        return callsiteSucceeds;
     }
 
     void WriteFailureLog(const BridgeConfiguration*, std::wstring_view) override {
@@ -61,9 +66,10 @@ public:
 
     bool resolveSucceeds{true};
     bool hostSucceeds{true};
-    bool hooksSucceed{true};
+    bool prepareCallsiteSucceeds{true};
+    bool callsiteSucceeds{true};
     std::vector<std::string> calls;
-    SaveHookConfiguration installedConfiguration{};
+    std::wstring installedCallsiteRmm;
 };
 
 int Fail(std::string_view message) {
@@ -102,26 +108,13 @@ int main() {
     FakePlatform success;
     const auto result = BootstrapRmmBridge(success);
     if (!result.ok
-        || success.calls != std::vector<std::string>{"resolve", "host-ready", "install-hooks"}) {
-        return Fail("bootstrap did not preserve resolve-host-hook order");
+        || success.calls != std::vector<std::string>{
+            "resolve", "host-ready", "prepare-callsite", "install-callsite"}) {
+        return Fail("bootstrap did not preserve callsite preparation order");
     }
-    if (!success.installedConfiguration.protectFileIo
-        || success.installedConfiguration.diagnosticMode
-        || success.installedConfiguration.dedicatedRmm
-            != LR"(D:\root\saves\146808034\DRAKS0005.rmm)"
-        || success.installedConfiguration.overhaulGameParamSource
-            != LR"(C:\Steam\DARK SOULS REMASTERED\overhaul\GameParam.parambnd.dcx)"
-        || success.installedConfiguration.overhaulGameParamTarget
-            != LR"(D:\root\components\rmm-bridge\content\overhaul\GameParam.parambnd.dcx)") {
-        return Fail("bootstrap installed the wrong save-hook configuration");
-    }
-
-    const SaveHookConfiguration normalGuardedLaunch{
-        L"virtual-documents", L"virtual-save", L"real-save-root",
-        L"external-save-root", L"dedicated.rmm", true, false};
-    if (!normalGuardedLaunch.overhaulGameParamSource.empty()
-        || !normalGuardedLaunch.overhaulGameParamTarget.empty()) {
-        return Fail("normal guarded launch did not keep GameParam redirect disabled");
+    if (success.installedCallsiteRmm
+        != LR"(D:\root\saves\146808034\DRAKS0005.rmm)") {
+        return Fail("bootstrap installed the wrong save-callsite redirect");
     }
 
     FakePlatform hostFailure;
@@ -132,12 +125,20 @@ int main() {
         return Fail("host failure did not stop before hook installation and log once");
     }
 
-    FakePlatform hookFailure;
-    hookFailure.hooksSucceed = false;
-    if (BootstrapRmmBridge(hookFailure).ok
-        || hookFailure.calls
-            != std::vector<std::string>{"resolve", "host-ready", "install-hooks", "log"}) {
-        return Fail("hook failure was not logged");
+    FakePlatform prepareCallsiteFailure;
+    prepareCallsiteFailure.prepareCallsiteSucceeds = false;
+    if (BootstrapRmmBridge(prepareCallsiteFailure).ok
+        || prepareCallsiteFailure.calls != std::vector<std::string>{
+            "resolve", "host-ready", "prepare-callsite", "log"}) {
+        return Fail("callsite preparation failure was not logged");
+    }
+
+    FakePlatform callsiteFailure;
+    callsiteFailure.callsiteSucceeds = false;
+    if (BootstrapRmmBridge(callsiteFailure).ok
+        || callsiteFailure.calls != std::vector<std::string>{
+            "resolve", "host-ready", "prepare-callsite", "install-callsite", "log"}) {
+        return Fail("callsite failure was not logged");
     }
 
     FakePlatform resolveFailure;

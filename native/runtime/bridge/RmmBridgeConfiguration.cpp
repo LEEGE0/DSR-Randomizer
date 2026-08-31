@@ -232,6 +232,14 @@ std::optional<std::int64_t> IntegerValue(const JsonObject& object, std::string_v
     return std::get<std::int64_t>(found->second);
 }
 
+std::optional<bool> BooleanValue(const JsonObject& object, std::string_view key) {
+    const auto found = object.find(key);
+    if (found == object.end() || !std::holds_alternative<bool>(found->second)) {
+        return std::nullopt;
+    }
+    return std::get<bool>(found->second);
+}
+
 bool HasExactly(const JsonObject& object, const std::set<std::string, std::less<>>& keys) {
     if (object.size() != keys.size()) {
         return false;
@@ -368,8 +376,9 @@ BridgeConfigurationResult ResolveBridgeConfiguration(
     const auto metadataSteamId = AsciiWide(*metadata, "steamId");
     const auto fixedLength = IntegerValue(*metadata, "fixedLength");
     const auto expectedHash = StringValue(*metadata, "lastKnownSha256");
+    const auto cleanExit = BooleanValue(*metadata, "cleanExit");
     if (!HasExactly(*metadata, metadataKeys) || !metadataSteamId || !fixedLength
-        || !expectedHash || *metadataSteamId != *steamId
+        || !expectedHash || !cleanExit || *metadataSteamId != *steamId
         || *fixedLength != static_cast<std::int64_t>(kDedicatedSaveLength)
         || !IsHexSha256(*expectedHash)) {
         return Failure(BridgeConfigurationError::MetadataInvalid,
@@ -387,7 +396,8 @@ BridgeConfigurationResult ResolveBridgeConfiguration(
                        L"The dedicated save is linked or is a reparse point.");
     }
     std::string actualHash;
-    if (!platform.Sha256File(dedicatedRmm, actualHash) || actualHash != *expectedHash) {
+    if (!platform.Sha256File(dedicatedRmm, actualHash)
+        || (*cleanExit && actualHash != *expectedHash)) {
         return Failure(BridgeConfigurationError::MetadataInvalid,
                        L"The dedicated save hash does not match its metadata.");
     }

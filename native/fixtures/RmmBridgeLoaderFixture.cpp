@@ -1,6 +1,4 @@
 #include <Windows.h>
-#include <knownfolders.h>
-#include <shlobj.h>
 
 #include <array>
 #include <cstddef>
@@ -20,8 +18,6 @@ struct FixtureCallsite final {
     std::array<std::uint8_t, kFingerprintSize> expected{};
     std::size_t pathArgumentIndex = 0;
 };
-
-std::array<std::array<std::byte, kFingerprintSize>, 2> callsiteBytes{};
 
 void** FindCreateFileImportSlot() noexcept {
     const auto* const base = reinterpret_cast<const std::byte*>(
@@ -68,50 +64,70 @@ void** FindCreateFileImportSlot() noexcept {
     return nullptr;
 }
 
-bool PopulateCallsite(
-    std::array<std::byte, kFingerprintSize>& bytes,
-    const std::size_t callOffset,
+__declspec(noinline) HANDLE OpenFixtureSaveForWrite(const wchar_t* path) {
+    const auto handle = CreateFileW(
+        path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (handle != INVALID_HANDLE_VALUE) {
+        DWORD flags{};
+        static_cast<void>(GetHandleInformation(handle, &flags));
+    }
+    return handle;
+}
+
+__declspec(noinline) HANDLE OpenFixtureSaveForRead(const wchar_t* path) {
+    const auto handle = CreateFileW(
+        path, GENERIC_READ, FILE_SHARE_READ, nullptr,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (handle != INVALID_HANDLE_VALUE) {
+        DWORD flags{};
+        static_cast<void>(GetHandleInformation(handle, &flags));
+    }
+    return handle;
+}
+
+bool DescribeExecutedCallsite(
+    const void* const function,
     void** const importSlot,
-    const std::array<std::uint8_t, kFingerprintSize>& suffix) noexcept {
-    if (importSlot == nullptr || callOffset > kFingerprintSize - 6) {
+    FixtureCallsite& target) noexcept {
+    constexpr std::size_t scanLength = 256;
+    const auto* const bytes = reinterpret_cast<const std::byte*>(function);
+    if (bytes == nullptr || importSlot == nullptr) {
         return false;
     }
-    bytes = {};
-    std::memcpy(bytes.data(), suffix.data(), suffix.size());
-    bytes[callOffset] = std::byte{0xff};
-    bytes[callOffset + 1] = std::byte{0x15};
-    const auto displacement = reinterpret_cast<std::intptr_t>(importSlot)
-        - (reinterpret_cast<std::intptr_t>(bytes.data() + callOffset) + 6);
-    if (displacement < std::numeric_limits<std::int32_t>::min()
-        || displacement > std::numeric_limits<std::int32_t>::max()) {
-        return false;
+    for (std::size_t offset = 0; offset + 6 <= scanLength; ++offset) {
+        if (bytes[offset] != std::byte{0xff} || bytes[offset + 1] != std::byte{0x15}) {
+            continue;
+        }
+        std::int32_t displacement{};
+        std::memcpy(&displacement, bytes + offset + 2, sizeof(displacement));
+        const auto* const resolvedSlot = reinterpret_cast<void* const*>(
+            reinterpret_cast<std::intptr_t>(bytes + offset + 6) + displacement);
+        if (resolvedSlot != importSlot) {
+            continue;
+        }
+        const auto start = offset >= 2 ? offset - 2 : offset;
+        if (start + kFingerprintSize > scanLength) {
+            return false;
+        }
+        target.address = const_cast<std::byte*>(bytes + start);
+        std::memcpy(target.expected.data(), bytes + start, target.expected.size());
+        target.pathArgumentIndex = offset - start;
+        return true;
     }
-    const auto relative = static_cast<std::int32_t>(displacement);
-    std::memcpy(bytes.data() + callOffset + 2, &relative, sizeof(relative));
-    return true;
+    return false;
 }
 
 bool BuildCallsites(FixtureCallsite* const targets) noexcept {
     auto** const importSlot = FindCreateFileImportSlot();
-    const std::array<std::uint8_t, kFingerprintSize> archiveSuffix{
-        0xff, 0x15, 0, 0, 0, 0, 0x48, 0x89, 0x46, 0x60, 0x48, 0x83, 0xf8, 0xff,
-    };
-    const std::array<std::uint8_t, kFingerprintSize> saveSuffix{
-        0x33, 0xd2, 0xff, 0x15, 0, 0, 0, 0, 0x48, 0x8b, 0xf8, 0x40, 0xb6, 0x01,
-    };
-    if (!PopulateCallsite(callsiteBytes[0], 0, importSlot, archiveSuffix)
-        || !PopulateCallsite(callsiteBytes[1], 2, importSlot, saveSuffix)) {
-        return false;
-    }
-    for (std::size_t index = 0; index < targets->expected.size(); ++index) {
-        targets[0].expected[index] = static_cast<std::uint8_t>(callsiteBytes[0][index]);
-        targets[1].expected[index] = static_cast<std::uint8_t>(callsiteBytes[1][index]);
-    }
-    targets[0].address = callsiteBytes[0].data();
-    targets[0].pathArgumentIndex = 0;
-    targets[1].address = callsiteBytes[1].data();
-    targets[1].pathArgumentIndex = 2;
-    return true;
+    return DescribeExecutedCallsite(
+               reinterpret_cast<const void*>(&OpenFixtureSaveForWrite),
+               importSlot,
+               targets[0])
+        && DescribeExecutedCallsite(
+               reinterpret_cast<const void*>(&OpenFixtureSaveForRead),
+               importSlot,
+               targets[1]);
 }
 
 }  // namespace
@@ -129,17 +145,9 @@ std::wstring Join(std::wstring left, const std::wstring& right) {
 }
 
 int wmain(int argc, wchar_t** argv) {
-    if (argc != 2) {
+    if (argc != 3) {
         return 2;
     }
-    PWSTR realDocumentsValue = nullptr;
-    if (FAILED(SHGetKnownFolderPath(
-            FOLDERID_Documents, KF_FLAG_DEFAULT, nullptr, &realDocumentsValue))) {
-        return 10;
-    }
-    const std::wstring realDocuments(realDocumentsValue);
-    CoTaskMemFree(realDocumentsValue);
-
     const auto bridge = LoadLibraryW(argv[1]);
     if (bridge == nullptr) {
         return 3;
@@ -154,13 +162,7 @@ int wmain(int argc, wchar_t** argv) {
         return 5;
     }
 
-    const auto logicalSave = Join(
-        Join(Join(Join(realDocuments, L"NBGI"), L"DARK SOULS REMASTERED"),
-             L"146808034"),
-        L"DRAKS0005.sl2");
-    const auto save = CreateFileW(
-        logicalSave.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ,
-        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    const auto save = OpenFixtureSaveForWrite(argv[2]);
     if (save == INVALID_HANDLE_VALUE) {
         return 8;
     }
@@ -177,13 +179,7 @@ int wmain(int argc, wchar_t** argv) {
         return 9;
     }
 
-    const auto normalSave = Join(
-        Join(Join(Join(realDocuments, L"NBGI"), L"DARK SOULS REMASTERED"),
-             L"146808034"),
-        L"DRAKS0005.sl2");
-    const auto redirected = CreateFileW(
-        normalSave.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
-        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    const auto redirected = OpenFixtureSaveForRead(argv[2]);
     if (redirected == INVALID_HANDLE_VALUE) {
         return 11;
     }
