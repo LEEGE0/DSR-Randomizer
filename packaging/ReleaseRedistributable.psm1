@@ -370,6 +370,42 @@ namespace DSRRandomizer.Packaging
                 Description);
         }
 
+        public void AssertSafeIdentityAndDisposeAtSuccessBoundary(
+            string expectedPath)
+        {
+            ThrowIfDisposed();
+            stream.Position = 0;
+            try
+            {
+                AssertSafeSuccessBoundaryIdentity(
+                    stream.SafeFileHandle,
+                    System.IO.Path.GetFullPath(expectedPath),
+                    Description);
+            }
+            catch (UnauthorizedAccessException)
+            {
+                try
+                {
+                    SetDeleteDisposition(stream.SafeFileHandle);
+                }
+                finally
+                {
+                    Dispose();
+                }
+                throw;
+            }
+            catch
+            {
+                Dispose();
+                throw;
+            }
+
+            // This is intentionally the immediate action after the final
+            // path/attributes/link-count observation. No hook, logging, or
+            // other resource cleanup belongs between that check and close.
+            Dispose();
+        }
+
         public static void InjectFinalPathResolutionFailureOnceForTest()
         {
             System.Threading.Interlocked.Exchange(
@@ -460,6 +496,38 @@ namespace DSRRandomizer.Packaging
             {
                 throw new UnauthorizedAccessException(
                     $"The owned {description} resolves outside its lexical path: {fullPath}");
+            }
+        }
+
+        private static void AssertSafeSuccessBoundaryIdentity(
+            SafeFileHandle handle,
+            string fullPath,
+            string description)
+        {
+            if (!ResolveFinalPath(handle).Equals(
+                    fullPath,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new UnauthorizedAccessException(
+                    $"The owned {description} resolves outside its lexical path: {fullPath}");
+            }
+            if (!GetFileInformationByHandle(handle, out var information))
+            {
+                throw new IOException(
+                    $"Unable to inspect owned {description}: {fullPath}",
+                    new Win32Exception(Marshal.GetLastWin32Error()));
+            }
+            var attributes = (FileAttributes)information.FileAttributes;
+            if ((attributes & FileAttributes.Directory) != 0
+                || (attributes & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new UnauthorizedAccessException(
+                    $"The owned {description} is a reparse point or not a regular file: {fullPath}");
+            }
+            if (information.NumberOfLinks != 1)
+            {
+                throw new UnauthorizedAccessException(
+                    $"The owned {description} has multiple hard links: {fullPath}");
             }
         }
 
@@ -1120,7 +1188,8 @@ function Assert-CommittedReleaseRedistributable {
         [Parameter(Mandatory = $true)]
         [ValidatePattern('^[0-9a-f]{64}$')]
         [string]$ExpectedSha256,
-        [Parameter(Mandatory = $true)][string]$Version
+        [Parameter(Mandatory = $true)][string]$Version,
+        [Parameter(Mandatory = $false)][switch]$DisposeAtSuccessBoundary
     )
 
     if ($OwnedFile.ComputeSha256() -cne $ExpectedSha256) {
@@ -1132,6 +1201,11 @@ function Assert-CommittedReleaseRedistributable {
         -Stream $OwnedFile.Stream `
         -Description $Path `
         -Version $Version | Out-Null
+
+    if ($DisposeAtSuccessBoundary) {
+        $OwnedFile.AssertSafeIdentityAndDisposeAtSuccessBoundary($Path)
+        return
+    }
 
     # This is deliberately the last fallible committed validation. Expensive
     # byte/ZIP checks run first while the handle denies mutation; immediately
@@ -1172,169 +1246,240 @@ function Publish-ReleaseRedistributableArchive {
     }
 
     $successBoundaryOwned = $null
-    $root = Open-SafeReleaseRoot -Path $OutputRoot
+    $root = $null
+    $lock = $null
+    $postCommitWarnings = [Collections.Generic.List[Exception]]::new()
     try {
-        $lock = [DSRRandomizer.Packaging.RedistributablePublicationLock]::Acquire(
-            $root.Path)
+        $root = Open-SafeReleaseRoot -Path $OutputRoot
         try {
-            Invoke-RedistributableHook `
-                -Hook $OperationHook `
-                -Phase 'AfterPublicationLockAcquired' `
-                -Path $root.Path
-
-            $finalPath = Join-Path $root.Path $FileName
-            $pendingPath = Join-Path $root.Path (
-                ".$FileName.pending-" + [Guid]::NewGuid().ToString('N'))
-            Assert-RedistributableDescendant -Candidate $finalPath -Root $root.Path
-            Assert-RedistributableDescendant -Candidate $pendingPath -Root $root.Path
-
-            $stagedLease = $null
-            $pendingOwned = $null
-            $finalOwned = $null
+            $lock = [DSRRandomizer.Packaging.RedistributablePublicationLock]::Acquire(
+                $root.Path)
             try {
-                $stagedLease = [DSRRandomizer.Packaging.RedistributableArtifactLease]::Acquire(
-                    $StagedArchivePath,
-                    'validated staged redistributable')
-                if ($stagedLease.ComputeSha256() -cne $ExpectedSha256) {
-                    throw 'The staged redistributable does not match its expected gated SHA-256.'
-                }
-                Assert-ReleaseRedistributableStream `
-                    -Stream $stagedLease.Stream `
-                    -Description $StagedArchivePath `
-                    -Version $Version | Out-Null
-
-                $pendingOwned = [DSRRandomizer.Packaging.RedistributableOwnedFile]::CreateFrom(
-                    $stagedLease,
-                    $pendingPath,
-                    'pending redistributable')
-                Assert-OwnedReleaseRedistributable `
-                    -OwnedFile $pendingOwned `
-                    -Path $pendingPath `
-                    -ExpectedSha256 $ExpectedSha256 `
-                    -Version $Version `
-                    -Description 'owned pending redistributable'
-
                 Invoke-RedistributableHook `
                     -Hook $OperationHook `
-                    -Phase 'BeforeHandleRename' `
-                    -Path $pendingPath
+                    -Phase 'AfterPublicationLockAcquired' `
+                    -Path $root.Path
 
-                # The hook is intentionally before this final same-handle
-                # safety and content check. Handle rename is the only commit.
-                Assert-OwnedReleaseRedistributable `
-                    -OwnedFile $pendingOwned `
-                    -Path $pendingPath `
-                    -ExpectedSha256 $ExpectedSha256 `
-                    -Version $Version `
-                    -Description 'pre-commit pending redistributable'
+                $finalPath = Join-Path $root.Path $FileName
+                $pendingPath = Join-Path $root.Path (
+                    ".$FileName.pending-" + [Guid]::NewGuid().ToString('N'))
+                Assert-RedistributableDescendant -Candidate $finalPath -Root $root.Path
+                Assert-RedistributableDescendant -Candidate $pendingPath -Root $root.Path
 
-                $committed = $false
-                try {
-                    $pendingOwned.RenameTo($finalPath, $true)
-                }
-                finally {
-                    # HasRenamed transitions synchronously and non-fallibly at
-                    # successful SetFileInformationByHandle return. Classify
-                    # the handle as committed before any path/content check.
-                    if ($pendingOwned.HasRenamed) {
-                        $committed = $true
-                        $finalOwned = $pendingOwned
-                        $pendingOwned = $null
-                    }
-                }
-                if (-not $committed) {
-                    throw 'Handle rename returned without a publication commit marker.'
-                }
-
-                $postCommitWarnings = [Collections.Generic.List[Exception]]::new()
-                try {
-                    Invoke-RedistributableHook `
-                        -Hook $OperationHook `
-                        -Phase 'AfterHandleRenameBeforeVerification' `
-                        -Path $finalPath
-                }
-                catch {
-                    $postCommitWarnings.Add($_.Exception)
-                }
-
-                # An unsafe alias/path identity is the only post-commit case
-                # that removes the canonical link. It never restores old bytes.
-                try {
-                    Assert-CommittedReleaseRedistributable `
-                        -OwnedFile $finalOwned `
-                        -Path $finalPath `
-                        -ExpectedSha256 $ExpectedSha256 `
-                        -Version $Version
-                }
-                catch [UnauthorizedAccessException] {
-                    throw
-                }
-                catch {
-                    $postCommitWarnings.Add($_.Exception)
-                }
-
-                try {
-                    Invoke-RedistributableHook `
-                        -Hook $OperationHook `
-                        -Phase 'AfterHandleRename' `
-                        -Path $finalPath
-                }
-                catch {
-                    $postCommitWarnings.Add($_.Exception)
-                }
-
-                foreach ($warning in $postCommitWarnings) {
-                    Write-Warning (
-                        'Redistributable publication committed the exact gated ' +
-                        "outer archive; post-commit work failed: $($warning.Message)") `
-                        -WarningAction Continue
-                }
-
-                # Keep this as the final operation before the live committed
-                # handle reaches the success-return boundary. The helper ends
-                # with the last same-handle path/attribute/link-count check.
-                # Transfer disposal outward first so the handle stays live
-                # while all other leases/locks unwind and is released only at
-                # the immediate return boundary.
-                $successBoundaryOwned = $finalOwned
+                $stagedLease = $null
+                $pendingOwned = $null
                 $finalOwned = $null
-                Assert-CommittedReleaseRedistributable `
-                    -OwnedFile $successBoundaryOwned `
-                    -Path $finalPath `
-                    -ExpectedSha256 $ExpectedSha256 `
-                    -Version $Version
-            }
-            finally {
-                if ($null -ne $pendingOwned) {
+                try {
+                    $stagedLease = [DSRRandomizer.Packaging.RedistributableArtifactLease]::Acquire(
+                        $StagedArchivePath,
+                        'validated staged redistributable')
+                    if ($stagedLease.ComputeSha256() -cne $ExpectedSha256) {
+                        throw 'The staged redistributable does not match its expected gated SHA-256.'
+                    }
+                    Assert-ReleaseRedistributableStream `
+                        -Stream $stagedLease.Stream `
+                        -Description $StagedArchivePath `
+                        -Version $Version | Out-Null
+
+                    $pendingOwned = [DSRRandomizer.Packaging.RedistributableOwnedFile]::CreateFrom(
+                        $stagedLease,
+                        $pendingPath,
+                        'pending redistributable')
+                    Assert-OwnedReleaseRedistributable `
+                        -OwnedFile $pendingOwned `
+                        -Path $pendingPath `
+                        -ExpectedSha256 $ExpectedSha256 `
+                        -Version $Version `
+                        -Description 'owned pending redistributable'
+
+                    Invoke-RedistributableHook `
+                        -Hook $OperationHook `
+                        -Phase 'BeforeHandleRename' `
+                        -Path $pendingPath
+
+                    # The hook is intentionally before this final same-handle
+                    # safety and content check. Handle rename is the only commit.
+                    Assert-OwnedReleaseRedistributable `
+                        -OwnedFile $pendingOwned `
+                        -Path $pendingPath `
+                        -ExpectedSha256 $ExpectedSha256 `
+                        -Version $Version `
+                        -Description 'pre-commit pending redistributable'
+
+                    $committed = $false
                     try {
-                        $pendingOwned.DeleteOnClose()
+                        $pendingOwned.RenameTo($finalPath, $true)
                     }
                     finally {
-                        $pendingOwned.Dispose()
+                        # HasRenamed transitions synchronously and non-fallibly
+                        # at successful SetFileInformationByHandle return.
+                        if ($pendingOwned.HasRenamed) {
+                            $committed = $true
+                            $finalOwned = $pendingOwned
+                            $pendingOwned = $null
+                        }
+                    }
+                    if (-not $committed) {
+                        throw 'Handle rename returned without a publication commit marker.'
+                    }
+
+                    try {
+                        Invoke-RedistributableHook `
+                            -Hook $OperationHook `
+                            -Phase 'AfterHandleRenameBeforeVerification' `
+                            -Path $finalPath
+                    }
+                    catch {
+                        $postCommitWarnings.Add($_.Exception)
+                    }
+
+                    try {
+                        Assert-CommittedReleaseRedistributable `
+                            -OwnedFile $finalOwned `
+                            -Path $finalPath `
+                            -ExpectedSha256 $ExpectedSha256 `
+                            -Version $Version
+                    }
+                    catch [UnauthorizedAccessException] {
+                        throw
+                    }
+                    catch {
+                        $postCommitWarnings.Add($_.Exception)
+                    }
+
+                    try {
+                        Invoke-RedistributableHook `
+                            -Hook $OperationHook `
+                            -Phase 'AfterHandleRename' `
+                            -Path $finalPath
+                    }
+                    catch {
+                        $postCommitWarnings.Add($_.Exception)
+                    }
+
+                    $successBoundaryOwned = $finalOwned
+                    $finalOwned = $null
+                }
+                finally {
+                    if ($null -ne $pendingOwned) {
+                        try {
+                            $pendingOwned.DeleteOnClose()
+                        }
+                        finally {
+                            $pendingOwned.Dispose()
+                            $pendingOwned = $null
+                        }
+                    }
+                    if ($null -ne $stagedLease) {
+                        $stagedLease.Dispose()
+                        $stagedLease = $null
+                        if ($null -ne $successBoundaryOwned) {
+                            try {
+                                Invoke-RedistributableHook `
+                                    -Hook $OperationHook `
+                                    -Phase 'AfterStagedSourceLeaseDisposed' `
+                                    -Path $finalPath
+                            }
+                            catch {
+                                $postCommitWarnings.Add($_.Exception)
+                            }
+                        }
+                    }
+                    if ($null -ne $finalOwned) {
+                        $finalOwned.Dispose()
+                        $finalOwned = $null
                     }
                 }
-                if ($null -ne $stagedLease) {
-                    $stagedLease.Dispose()
-                }
-                if ($null -ne $finalOwned) {
-                    $finalOwned.Dispose()
+            }
+            finally {
+                if ($null -ne $lock) {
+                    $lock.Dispose()
+                    $lock = $null
+                    if ($null -ne $successBoundaryOwned) {
+                        try {
+                            Invoke-RedistributableHook `
+                                -Hook $OperationHook `
+                                -Phase 'AfterPublicationLockDisposed' `
+                                -Path $finalPath
+                        }
+                        catch {
+                            $postCommitWarnings.Add($_.Exception)
+                        }
+                    }
                 }
             }
         }
         finally {
-            $lock.Dispose()
+            if ($null -ne $root) {
+                $root.Lease.Dispose()
+                $root = $null
+                if ($null -ne $successBoundaryOwned) {
+                    try {
+                        Invoke-RedistributableHook `
+                            -Hook $OperationHook `
+                            -Phase 'AfterOutputRootLeaseDisposed' `
+                            -Path $finalPath
+                    }
+                    catch {
+                        $postCommitWarnings.Add($_.Exception)
+                    }
+                }
+            }
         }
     }
-    finally {
-        try {
-            $root.Lease.Dispose()
-        }
-        finally {
-            if ($null -ne $successBoundaryOwned) {
+    catch {
+        if ($null -ne $successBoundaryOwned) {
+            try {
                 $successBoundaryOwned.Dispose()
             }
+            finally {
+                $successBoundaryOwned = $null
+            }
         }
+        throw
     }
+
+    try {
+        foreach ($warning in $postCommitWarnings) {
+            Write-Warning (
+                'Redistributable publication committed the exact gated ' +
+                "outer archive; post-commit work failed: $($warning.Message)") `
+                -WarningAction Continue
+        }
+        Invoke-RedistributableHook `
+            -Hook $OperationHook `
+            -Phase 'BeforeFinalSuccessValidation' `
+            -Path $finalPath
+    }
+    catch {
+        try {
+            $successBoundaryOwned.Dispose()
+        }
+        finally {
+            $successBoundaryOwned = $null
+        }
+        throw
+    }
+
+    try {
+        Assert-CommittedReleaseRedistributable `
+            -OwnedFile $successBoundaryOwned `
+            -Path $finalPath `
+            -ExpectedSha256 $ExpectedSha256 `
+            -Version $Version `
+            -DisposeAtSuccessBoundary
+    }
+    catch {
+        try {
+            $successBoundaryOwned.Dispose()
+        }
+        finally {
+            $successBoundaryOwned = $null
+        }
+        throw
+    }
+    $successBoundaryOwned = $null
+    return
 }
 
 function Remove-LegacyReleaseArtifacts {

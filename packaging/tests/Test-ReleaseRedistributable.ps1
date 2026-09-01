@@ -679,6 +679,113 @@ try {
     }
     Assert-NoPublicationResidue -OutputRoot $delayedLinkCase.OutputRoot
 
+    # All resources other than the committed canonical handle must finish
+    # before the final success validation. These literal lifecycle events are
+    # emitted only after each former finally-unwind resource is disposed; the
+    # returned function must also have released the canonical handle.
+    $boundaryOrderCase = New-Case -Root $testRoot -Name 'success-boundary-order'
+    $boundaryOrderFixture = New-OuterFixture `
+        -Case $boundaryOrderCase `
+        -Prefix 'boundary-order'
+    $boundaryOrderTrace = [Collections.Generic.List[string]]::new()
+    Publish-Fixture `
+        -Case $boundaryOrderCase `
+        -Fixture $boundaryOrderFixture `
+        -OperationHook {
+            param($Phase, $Path)
+            if ($Phase -in @(
+                    'AfterStagedSourceLeaseDisposed',
+                    'AfterPublicationLockDisposed',
+                    'AfterOutputRootLeaseDisposed',
+                    'BeforeFinalSuccessValidation')) {
+                $boundaryOrderTrace.Add($Phase)
+            }
+        }
+    $boundaryOrderTrace.Add('Return')
+    $expectedBoundaryOrder = @(
+        'AfterStagedSourceLeaseDisposed',
+        'AfterPublicationLockDisposed',
+        'AfterOutputRootLeaseDisposed',
+        'BeforeFinalSuccessValidation',
+        'Return'
+    )
+    if (@(Compare-Object `
+                $expectedBoundaryOrder `
+                @($boundaryOrderTrace) `
+                -SyncWindow 0).Count -ne 0) {
+        throw "Unexpected success-boundary order: $($boundaryOrderTrace -join ' -> ')"
+    }
+    $boundaryCanonical = Join-Path $boundaryOrderCase.OutputRoot $outerName
+    $boundaryExclusive = [IO.FileStream]::new(
+        $boundaryCanonical,
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::ReadWrite,
+        [IO.FileShare]::None)
+    $boundaryExclusive.Dispose()
+
+    # At every former resource-unwind seam, a delayed same-user hard-link
+    # attempt must now occur before the final identity observation. The final
+    # check rejects every alias, so none can yield an accepted canonical.
+    foreach ($unwindPhase in @(
+            'AfterStagedSourceLeaseDisposed',
+            'AfterPublicationLockDisposed',
+            'AfterOutputRootLeaseDisposed')) {
+        $phaseLeaf = $unwindPhase.Replace('After', '').Replace('Disposed', '').ToLowerInvariant()
+        $unwindCase = New-Case `
+            -Root $testRoot `
+            -Name "hardlink-former-unwind-$phaseLeaf"
+        $unwindFixture = New-OuterFixture `
+            -Case $unwindCase `
+            -Prefix $phaseLeaf
+        $unwindCanonical = Join-Path $unwindCase.OutputRoot $outerName
+        $unwindAlias = Join-Path $unwindCase.OutputRoot "$phaseLeaf-alias.zip"
+        $script:unwindPhaseObserved = $false
+        Assert-Failed `
+            -Message 'multiple hard links' `
+            -Action {
+                try {
+                    Publish-Fixture `
+                        -Case $unwindCase `
+                        -Fixture $unwindFixture `
+                        -OperationHook {
+                            param($Phase, $Path)
+                            if ($Phase -ceq $unwindPhase) {
+                                $job = Start-ThreadJob `
+                                    -ArgumentList $Path, $unwindAlias `
+                                    -ScriptBlock {
+                                        param($CanonicalPath, $AliasPath)
+                                        Start-Sleep -Milliseconds 5
+                                        New-Item `
+                                            -ItemType HardLink `
+                                            -Path $AliasPath `
+                                            -Target $CanonicalPath | Out-Null
+                                    }
+                                try {
+                                    Wait-Job -Job $job -Timeout 30 | Out-Null
+                                    Receive-Job -Job $job -ErrorAction Stop | Out-Null
+                                }
+                                finally {
+                                    Remove-Job -Job $job -Force
+                                }
+                                $script:unwindPhaseObserved = $true
+                            }
+                        }
+                }
+                finally {
+                    if (Test-Path -LiteralPath $unwindAlias) {
+                        [IO.File]::Delete($unwindAlias)
+                    }
+                }
+            }
+        if (-not $script:unwindPhaseObserved) {
+            throw "Former unwind phase was not observed: $unwindPhase"
+        }
+        if (Test-Path -LiteralPath $unwindCanonical) {
+            throw "Former unwind hard-link left an accepted canonical: $unwindPhase"
+        }
+        Assert-NoPublicationResidue -OutputRoot $unwindCase.OutputRoot
+    }
+
     $lockedCase = New-Case -Root $testRoot -Name 'locked-canonical'
     $lockedOld = New-OuterFixture -Case $lockedCase -Prefix 'old'
     Publish-Fixture -Case $lockedCase -Fixture $lockedOld
