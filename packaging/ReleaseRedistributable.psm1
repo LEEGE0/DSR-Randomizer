@@ -264,18 +264,6 @@ namespace DSRRandomizer.Packaging
             return Create(path, description, source.CopyTo);
         }
 
-        public static RedistributableOwnedFile CreateFrom(
-            RedistributableOwnedFile source,
-            string path,
-            string description)
-        {
-            if (source == null)
-            {
-                throw new ArgumentNullException(nameof(source));
-            }
-            return Create(path, description, source.CopyTo);
-        }
-
         public static RedistributableOwnedFile OpenExisting(
             string path,
             string description)
@@ -370,11 +358,13 @@ namespace DSRRandomizer.Packaging
             return result;
         }
 
-        public void CopyTo(Stream destination)
+        public void AssertSafeIdentity(string expectedPath)
         {
             ThrowIfDisposed();
-            stream.Position = 0;
-            stream.CopyTo(destination, 1024 * 1024);
+            AssertSafeRegularFile(
+                stream.SafeFileHandle,
+                System.IO.Path.GetFullPath(expectedPath),
+                Description);
             stream.Position = 0;
         }
 
@@ -1083,6 +1073,64 @@ function Remove-ExactRegularFile {
     }
 }
 
+function Assert-OwnedReleaseRedistributable {
+    param(
+        [Parameter(Mandatory = $true)][object]$OwnedFile,
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[0-9a-f]{64}$')]
+        [string]$ExpectedSha256,
+        [Parameter(Mandatory = $true)][string]$Version,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    $OwnedFile.AssertSafeIdentity($Path)
+    if ($OwnedFile.ComputeSha256() -cne $ExpectedSha256) {
+        throw "The $Description does not match its expected gated SHA-256."
+    }
+    Assert-ReleaseRedistributableStream `
+        -Stream $OwnedFile.Stream `
+        -Description $Path `
+        -Version $Version | Out-Null
+}
+
+function Assert-CommittedReleaseRedistributable {
+    param(
+        [Parameter(Mandatory = $true)][object]$OwnedFile,
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[0-9a-f]{64}$')]
+        [string]$ExpectedSha256,
+        [Parameter(Mandatory = $true)][string]$Version
+    )
+
+    try {
+        $OwnedFile.AssertSafeIdentity($Path)
+    }
+    catch {
+        $identityError = $_
+        try {
+            $OwnedFile.DeleteOnClose()
+        }
+        catch {
+            throw [AggregateException]::new(
+                'Committed redistributable identity was unsafe and its canonical link could not be removed.',
+                @($identityError.Exception, $_.Exception))
+        }
+        throw $identityError
+    }
+
+    if ($OwnedFile.ComputeSha256() -cne $ExpectedSha256) {
+        throw (
+            'The exact committed redistributable handle no longer matches ' +
+            'its expected gated SHA-256.')
+    }
+    Assert-ReleaseRedistributableStream `
+        -Stream $OwnedFile.Stream `
+        -Description $Path `
+        -Version $Version | Out-Null
+}
+
 function Publish-ReleaseRedistributableArchive {
     param(
         [Parameter(Mandatory = $true)][string]$StagedArchivePath,
@@ -1099,6 +1147,7 @@ function Publish-ReleaseRedistributableArchive {
     if ($FileName -cne $expectedName -or [IO.Path]::GetFileName($FileName) -cne $FileName) {
         throw "Redistributable output name must be exact: $expectedName"
     }
+
     $root = Open-SafeReleaseRoot -Path $OutputRoot
     try {
         $lock = [DSRRandomizer.Packaging.RedistributablePublicationLock]::Acquire(
@@ -1112,41 +1161,16 @@ function Publish-ReleaseRedistributableArchive {
             $finalPath = Join-Path $root.Path $FileName
             $pendingPath = Join-Path $root.Path (
                 ".$FileName.pending-" + [Guid]::NewGuid().ToString('N'))
-            $backupPath = "$finalPath.previous"
             Assert-RedistributableDescendant -Candidate $finalPath -Root $root.Path
             Assert-RedistributableDescendant -Candidate $pendingPath -Root $root.Path
-            Assert-RedistributableDescendant -Candidate $backupPath -Root $root.Path
 
-            if (Test-Path -LiteralPath $backupPath) {
-                if (-not (Test-Path -LiteralPath $finalPath -PathType Leaf)) {
-                    throw "A whole-archive backup exists without its canonical archive: $backupPath"
-                }
-                $staleBackup = [DSRRandomizer.Packaging.RedistributableOwnedFile]::OpenExisting(
-                    $backupPath,
-                    'previous redistributable backup')
-                try {
-                    Assert-ReleaseRedistributableStream `
-                        -Stream $staleBackup.Stream `
-                        -Description $backupPath `
-                        -Version $Version | Out-Null
-                    $staleBackup.DeleteOnClose()
-                }
-                finally {
-                    $staleBackup.Dispose()
-                }
-            }
-
-            $stagedLease = [DSRRandomizer.Packaging.RedistributableArtifactLease]::Acquire(
-                $StagedArchivePath,
-                'validated staged redistributable')
-            $priorHash = $null
-            $priorLease = $null
+            $stagedLease = $null
             $pendingOwned = $null
-            $backupOwned = $null
             $finalOwned = $null
-            $rollbackOwned = $null
-            $replaced = $false
             try {
+                $stagedLease = [DSRRandomizer.Packaging.RedistributableArtifactLease]::Acquire(
+                    $StagedArchivePath,
+                    'validated staged redistributable')
                 if ($stagedLease.ComputeSha256() -cne $ExpectedSha256) {
                     throw 'The staged redistributable does not match its expected gated SHA-256.'
                 }
@@ -1154,162 +1178,80 @@ function Publish-ReleaseRedistributableArchive {
                     -Stream $stagedLease.Stream `
                     -Description $StagedArchivePath `
                     -Version $Version | Out-Null
+
                 $pendingOwned = [DSRRandomizer.Packaging.RedistributableOwnedFile]::CreateFrom(
                     $stagedLease,
                     $pendingPath,
                     'pending redistributable')
-                if ($pendingOwned.ComputeSha256() -cne $ExpectedSha256) {
-                    throw 'The owned pending redistributable is not byte-exact.'
-                }
-                Assert-ReleaseRedistributableStream `
-                    -Stream $pendingOwned.Stream `
-                    -Description $pendingPath `
-                    -Version $Version | Out-Null
+                Assert-OwnedReleaseRedistributable `
+                    -OwnedFile $pendingOwned `
+                    -Path $pendingPath `
+                    -ExpectedSha256 $ExpectedSha256 `
+                    -Version $Version `
+                    -Description 'owned pending redistributable'
 
-                if (Test-Path -LiteralPath $finalPath -PathType Leaf) {
-                    $priorLease = [DSRRandomizer.Packaging.RedistributableArtifactLease]::Acquire(
-                        $finalPath,
-                        'prior redistributable')
-                    $priorHash = $priorLease.ComputeSha256()
-                    Assert-ReleaseRedistributableStream `
-                        -Stream $priorLease.Stream `
-                        -Description $finalPath `
-                        -Version $Version | Out-Null
-                    $backupOwned = [DSRRandomizer.Packaging.RedistributableOwnedFile]::CreateFrom(
-                        $priorLease,
-                        $backupPath,
-                        'whole redistributable backup')
-                    if ($backupOwned.ComputeSha256() -cne $priorHash) {
-                        throw 'The whole redistributable backup is not byte-exact.'
-                    }
-                    Assert-ReleaseRedistributableStream `
-                        -Stream $backupOwned.Stream `
-                        -Description $backupPath `
-                        -Version $Version | Out-Null
-                    $priorLease.Dispose()
-                    $priorLease = $null
-                }
-
-                Invoke-RedistributableHook `
-                    -Hook $OperationHook `
-                    -Phase 'BeforeAtomicReplace' `
-                    -Path $finalPath
                 Invoke-RedistributableHook `
                     -Hook $OperationHook `
                     -Phase 'BeforeHandleRename' `
                     -Path $pendingPath
+
+                # The hook is intentionally before this final same-handle
+                # safety and content check. Handle rename is the only commit.
+                Assert-OwnedReleaseRedistributable `
+                    -OwnedFile $pendingOwned `
+                    -Path $pendingPath `
+                    -ExpectedSha256 $ExpectedSha256 `
+                    -Version $Version `
+                    -Description 'pre-commit pending redistributable'
+
                 $pendingOwned.RenameTo($finalPath, $true)
                 $finalOwned = $pendingOwned
                 $pendingOwned = $null
-                $replaced = $true
-                Invoke-RedistributableHook `
-                    -Hook $OperationHook `
-                    -Phase 'BeforeFinalVerification' `
-                    -Path $finalPath
-                if ($finalOwned.ComputeSha256() -cne $ExpectedSha256) {
-                    throw 'Published redistributable SHA-256 does not match the gated input.'
+
+                $postCommitWarnings = [Collections.Generic.List[Exception]]::new()
+                try {
+                    Invoke-RedistributableHook `
+                        -Hook $OperationHook `
+                        -Phase 'AfterHandleRenameBeforeVerification' `
+                        -Path $finalPath
                 }
-                Assert-ReleaseRedistributableStream `
-                    -Stream $finalOwned.Stream `
-                    -Description $finalPath `
-                    -Version $Version | Out-Null
-                if ($null -ne $backupOwned) {
-                    try {
-                        Invoke-RedistributableHook `
-                            -Hook $OperationHook `
-                            -Phase 'BeforeBackupCleanup' `
-                            -Path $backupPath
-                        $backupOwned.DeleteOnClose()
-                        $backupOwned.Dispose()
-                        $backupOwned = $null
-                    }
-                    catch {
-                        Write-Warning (
-                            'Published redistributable is valid, but its whole-file ' +
-                            "backup could not be removed: $backupPath. $($_.Exception.Message)")
-                    }
+                catch {
+                    $postCommitWarnings.Add($_.Exception)
                 }
-            }
-            catch {
-                $publicationError = $_
-                if ($null -ne $priorLease) {
-                    $priorLease.Dispose()
-                    $priorLease = $null
+
+                # An unsafe alias/path identity is the only post-commit case
+                # that removes the canonical link. It never restores old bytes.
+                Assert-CommittedReleaseRedistributable `
+                    -OwnedFile $finalOwned `
+                    -Path $finalPath `
+                    -ExpectedSha256 $ExpectedSha256 `
+                    -Version $Version
+
+                try {
+                    Invoke-RedistributableHook `
+                        -Hook $OperationHook `
+                        -Phase 'AfterHandleRename' `
+                        -Path $finalPath
                 }
-                if ($replaced) {
-                    try {
-                        $failedPath = Join-Path $root.Path (
-                            ".$FileName.failed-" + [Guid]::NewGuid().ToString('N'))
-                        Assert-RedistributableDescendant `
-                            -Candidate $failedPath `
-                            -Root $root.Path
-                        $finalOwned.RenameTo($failedPath, $false)
-                        $finalOwned.DeleteOnClose()
-                        if ($null -ne $backupOwned) {
-                            $rollbackPath = Join-Path $root.Path (
-                                ".$FileName.rollback-" + [Guid]::NewGuid().ToString('N'))
-                            Assert-RedistributableDescendant `
-                                -Candidate $rollbackPath `
-                                -Root $root.Path
-                            $rollbackOwned = [DSRRandomizer.Packaging.RedistributableOwnedFile]::CreateFrom(
-                                $backupOwned,
-                                $rollbackPath,
-                                'rollback redistributable candidate')
-                            if ($rollbackOwned.ComputeSha256() -cne $priorHash) {
-                                throw 'Rollback candidate does not match the leased prior bytes.'
-                            }
-                            Assert-ReleaseRedistributableStream `
-                                -Stream $rollbackOwned.Stream `
-                                -Description $rollbackPath `
-                                -Version $Version | Out-Null
-                            Invoke-RedistributableHook `
-                                -Hook $OperationHook `
-                                -Phase 'BeforeRollback' `
-                                -Path $backupPath
-                            $rollbackOwned.RenameTo($finalPath, $false)
-                            if ($rollbackOwned.ComputeSha256() -cne $priorHash) {
-                                throw 'Restored redistributable does not match the leased prior bytes.'
-                            }
-                            Assert-ReleaseRedistributableStream `
-                                -Stream $rollbackOwned.Stream `
-                                -Description $finalPath `
-                                -Version $Version | Out-Null
-                            try {
-                                $backupOwned.DeleteOnClose()
-                                $backupOwned.Dispose()
-                                $backupOwned = $null
-                            }
-                            catch {
-                                Write-Warning (
-                                    'Rollback restored the prior redistributable, but its ' +
-                                    "whole-file backup remains: $backupPath. $($_.Exception.Message)")
-                            }
-                        }
-                    }
-                    catch {
-                        throw [AggregateException]::new(
-                            'Redistributable publication and handle-owned rollback both failed.',
-                            @($publicationError.Exception, $_.Exception))
-                    }
+                catch {
+                    $postCommitWarnings.Add($_.Exception)
                 }
-                elseif ($null -ne $backupOwned) {
-                    try {
-                        $backupOwned.DeleteOnClose()
-                        $backupOwned.Dispose()
-                        $backupOwned = $null
-                    }
-                    catch {
-                        Write-Warning (
-                            'Unused whole-file backup could not be removed after a ' +
-                            "pre-replace failure: $backupPath. $($_.Exception.Message)")
-                    }
+
+                # Keep the expected canonical handle live and recheck it at the
+                # success boundary after all nonessential post-commit work.
+                Assert-CommittedReleaseRedistributable `
+                    -OwnedFile $finalOwned `
+                    -Path $finalPath `
+                    -ExpectedSha256 $ExpectedSha256 `
+                    -Version $Version
+
+                foreach ($warning in $postCommitWarnings) {
+                    Write-Warning (
+                        'Redistributable publication committed the exact gated ' +
+                        "outer archive; post-commit work failed: $($warning.Message)")
                 }
-                throw $publicationError
             }
             finally {
-                if ($null -ne $priorLease) {
-                    $priorLease.Dispose()
-                }
                 if ($null -ne $pendingOwned) {
                     try {
                         $pendingOwned.DeleteOnClose()
@@ -1318,16 +1260,12 @@ function Publish-ReleaseRedistributableArchive {
                         $pendingOwned.Dispose()
                     }
                 }
-                if ($null -ne $backupOwned) {
-                    $backupOwned.Dispose()
-                }
                 if ($null -ne $finalOwned) {
                     $finalOwned.Dispose()
                 }
-                if ($null -ne $rollbackOwned) {
-                    $rollbackOwned.Dispose()
+                if ($null -ne $stagedLease) {
+                    $stagedLease.Dispose()
                 }
-                $stagedLease.Dispose()
             }
         }
         finally {
