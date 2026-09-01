@@ -39,6 +39,19 @@ public sealed class BridgeHostFailureLogIntegrationTests : IDisposable
     }
 
     [Fact]
+    public void StartupFailure_ContainedLogsJunction_DoesNotWriteThroughReparsePoint()
+    {
+        Directory.CreateDirectory(ExternalRoot);
+        string target = Path.Combine(ExternalRoot, "actual-logs");
+        Directory.CreateDirectory(target);
+        CreateJunction(Path.Combine(ExternalRoot, "logs"), target);
+
+        WriteStartupFailure(ExternalRoot, "must reject reparse");
+
+        Assert.False(File.Exists(Path.Combine(target, "rmm-bridge-host.log")));
+    }
+
+    [Fact]
     public void GameParamEvent_LogsJunctionEscapingExternalRoot_DoesNotWriteTarget()
     {
         Directory.CreateDirectory(ExternalRoot);
