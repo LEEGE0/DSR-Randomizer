@@ -27,21 +27,12 @@ internal static class BridgeHostFailureLog
                 return;
             }
 
-            WriteEntry(externalRoot, exception.ToString());
+            WriteStrictGameParamEntry(externalRoot, exception.ToString());
         }
         catch
         {
             // Failure reporting must never replace the original fail-closed exit.
         }
-    }
-
-    private static void WriteEntry(string externalRoot, string message)
-    {
-        var logs = Path.Combine(externalRoot, "logs");
-        Directory.CreateDirectory(logs);
-        var path = Path.Combine(logs, "rmm-bridge-host.log");
-        var entry = $"{DateTimeOffset.UtcNow:O} {message}{Environment.NewLine}";
-        File.AppendAllText(path, entry, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
     }
 
     private static void WriteStrictGameParamEntry(string externalRoot, string message)
