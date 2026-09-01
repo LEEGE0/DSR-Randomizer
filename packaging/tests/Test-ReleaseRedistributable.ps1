@@ -79,7 +79,8 @@ function New-OuterFixture {
     param(
         [Parameter(Mandatory = $true)][object]$Case,
         [Parameter(Mandatory = $true)][string]$Prefix,
-        [Parameter(Mandatory = $false)][string]$StagingRoot = $Case.StagingRoot
+        [Parameter(Mandatory = $false)][string]$StagingRoot = $Case.StagingRoot,
+        [Parameter(Mandatory = $false)][int]$BinaryPayloadSize = 0
     )
     $fixtureRoot = Join-Path $Case.InnerRoot $Prefix
     [IO.Directory]::CreateDirectory($fixtureRoot) | Out-Null
@@ -88,9 +89,16 @@ function New-OuterFixture {
     [IO.File]::WriteAllBytes(
         $sourcePath,
         [Text.UTF8Encoding]::new($false).GetBytes("$Prefix-source"))
-    [IO.File]::WriteAllBytes(
-        $binaryPath,
-        [Text.UTF8Encoding]::new($false).GetBytes("$Prefix-binary"))
+    if ($BinaryPayloadSize -gt 0) {
+        $binaryPayload = [byte[]]::new($BinaryPayloadSize)
+        [Random]::new(1701).NextBytes($binaryPayload)
+        [IO.File]::WriteAllBytes($binaryPath, $binaryPayload)
+    }
+    else {
+        [IO.File]::WriteAllBytes(
+            $binaryPath,
+            [Text.UTF8Encoding]::new($false).GetBytes("$Prefix-binary"))
+    }
     [IO.Directory]::CreateDirectory($StagingRoot) | Out-Null
     $outerPath = Join-Path $StagingRoot $outerName
     New-ReleaseRedistributableArchive `
@@ -211,6 +219,49 @@ try {
     }
     finally {
         $archive.Dispose()
+    }
+
+    # A successful native handle rename is the publication commit point. The
+    # owned handle must expose that transition without performing any fallible
+    # path resolution after the native call succeeds.
+    $commitMarkerCase = New-Case -Root $testRoot -Name 'handle-rename-commit-marker'
+    $commitMarkerFixture = New-OuterFixture -Case $commitMarkerCase -Prefix 'marker'
+    $commitMarkerPending = Join-Path $commitMarkerCase.OutputRoot '.pending-marker'
+    $commitMarkerFinal = Join-Path $commitMarkerCase.OutputRoot $outerName
+    $commitMarkerLease = `
+        [DSRRandomizer.Packaging.RedistributableArtifactLease]::Acquire(
+            $commitMarkerFixture.Path,
+            'commit marker fixture')
+    $commitMarkerOwned = $null
+    try {
+        $commitMarkerOwned = [DSRRandomizer.Packaging.RedistributableOwnedFile]::CreateFrom(
+            $commitMarkerLease,
+            $commitMarkerPending,
+            'commit marker pending file')
+        if ($null -eq $commitMarkerOwned.PSObject.Properties['HasRenamed']) {
+            throw 'Owned release file does not expose a native-rename commit marker.'
+        }
+        if ($commitMarkerOwned.HasRenamed) {
+            throw 'Owned release file was marked committed before the native rename.'
+        }
+        $commitMarkerOwned.RenameTo($commitMarkerFinal, $true)
+        if (-not $commitMarkerOwned.HasRenamed) {
+            throw 'Owned release file was not marked committed after the native rename.'
+        }
+        if ($commitMarkerOwned.Path -cne [IO.Path]::GetFullPath($commitMarkerFinal)) {
+            throw 'Owned release file did not cache the syntactic final path at commit.'
+        }
+    }
+    finally {
+        if ($null -ne $commitMarkerOwned) {
+            try {
+                $commitMarkerOwned.DeleteOnClose()
+            }
+            finally {
+                $commitMarkerOwned.Dispose()
+            }
+        }
+        $commitMarkerLease.Dispose()
     }
 
     $newCase = New-Case -Root $testRoot -Name 'new'
@@ -492,6 +543,45 @@ try {
         -Path (Join-Path $finalSwapCase.OutputRoot $outerName)
     Assert-NoPublicationResidue -OutputRoot $finalSwapCase.OutputRoot
 
+    # A final-path resolution failure injected only after the native rename is
+    # post-commit. It may be reported as a committed warning, but must never
+    # make the live canonical look like an uncommitted pending file.
+    foreach ($pathFailureMode in @('first', 'replacement')) {
+        $pathFailureCase = New-Case `
+            -Root $testRoot `
+            -Name "post-rename-path-resolution-$pathFailureMode"
+        if ($pathFailureMode -ceq 'replacement') {
+            $pathFailureOld = New-OuterFixture `
+                -Case $pathFailureCase `
+                -Prefix 'old'
+            Publish-Fixture -Case $pathFailureCase -Fixture $pathFailureOld
+        }
+        $pathFailureNewRoot = Join-Path $pathFailureCase.StagingRoot 'new'
+        $pathFailureNew = New-OuterFixture `
+            -Case $pathFailureCase `
+            -Prefix 'new' `
+            -StagingRoot $pathFailureNewRoot
+        $script:pathResolutionFaultInjected = $false
+        Publish-Fixture `
+            -Case $pathFailureCase `
+            -Fixture $pathFailureNew `
+            -OperationHook {
+                param($Phase, $Path)
+                if ($Phase -eq 'AfterHandleRenameBeforeVerification') {
+                    [DSRRandomizer.Packaging.RedistributableOwnedFile]::
+                        InjectFinalPathResolutionFailureOnceForTest()
+                    $script:pathResolutionFaultInjected = $true
+                }
+            }
+        if (-not $script:pathResolutionFaultInjected) {
+            throw 'The post-rename final-path resolution fault was not injected.'
+        }
+        Assert-BytesEqual `
+            -Expected $pathFailureNew.Bytes `
+            -Path (Join-Path $pathFailureCase.OutputRoot $outerName)
+        Assert-NoPublicationResidue -OutputRoot $pathFailureCase.OutputRoot
+    }
+
     # A hard link created after commit but before the mandatory same-handle
     # safety check must fail closed by removing the canonical link.
     $postLinkCase = New-Case -Root $testRoot -Name 'post-rename-hardlink'
@@ -529,6 +619,65 @@ try {
         throw 'Post-rename hard-link failure left an authoritative canonical.'
     }
     Assert-NoPublicationResidue -OutputRoot $postLinkCase.OutputRoot
+
+    # The final link-count/path check must happen after the expensive byte and
+    # outer-archive validation, not before it. Create an alias asynchronously
+    # while those reads are in progress; an accepted canonical must never
+    # remain mutable through that alias at the live success boundary.
+    $delayedLinkCase = New-Case -Root $testRoot -Name 'delayed-post-rename-hardlink'
+    $delayedLinkFixture = New-OuterFixture `
+        -Case $delayedLinkCase `
+        -Prefix 'delayed' `
+        -BinaryPayloadSize (64MB)
+    $delayedCanonical = Join-Path $delayedLinkCase.OutputRoot $outerName
+    $delayedAlias = Join-Path $delayedLinkCase.OutputRoot 'delayed-hostile-alias.zip'
+    $script:delayedLinkJob = $null
+    Assert-Failed `
+        -Message 'multiple hard links' `
+        -Action {
+            try {
+                Publish-Fixture `
+                    -Case $delayedLinkCase `
+                    -Fixture $delayedLinkFixture `
+                    -OperationHook {
+                        param($Phase, $Path)
+                        if ($Phase -eq 'AfterHandleRename') {
+                            $script:delayedLinkJob = Start-ThreadJob `
+                                -ArgumentList $Path, $delayedAlias `
+                                -ScriptBlock {
+                                    param($CanonicalPath, $AliasPath)
+                                    Start-Sleep -Milliseconds 5
+                                    New-Item `
+                                        -ItemType HardLink `
+                                        -Path $AliasPath `
+                                        -Target $CanonicalPath | Out-Null
+                                }
+                        }
+                    }
+            }
+            finally {
+                if ($null -ne $script:delayedLinkJob) {
+                    Wait-Job -Job $script:delayedLinkJob -Timeout 30 | Out-Null
+                    Receive-Job -Job $script:delayedLinkJob -ErrorAction Stop | Out-Null
+                    Remove-Job -Job $script:delayedLinkJob -Force
+                }
+            }
+        }
+    if (Test-Path -LiteralPath $delayedCanonical) {
+        throw 'Delayed hard-link failure left an accepted canonical archive.'
+    }
+    if (Test-Path -LiteralPath $delayedAlias) {
+        # Writing through the rejected alias must not mutate an accepted
+        # canonical because no authoritative canonical may remain.
+        [IO.File]::WriteAllBytes(
+            $delayedAlias,
+            [Text.UTF8Encoding]::new($false).GetBytes('hostile-alias-write'))
+        if (Test-Path -LiteralPath $delayedCanonical) {
+            throw 'A rejected delayed alias remained connected to an accepted canonical.'
+        }
+        [IO.File]::Delete($delayedAlias)
+    }
+    Assert-NoPublicationResidue -OutputRoot $delayedLinkCase.OutputRoot
 
     $lockedCase = New-Case -Root $testRoot -Name 'locked-canonical'
     $lockedOld = New-OuterFixture -Case $lockedCase -Prefix 'old'

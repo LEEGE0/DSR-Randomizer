@@ -227,6 +227,7 @@ namespace DSRRandomizer.Packaging
 
     public sealed class RedistributableOwnedFile : IDisposable
     {
+        private static int failNextFinalPathResolutionForTest;
         private FileStream stream;
         private bool disposed;
 
@@ -242,6 +243,7 @@ namespace DSRRandomizer.Packaging
 
         public string Path { get; private set; }
         public string Description { get; }
+        public bool HasRenamed { get; private set; }
         public Stream Stream
         {
             get
@@ -361,16 +363,28 @@ namespace DSRRandomizer.Packaging
         public void AssertSafeIdentity(string expectedPath)
         {
             ThrowIfDisposed();
+            stream.Position = 0;
             AssertSafeRegularFile(
                 stream.SafeFileHandle,
                 System.IO.Path.GetFullPath(expectedPath),
                 Description);
-            stream.Position = 0;
+        }
+
+        public static void InjectFinalPathResolutionFailureOnceForTest()
+        {
+            System.Threading.Interlocked.Exchange(
+                ref failNextFinalPathResolutionForTest,
+                1);
         }
 
         public void RenameTo(string destinationPath, bool replaceExisting)
         {
             ThrowIfDisposed();
+            if (HasRenamed)
+            {
+                throw new InvalidOperationException(
+                    "An owned release file can cross the publication commit point only once.");
+            }
             var destination = System.IO.Path.GetFullPath(destinationPath);
             if (!System.IO.Path.GetDirectoryName(Path).Equals(
                     System.IO.Path.GetDirectoryName(destination),
@@ -384,14 +398,12 @@ namespace DSRRandomizer.Packaging
                 stream.Flush(true);
             }
             RenameByHandle(stream.SafeFileHandle, destination, replaceExisting);
-            var resolved = ResolveFinalPath(stream.SafeFileHandle);
-            if (!resolved.Equals(destination, StringComparison.OrdinalIgnoreCase))
-            {
-                throw new IOException(
-                    $"Owned release rename resolved to an unexpected path: {resolved}");
-            }
+            // SetFileInformationByHandle returning successfully is the only
+            // publication commit point. Keep this transition non-fallible:
+            // all path/identity validation belongs to the caller after it has
+            // classified the handle as committed.
             Path = destination;
-            stream.Position = 0;
+            HasRenamed = true;
         }
 
         public void DeleteOnClose()
@@ -515,6 +527,13 @@ namespace DSRRandomizer.Packaging
 
         private static string ResolveFinalPath(SafeFileHandle handle)
         {
+            if (System.Threading.Interlocked.Exchange(
+                    ref failNextFinalPathResolutionForTest,
+                    0) == 1)
+            {
+                throw new IOException(
+                    "Injected final-path resolution failure after native publication rename.");
+            }
             var capacity = 512;
             while (true)
             {
@@ -1104,10 +1123,24 @@ function Assert-CommittedReleaseRedistributable {
         [Parameter(Mandatory = $true)][string]$Version
     )
 
+    if ($OwnedFile.ComputeSha256() -cne $ExpectedSha256) {
+        throw (
+            'The exact committed redistributable handle no longer matches ' +
+            'its expected gated SHA-256.')
+    }
+    Assert-ReleaseRedistributableStream `
+        -Stream $OwnedFile.Stream `
+        -Description $Path `
+        -Version $Version | Out-Null
+
+    # This is deliberately the last fallible committed validation. Expensive
+    # byte/ZIP checks run first while the handle denies mutation; immediately
+    # before success, reassert the canonical path, regular-file attributes,
+    # and single-link identity through that same live handle.
     try {
         $OwnedFile.AssertSafeIdentity($Path)
     }
-    catch {
+    catch [UnauthorizedAccessException] {
         $identityError = $_
         try {
             $OwnedFile.DeleteOnClose()
@@ -1119,16 +1152,6 @@ function Assert-CommittedReleaseRedistributable {
         }
         throw $identityError
     }
-
-    if ($OwnedFile.ComputeSha256() -cne $ExpectedSha256) {
-        throw (
-            'The exact committed redistributable handle no longer matches ' +
-            'its expected gated SHA-256.')
-    }
-    Assert-ReleaseRedistributableStream `
-        -Stream $OwnedFile.Stream `
-        -Description $Path `
-        -Version $Version | Out-Null
 }
 
 function Publish-ReleaseRedistributableArchive {
@@ -1148,6 +1171,7 @@ function Publish-ReleaseRedistributableArchive {
         throw "Redistributable output name must be exact: $expectedName"
     }
 
+    $successBoundaryOwned = $null
     $root = Open-SafeReleaseRoot -Path $OutputRoot
     try {
         $lock = [DSRRandomizer.Packaging.RedistributablePublicationLock]::Acquire(
@@ -1204,9 +1228,23 @@ function Publish-ReleaseRedistributableArchive {
                     -Version $Version `
                     -Description 'pre-commit pending redistributable'
 
-                $pendingOwned.RenameTo($finalPath, $true)
-                $finalOwned = $pendingOwned
-                $pendingOwned = $null
+                $committed = $false
+                try {
+                    $pendingOwned.RenameTo($finalPath, $true)
+                }
+                finally {
+                    # HasRenamed transitions synchronously and non-fallibly at
+                    # successful SetFileInformationByHandle return. Classify
+                    # the handle as committed before any path/content check.
+                    if ($pendingOwned.HasRenamed) {
+                        $committed = $true
+                        $finalOwned = $pendingOwned
+                        $pendingOwned = $null
+                    }
+                }
+                if (-not $committed) {
+                    throw 'Handle rename returned without a publication commit marker.'
+                }
 
                 $postCommitWarnings = [Collections.Generic.List[Exception]]::new()
                 try {
@@ -1221,11 +1259,19 @@ function Publish-ReleaseRedistributableArchive {
 
                 # An unsafe alias/path identity is the only post-commit case
                 # that removes the canonical link. It never restores old bytes.
-                Assert-CommittedReleaseRedistributable `
-                    -OwnedFile $finalOwned `
-                    -Path $finalPath `
-                    -ExpectedSha256 $ExpectedSha256 `
-                    -Version $Version
+                try {
+                    Assert-CommittedReleaseRedistributable `
+                        -OwnedFile $finalOwned `
+                        -Path $finalPath `
+                        -ExpectedSha256 $ExpectedSha256 `
+                        -Version $Version
+                }
+                catch [UnauthorizedAccessException] {
+                    throw
+                }
+                catch {
+                    $postCommitWarnings.Add($_.Exception)
+                }
 
                 try {
                     Invoke-RedistributableHook `
@@ -1237,19 +1283,26 @@ function Publish-ReleaseRedistributableArchive {
                     $postCommitWarnings.Add($_.Exception)
                 }
 
-                # Keep the expected canonical handle live and recheck it at the
-                # success boundary after all nonessential post-commit work.
-                Assert-CommittedReleaseRedistributable `
-                    -OwnedFile $finalOwned `
-                    -Path $finalPath `
-                    -ExpectedSha256 $ExpectedSha256 `
-                    -Version $Version
-
                 foreach ($warning in $postCommitWarnings) {
                     Write-Warning (
                         'Redistributable publication committed the exact gated ' +
-                        "outer archive; post-commit work failed: $($warning.Message)")
+                        "outer archive; post-commit work failed: $($warning.Message)") `
+                        -WarningAction Continue
                 }
+
+                # Keep this as the final operation before the live committed
+                # handle reaches the success-return boundary. The helper ends
+                # with the last same-handle path/attribute/link-count check.
+                # Transfer disposal outward first so the handle stays live
+                # while all other leases/locks unwind and is released only at
+                # the immediate return boundary.
+                $successBoundaryOwned = $finalOwned
+                $finalOwned = $null
+                Assert-CommittedReleaseRedistributable `
+                    -OwnedFile $successBoundaryOwned `
+                    -Path $finalPath `
+                    -ExpectedSha256 $ExpectedSha256 `
+                    -Version $Version
             }
             finally {
                 if ($null -ne $pendingOwned) {
@@ -1260,11 +1313,11 @@ function Publish-ReleaseRedistributableArchive {
                         $pendingOwned.Dispose()
                     }
                 }
-                if ($null -ne $finalOwned) {
-                    $finalOwned.Dispose()
-                }
                 if ($null -ne $stagedLease) {
                     $stagedLease.Dispose()
+                }
+                if ($null -ne $finalOwned) {
+                    $finalOwned.Dispose()
                 }
             }
         }
@@ -1273,7 +1326,14 @@ function Publish-ReleaseRedistributableArchive {
         }
     }
     finally {
-        $root.Lease.Dispose()
+        try {
+            $root.Lease.Dispose()
+        }
+        finally {
+            if ($null -ne $successBoundaryOwned) {
+                $successBoundaryOwned.Dispose()
+            }
+        }
     }
 }
 
