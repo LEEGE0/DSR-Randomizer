@@ -1,59 +1,120 @@
+using System.Text;
 using System.Text.Json;
 using DSRRandomizer.Foundation.Installation;
 using DSRRandomizer.Foundation.Paths;
 using DSRRandomizer.Foundation.Runtime;
+using DSRRandomizer.Foundation.Safety;
 using DSRRandomizer.Foundation.Saves;
+using DSRRandomizer.Launcher.Native;
+using DSRRandomizer.Launcher.Safety;
 
 namespace DSRRandomizer.Launcher.Services;
 
 public sealed class LauncherService : ILauncherService
 {
-    private readonly string _localDataRoot;
+    private readonly string _externalRoot;
     private readonly IPathCanonicalizer _canonicalizer;
     private readonly ISaveProfileLocator _saveProfileLocator;
     private readonly IFileAccess _fileAccess;
+    private readonly IKnownFolderProvider _knownFolderProvider;
+    private readonly CompatibilityProfileCatalog? _profiles;
+    private readonly IProtectedProcessPlatform _platform;
+    private readonly string _guardDllPath;
+    private readonly string _profilePath;
+    private readonly LaunchArtifactIdentities _artifactIdentities;
+    private readonly IRmmBridgeBundleInstaller _bridgeInstaller;
+    private readonly IRandomizerProcessPlatform _randomizerProcesses;
 
-    public LauncherService(string localDataRoot)
-        : this(localDataRoot, new WindowsKnownFolderProvider())
+    public LauncherService(string externalRoot)
+        : this(externalRoot, new WindowsKnownFolderProvider())
     {
     }
 
     public LauncherService(
-        string localDataRoot,
+        string externalRoot,
         IKnownFolderProvider knownFolderProvider)
-        : this(localDataRoot, knownFolderProvider, new SystemFileAccess())
+        : this(externalRoot, knownFolderProvider, new SystemFileAccess())
     {
     }
 
     public LauncherService(
-        string localDataRoot,
+        string externalRoot,
         IKnownFolderProvider knownFolderProvider,
         IFileAccess fileAccess)
+        : this(
+            externalRoot,
+            knownFolderProvider,
+            fileAccess,
+            profiles: null,
+            new WindowsProtectedProcessPlatform(),
+            Path.Combine(AppContext.BaseDirectory, "native", "DSRRandomizer.Runtime.dll"),
+            Path.Combine(AppContext.BaseDirectory, "config", "compatibility-profiles.json"),
+            LaunchArtifactIdentities.LoadEmbedded())
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(localDataRoot);
+    }
+
+    private LauncherService(
+        string externalRoot,
+        IKnownFolderProvider knownFolderProvider,
+        IFileAccess fileAccess,
+        CompatibilityProfileCatalog? profiles,
+        IProtectedProcessPlatform platform,
+        string guardDllPath,
+        string profilePath,
+        LaunchArtifactIdentities artifactIdentities)
+        : this(
+            externalRoot,
+            knownFolderProvider,
+            fileAccess,
+            profiles,
+            platform,
+            guardDllPath,
+            profilePath,
+            artifactIdentities,
+            new RmmBridgeBundleInstaller(AppContext.BaseDirectory, artifactIdentities),
+            new WindowsRandomizerProcessPlatform())
+    {
+    }
+
+    internal LauncherService(
+        string externalRoot,
+        IKnownFolderProvider knownFolderProvider,
+        IFileAccess fileAccess,
+        CompatibilityProfileCatalog? profiles,
+        IProtectedProcessPlatform platform,
+        string guardDllPath,
+        string profilePath,
+        LaunchArtifactIdentities artifactIdentities,
+        IRmmBridgeBundleInstaller bridgeInstaller,
+        IRandomizerProcessPlatform randomizerProcesses)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(externalRoot);
         ArgumentNullException.ThrowIfNull(knownFolderProvider);
         ArgumentNullException.ThrowIfNull(fileAccess);
-        _localDataRoot = Path.GetFullPath(localDataRoot);
+        ArgumentNullException.ThrowIfNull(platform);
+        ArgumentException.ThrowIfNullOrWhiteSpace(guardDllPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(profilePath);
+        ArgumentNullException.ThrowIfNull(artifactIdentities);
+        ArgumentNullException.ThrowIfNull(bridgeInstaller);
+        ArgumentNullException.ThrowIfNull(randomizerProcesses);
+        _externalRoot = Path.GetFullPath(externalRoot);
         _canonicalizer = new WindowsPathCanonicalizer();
         _saveProfileLocator = new WindowsSaveProfileLocator(knownFolderProvider);
         _fileAccess = fileAccess;
-    }
-
-    public static LauncherService CreateDefault()
-    {
-        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        if (string.IsNullOrWhiteSpace(localAppData))
-        {
-            throw new InvalidOperationException("The Windows local application-data path is unavailable.");
-        }
-
-        return new LauncherService(Path.Combine(localAppData, "DSR-Randomizer"));
+        _knownFolderProvider = knownFolderProvider;
+        _profiles = profiles;
+        _platform = platform;
+        _guardDllPath = Path.GetFullPath(guardDllPath);
+        _profilePath = Path.GetFullPath(profilePath);
+        _artifactIdentities = artifactIdentities;
+        _bridgeInstaller = bridgeInstaller;
+        _randomizerProcesses = randomizerProcesses;
     }
 
     public Task<VerificationResult> VerifyAsync(
         string gamePath,
         CancellationToken cancellationToken) =>
-        new GameInstallationVerifier(_canonicalizer, _localDataRoot)
+        new GameInstallationVerifier(_canonicalizer, _externalRoot)
             .VerifyAsync(gamePath, cancellationToken);
 
     public async Task<RuntimeManifest> InitializeRuntimeAsync(
@@ -70,9 +131,9 @@ public sealed class LauncherService : ILauncherService
 
         var boundary = WriteBoundary.Create(
             verification.CanonicalInstallationPath,
-            _localDataRoot,
+            _externalRoot,
             _canonicalizer);
-        var layout = LocalDataLayout.Create(_localDataRoot, boundary);
+        var layout = LocalDataLayout.Create(_externalRoot, boundary);
         var pointerStore = new RuntimePointerStore(layout, boundary);
         var hashes = new FileHashService();
         var builder = new RuntimeBuilder(
@@ -97,7 +158,7 @@ public sealed class LauncherService : ILauncherService
         CancellationToken cancellationToken)
     {
         var selectedInstallation = await InstallationSelectionStore
-            .CreateReadOnly(_localDataRoot, _canonicalizer)
+            .CreateReadOnly(_externalRoot, _canonicalizer)
             .ReadAsync(cancellationToken);
         if (selectedInstallation is null)
         {
@@ -109,9 +170,9 @@ public sealed class LauncherService : ILauncherService
 
         var boundary = WriteBoundary.Create(
             selectedInstallation,
-            _localDataRoot,
+            _externalRoot,
             _canonicalizer);
-        var layout = LocalDataLayout.Create(_localDataRoot, boundary);
+        var layout = LocalDataLayout.Create(_externalRoot, boundary);
         var pointerStore = new RuntimePointerStore(layout, boundary);
         return await new RuntimeReadinessService(
                 layout,
@@ -121,6 +182,38 @@ public sealed class LauncherService : ILauncherService
                 pointerStore)
             .ValidateAsync(cancellationToken);
     }
+
+    public Task<RuntimeReadinessResult> GetModdedLaunchReadinessAsync(
+        CancellationToken cancellationToken) => Task.Run(
+        async () =>
+        {
+            var selectedInstallation = await InstallationSelectionStore
+                .CreateReadOnly(_externalRoot, _canonicalizer)
+                .ReadAsync(cancellationToken)
+                .ConfigureAwait(false);
+            if (selectedInstallation is null)
+            {
+                return new RuntimeReadinessResult(
+                    false,
+                    null,
+                    new[] { "The verified source-installation selection does not exist." });
+            }
+
+            var boundary = WriteBoundary.Create(
+                selectedInstallation,
+                _externalRoot,
+                _canonicalizer);
+            var layout = LocalDataLayout.Create(_externalRoot, boundary);
+            return await new ModRuntimeReadinessService(
+                    layout,
+                    boundary,
+                    _canonicalizer,
+                    new FileHashService(),
+                    new RuntimePointerStore(layout, boundary))
+                .ValidateAsync(cancellationToken)
+                .ConfigureAwait(false);
+        },
+        cancellationToken);
 
     public async Task<IReadOnlyList<SaveProfileCandidate>> DiscoverSaveProfilesAsync(
         CancellationToken cancellationToken)
@@ -176,7 +269,7 @@ public sealed class LauncherService : ILauncherService
         try
         {
             destination = SavePaths.GetDedicatedSave(
-                _localDataRoot,
+                _externalRoot,
                 steamId,
                 components.Boundary);
         }
@@ -222,20 +315,452 @@ public sealed class LauncherService : ILauncherService
         return await dedicatedSaveService.PrepareAsync(steamId, cancellationToken);
     }
 
+    public async Task<SafetyLaunchResult> LaunchModdedAsync(
+        string steamId,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var selectedInstallation = await InstallationSelectionStore
+                .CreateReadOnly(_externalRoot, _canonicalizer)
+                .ReadAsync(cancellationToken);
+            if (selectedInstallation is null)
+            {
+                return SafetyLaunchResult.Failed("SOURCE_INSTALLATION_NOT_SELECTED");
+            }
+
+            var boundary = WriteBoundary.Create(
+                selectedInstallation,
+                _externalRoot,
+                _canonicalizer);
+            var layout = LocalDataLayout.Create(_externalRoot, boundary);
+            var pointerStore = new RuntimePointerStore(layout, boundary);
+            var readiness = await new ModRuntimeReadinessService(
+                    layout,
+                    boundary,
+                    _canonicalizer,
+                    new FileHashService(),
+                    pointerStore)
+                .ValidateAsync(cancellationToken);
+            if (!readiness.IsReady || string.IsNullOrWhiteSpace(readiness.RuntimePath))
+            {
+                return SafetyLaunchResult.Failed("MOD_RUNTIME_NOT_READY");
+            }
+
+            var runtimeRoot = _canonicalizer.Canonicalize(readiness.RuntimePath);
+            if (runtimeRoot.Equals(
+                    _canonicalizer.Canonicalize(selectedInstallation),
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return SafetyLaunchResult.Failed("RUNTIME_SOURCE_NOT_SEPARATE");
+            }
+
+            if (RandomizerRuntimeIntegration.TryResolve(runtimeRoot, out var randomizerTools))
+            {
+                return await LaunchModEngineAsync(
+                    steamId,
+                    randomizerTools!,
+                    cancellationToken);
+            }
+
+            var executablePath = Path.Combine(runtimeRoot, "DarkSoulsRemastered.exe");
+            var steamModulePath = Path.Combine(runtimeRoot, "steam_api64.dll");
+            using var profileArtifact = LaunchArtifactLease.TryOpen(_profilePath);
+            if (profileArtifact is null
+                || !profileArtifact.Sha256.Equals(
+                    _artifactIdentities.ProfileSha256,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return SafetyLaunchResult.Failed("PROFILE_ARTIFACT_INVALID");
+            }
+            using var executableArtifact = LaunchArtifactLease.TryOpen(executablePath);
+            using var steamArtifact = LaunchArtifactLease.TryOpen(steamModulePath);
+            if (executableArtifact is null || steamArtifact is null)
+            {
+                return SafetyLaunchResult.Failed("GAME_PROFILE_MISMATCH");
+            }
+            using var guardArtifact = LaunchArtifactLease.TryOpen(_guardDllPath);
+            if (guardArtifact is null
+                || !guardArtifact.Sha256.Equals(
+                    _artifactIdentities.GuardSha256,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return SafetyLaunchResult.Failed("GUARD_ARTIFACT_INVALID");
+            }
+
+            var profiles = _profiles ?? CompatibilityProfileCatalog.LoadJson(
+                Encoding.UTF8.GetString(profileArtifact.Bytes));
+            CompatibilityProfile profile;
+            try
+            {
+                profile = profiles.Select(ProfileInspector.InspectIdentity(executableArtifact.Bytes));
+            }
+            catch (UnsupportedGameBuildException)
+            {
+                return SafetyLaunchResult.Failed("GAME_PROFILE_UNSUPPORTED");
+            }
+            catch (BadImageFormatException)
+            {
+                return SafetyLaunchResult.Failed("GAME_PROFILE_UNSUPPORTED");
+            }
+
+            var profileVerification = ProfileInspector.VerifyFiles(
+                executableArtifact.Bytes,
+                new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["steam_api64.dll"] = steamArtifact.Bytes
+                },
+                profile);
+            if (profileVerification.Error != ProfileError.None)
+            {
+                return SafetyLaunchResult.Failed("GAME_PROFILE_MISMATCH");
+            }
+
+            var selectionStore = new SaveSelectionStore(layout, boundary);
+            var expectedDedicatedPath = SavePaths.GetDedicatedSave(
+                _externalRoot,
+                steamId,
+                boundary);
+            var virtualDocuments = layout.VirtualProfile;
+            var virtualProfile = Path.Combine(
+                virtualDocuments,
+                "NBGI",
+                "DARK SOULS REMASTERED",
+                steamId);
+            var virtualLogicalSave = Path.Combine(
+                virtualProfile,
+                "DRAKS0005.sl2");
+            boundary.EnsureAllowed(virtualDocuments);
+            boundary.EnsureAllowed(virtualProfile);
+            boundary.EnsureAllowed(virtualLogicalSave);
+            try
+            {
+                VirtualSaveLinkBinding.RemoveStaleAlias(
+                    layout,
+                    boundary,
+                    _fileAccess,
+                    virtualLogicalSave,
+                    expectedDedicatedPath);
+            }
+            catch (VirtualSaveAliasConflictException)
+            {
+                return SafetyLaunchResult.Failed("DEDICATED_SAVE_ALIAS_CONFLICT");
+            }
+            if (!_fileAccess.Exists(expectedDedicatedPath))
+            {
+                var selection = await selectionStore.ReadAsync(cancellationToken);
+                if (selection is null
+                    || !selection.SteamId.Equals(steamId, StringComparison.Ordinal))
+                {
+                    var candidates = await _saveProfileLocator.DiscoverAsync(cancellationToken);
+                    selection = candidates.SingleOrDefault(candidate =>
+                        candidate.SteamId.Equals(steamId, StringComparison.Ordinal));
+                    if (selection is null)
+                    {
+                        return SafetyLaunchResult.Failed("DEDICATED_SAVE_SOURCEMISSING");
+                    }
+                    await selectionStore.WriteAsync(selection, cancellationToken);
+                }
+            }
+            var dedicatedSaveService = new DedicatedSaveService(
+                layout,
+                boundary,
+                selectionStore,
+                _fileAccess);
+            var dedicatedSave = await dedicatedSaveService.PrepareAsync(
+                steamId,
+                cancellationToken);
+            if (!dedicatedSave.Ready
+                || string.IsNullOrWhiteSpace(dedicatedSave.SavePath)
+                || string.IsNullOrWhiteSpace(dedicatedSave.SaveIdentity)
+                || string.IsNullOrWhiteSpace(dedicatedSave.MetadataIdentity))
+            {
+                return SafetyLaunchResult.Failed(
+                    $"DEDICATED_SAVE_{dedicatedSave.ErrorCode.ToString().ToUpperInvariant()}");
+            }
+            var sessionSaveService = new DedicatedSaveService(
+                layout,
+                boundary,
+                selectionStore,
+                new NormalSaveBlockingFileAccess(_fileAccess));
+
+            var dedicatedPath = Path.GetFullPath(dedicatedSave.SavePath);
+            var externalSaveRoot = Path.GetDirectoryName(dedicatedPath)
+                ?? throw new IOException("The dedicated save root could not be resolved.");
+            boundary.EnsureAllowed(externalSaveRoot);
+            boundary.EnsureAllowed(dedicatedPath);
+            var realSaveRoot = Path.GetFullPath(Path.Combine(
+                _knownFolderProvider.GetDocumentsPath(),
+                "NBGI",
+                "DARK SOULS REMASTERED"));
+            var savePaths = new GuardSavePathConfiguration(
+                virtualDocuments,
+                virtualLogicalSave,
+                realSaveRoot,
+                externalSaveRoot,
+                dedicatedPath);
+            var saveSession = await sessionSaveService.BeginSessionAsync(
+                steamId,
+                dedicatedSave.SaveIdentity,
+                dedicatedSave.MetadataIdentity,
+                cancellationToken);
+            if (!saveSession.Ready || string.IsNullOrWhiteSpace(saveSession.SessionToken))
+            {
+                return SafetyLaunchResult.Failed("DEDICATED_SAVE_SESSION_UNAVAILABLE");
+            }
+            var request = new SafetyLaunchRequest(
+                executablePath,
+                runtimeRoot,
+                _guardDllPath,
+                profile,
+                DedicatedSaveProtection.RequiredFlags,
+                DiagnosticMode: false,
+                Arguments: Array.Empty<string>(),
+                SavePaths: savePaths);
+            SafetyLaunchResult launchResult;
+            try
+            {
+                launchResult = await new SafetyLaunchCoordinator(_platform)
+                    .LaunchAsync(request, cancellationToken);
+            }
+            catch
+            {
+                await CompleteAbnormalSessionWithoutMaskingAsync(
+                    sessionSaveService,
+                    steamId,
+                    saveSession.SessionToken);
+                throw;
+            }
+            var normalGuardedExit = launchResult.Started && launchResult.ExitCode == 0;
+            if (!normalGuardedExit)
+            {
+                await CompleteAbnormalSessionWithoutMaskingAsync(
+                    sessionSaveService,
+                    steamId,
+                    saveSession.SessionToken);
+                return launchResult;
+            }
+            var saveCompletion = await sessionSaveService.CompleteSessionAsync(
+                steamId,
+                saveSession.SessionToken,
+                normalGuardedExit: true,
+                CancellationToken.None);
+            return !saveCompletion.Ready
+                ? SafetyLaunchResult.Failed("DEDICATED_SAVE_SESSION_INVALID")
+                : launchResult;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (
+            exception is IOException
+                or UnauthorizedAccessException
+                or ArgumentException
+                or JsonException
+                or CompatibilityProfileFormatException)
+        {
+            return SafetyLaunchResult.Failed("LAUNCH_PREFLIGHT_FAILED");
+        }
+    }
+
+    public Task<RandomizerToolLaunchResult> LaunchItemRandomizerAsync(
+        CancellationToken cancellationToken) =>
+        LaunchRandomizerAsync(RandomizerToolKind.Item, cancellationToken);
+
+    public Task<RandomizerToolLaunchResult> LaunchEnemyRandomizerAsync(
+        CancellationToken cancellationToken) =>
+        LaunchRandomizerAsync(RandomizerToolKind.Enemy, cancellationToken);
+
+    private async Task<SafetyLaunchResult> LaunchModEngineAsync(
+        string steamId,
+        RandomizerRuntimeTools tools,
+        CancellationToken cancellationToken)
+    {
+        using var launchGate = ExternalRootLaunchGate.TryAcquire(_externalRoot);
+        if (launchGate is null)
+        {
+            return SafetyLaunchResult.Failed("CONCURRENT_MODDED_LAUNCH");
+        }
+
+        var bridgeInstall = _bridgeInstaller.EnsureInstalled(_externalRoot);
+        if (!bridgeInstall.IsReady)
+        {
+            return SafetyLaunchResult.Failed(bridgeInstall.ErrorCode!);
+        }
+
+        var (bridgePath, heapPatchPath) = RandomizerRuntimeIntegration
+            .GetRequiredModEngineDllPaths(tools, _externalRoot);
+        var bridgeHostPath = Path.Combine(
+            Path.GetDirectoryName(bridgePath)!,
+            "DSRRandomizer.RmmBridgeHost.exe");
+        using var bridgeArtifact = LaunchArtifactLease.TryOpen(bridgePath);
+        using var bridgeHostArtifact = LaunchArtifactLease.TryOpen(bridgeHostPath);
+        if (bridgeArtifact is null
+            || bridgeHostArtifact is null
+            || !bridgeArtifact.Sha256.Equals(
+                _artifactIdentities.BridgeSha256,
+                StringComparison.OrdinalIgnoreCase)
+            || !bridgeHostArtifact.Sha256.Equals(
+                _artifactIdentities.HostSha256,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return SafetyLaunchResult.Failed("RMM_BRIDGE_INSTALL_TAMPERED");
+        }
+
+        var bridgedConfiguration = Path.GetFullPath(Path.Combine(
+            _externalRoot,
+            "staging",
+            "diagnostics",
+            "config-randomizer-bridged.toml"));
+        using var sourceConfigurationArtifact = LaunchArtifactLease.TryOpen(
+            tools.ModEngineConfiguration);
+        using var heapPatchArtifact = LaunchArtifactLease.TryOpen(heapPatchPath);
+        using var modEngineLauncherArtifact = LaunchArtifactLease.TryOpen(tools.ModEngineLauncher);
+        using var modEngineLibraryArtifact = LaunchArtifactLease.TryOpen(tools.ModEngineLibrary);
+        if (sourceConfigurationArtifact is null
+            || heapPatchArtifact is null
+            || modEngineLauncherArtifact is null
+            || modEngineLibraryArtifact is null
+            || !RandomizerRuntimeIntegration.TryCreateBridgedModEngineConfiguration(
+                tools,
+                _externalRoot,
+                sourceConfigurationArtifact.Bytes,
+                out var configurationBytes))
+        {
+            return SafetyLaunchResult.Failed("RANDOMIZER_CONFIGURATION_INVALID");
+        }
+
+        Directory.CreateDirectory(Path.GetDirectoryName(bridgedConfiguration)!);
+        var temporaryConfiguration = bridgedConfiguration + $".{Guid.NewGuid():N}.tmp";
+        try
+        {
+            File.WriteAllBytes(temporaryConfiguration, configurationBytes);
+            File.Move(temporaryConfiguration, bridgedConfiguration, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(temporaryConfiguration))
+            {
+                File.Delete(temporaryConfiguration);
+            }
+        }
+
+        using var configurationArtifact = LaunchArtifactLease.TryOpen(bridgedConfiguration);
+        if (configurationArtifact is null
+            || !configurationArtifact.Bytes.AsSpan().SequenceEqual(configurationBytes)
+            || !RandomizerRuntimeIntegration.HasRequiredModEngineConfiguration(
+                tools,
+                _externalRoot,
+                configurationArtifact.Bytes))
+        {
+            return SafetyLaunchResult.Failed("RANDOMIZER_CONFIGURATION_INVALID");
+        }
+
+        if (!await PersistBridgeSaveSelectionAsync(steamId, cancellationToken))
+        {
+            return SafetyLaunchResult.Failed("SAVE_PROFILE_NOT_SELECTED");
+        }
+
+        return await _randomizerProcesses.LaunchModEngineAsync(
+            RandomizerRuntimeIntegration.CreateModEngineRequest(
+                tools,
+                bridgedConfiguration),
+            cancellationToken);
+    }
+
+    private async Task<bool> PersistBridgeSaveSelectionAsync(
+        string steamId,
+        CancellationToken cancellationToken)
+    {
+        if (!IsSteamId(steamId))
+        {
+            return false;
+        }
+
+        var components = await CreateSaveComponentsAsync(cancellationToken);
+        var candidates = await _saveProfileLocator.DiscoverAsync(cancellationToken);
+        var selection = candidates.SingleOrDefault(candidate =>
+            candidate.SteamId.Equals(steamId, StringComparison.Ordinal));
+        selection ??= new SaveProfileCandidate(
+            steamId,
+            Path.Combine(
+                _knownFolderProvider.GetDocumentsPath(),
+                "NBGI",
+                "DARK SOULS REMASTERED",
+                steamId,
+                "DRAKS0005.sl2"));
+        await components.SelectionStore.WriteAsync(selection, cancellationToken);
+        var persisted = await components.SelectionStore.ReadAsync(cancellationToken);
+        return persisted is not null
+            && persisted.SteamId.Equals(steamId, StringComparison.Ordinal)
+            && persisted.SourcePath.Equals(
+                Path.GetFullPath(selection.SourcePath),
+                StringComparison.OrdinalIgnoreCase);
+    }
+
+    private async Task<RandomizerToolLaunchResult> LaunchRandomizerAsync(
+        RandomizerToolKind kind,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var readiness = await GetModdedLaunchReadinessAsync(cancellationToken);
+            if (!readiness.IsReady || string.IsNullOrWhiteSpace(readiness.RuntimePath))
+            {
+                return RandomizerToolLaunchResult.Failed("MOD_RUNTIME_NOT_READY");
+            }
+
+            var tools = RandomizerRuntimeIntegration.Resolve(readiness.RuntimePath);
+            return _randomizerProcesses.StartTool(
+                RandomizerRuntimeIntegration.CreateToolRequest(tools, kind));
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (
+            exception is IOException
+                or UnauthorizedAccessException
+                or ArgumentException)
+        {
+            return RandomizerToolLaunchResult.Failed("RANDOMIZER_PREFLIGHT_FAILED");
+        }
+    }
+
+    private static async Task CompleteAbnormalSessionWithoutMaskingAsync(
+        DedicatedSaveService service,
+        string steamId,
+        string sessionToken)
+    {
+        try
+        {
+            _ = await service.CompleteSessionAsync(
+                steamId,
+                sessionToken,
+                normalGuardedExit: false,
+                CancellationToken.None);
+        }
+        catch
+        {
+            // The original launch failure or cancellation remains authoritative.
+        }
+    }
+
     private async Task<SaveComponents> CreateSaveComponentsAsync(
         CancellationToken cancellationToken)
     {
         var selectedInstallation = await InstallationSelectionStore
-            .CreateReadOnly(_localDataRoot, _canonicalizer)
+            .CreateReadOnly(_externalRoot, _canonicalizer)
             .ReadAsync(cancellationToken);
         var protectedSource = selectedInstallation ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
             "DSR-Randomizer-Protected-Source");
         var boundary = WriteBoundary.Create(
             protectedSource,
-            _localDataRoot,
+            _externalRoot,
             _canonicalizer);
-        var layout = LocalDataLayout.Create(_localDataRoot, boundary);
+        var layout = LocalDataLayout.Create(_externalRoot, boundary);
         return new SaveComponents(
             boundary,
             layout,
@@ -243,7 +768,7 @@ public sealed class LauncherService : ILauncherService
     }
 
     private static bool IsSteamId(string value) =>
-        value.Length is >= 16 and <= 20
+        value.Length is >= 1 and <= 20
         && value.All(character => character is >= '0' and <= '9');
 
     private sealed record SaveComponents(
@@ -333,7 +858,7 @@ internal sealed class NormalSaveBlockingFileAccess(IFileAccess inner) : IFileAcc
         if (IsNormalSave(path))
         {
             throw new UnauthorizedAccessException(
-                "The normal DRAKS0005.sl2 save cannot be opened before first-copy confirmation.");
+                "The normal DRAKS0005.sl2 save cannot be opened during guarded session setup or completion.");
         }
     }
 

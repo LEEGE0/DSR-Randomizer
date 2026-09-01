@@ -15,6 +15,7 @@ native/out/
 /saves/
 /logs/
 /local-data/
+/compatibility-captures/
 /game-catalog.json
 *.sl2
 *.rsl2
@@ -36,6 +37,7 @@ seed-*/
 spoiler-*.txt
 *.zip
 *.sha256
+.dsr-release-publication.lock
 
 # Operating-system files
 Thumbs.db

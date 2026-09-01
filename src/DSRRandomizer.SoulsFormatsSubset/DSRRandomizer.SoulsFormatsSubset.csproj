@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- GPL-3.0 modification notice: Modified by DSR for MOD on 2026-09-01 to omit
+       TPF/DrSwizzler support for the bridge-host build. -->
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <AssemblyName>SoulsFormats</AssemblyName>
+    <RootNamespace>SoulsFormats</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <Nullable>disable</Nullable>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <NoWarn>$(NoWarn);CS0108;CS0114;CS0162;CS0169</NoWarn>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="BouncyCastleNamespaceStubs.cs" />
+    <Compile Include="..\..\third_party\SoulsFormatsNEXT\SoulsFormats\**\*.cs"
+             Exclude="..\..\third_party\SoulsFormatsNEXT\SoulsFormats\Formats\TPF\**\*.cs;..\..\third_party\SoulsFormatsNEXT\SoulsFormats\bin\**\*;..\..\third_party\SoulsFormatsNEXT\SoulsFormats\obj\**\*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Text.Encoding.CodePages" Version="8.0.0" />
+    <PackageReference Include="ZstdNet" Version="1.4.5" />
+  </ItemGroup>
+
+</Project>

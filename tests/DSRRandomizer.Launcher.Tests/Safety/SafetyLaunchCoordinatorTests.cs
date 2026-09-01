@@ -44,6 +44,104 @@ public sealed class SafetyLaunchCoordinatorTests
     }
 
     [Fact]
+    public async Task LaunchAsync_ExactSimplifiedBitmap_ResumesWithoutMonitorSession()
+    {
+        var platform = new RecordingPlatform(
+            new ProtectionHandshake(true, 0x7F, string.Empty, Session: null));
+
+        var result = await new SafetyLaunchCoordinator(platform)
+            .LaunchAsync(CreateRequest(requiredFlags: 0x7F), CancellationToken.None);
+
+        Assert.True(result.Started);
+        Assert.Equal(1, platform.Process.ResumeCalls);
+        Assert.Equal(0, platform.Process.TerminateCalls);
+    }
+
+    [Fact]
+    public async Task LaunchAsync_ExactDedicatedSaveBitmap_ResumesWithoutMonitorSession()
+    {
+        var platform = new RecordingPlatform(
+            new ProtectionHandshake(true, 0x201, string.Empty, Session: null));
+
+        var result = await new SafetyLaunchCoordinator(platform)
+            .LaunchAsync(CreateRequest(requiredFlags: 0x201), CancellationToken.None);
+
+        Assert.True(result.Started);
+        Assert.Equal(1, platform.Process.ResumeCalls);
+        Assert.Equal(0, platform.Process.TerminateCalls);
+    }
+
+    [Theory]
+    [InlineData(0x3UL)]
+    [InlineData(0x203UL)]
+    [InlineData(0x10000000201UL)]
+    public async Task LaunchAsync_NonExactDedicatedSaveBitmap_NeverResumes(ulong flags)
+    {
+        var platform = new RecordingPlatform(
+            new ProtectionHandshake(true, flags, string.Empty, Session: null));
+
+        var result = await new SafetyLaunchCoordinator(platform)
+            .LaunchAsync(CreateRequest(requiredFlags: 0x201), CancellationToken.None);
+
+        Assert.False(result.Started);
+        Assert.Equal(0, platform.Process.ResumeCalls);
+        Assert.Equal(1, platform.Process.TerminateCalls);
+    }
+
+    [Fact]
+    public async Task LaunchAsync_ExactDedicatedSaveBitmapWithMonitorSession_NeverResumes()
+    {
+        var platform = new RecordingPlatform(
+            new ProtectionHandshake(
+                true,
+                0x201,
+                string.Empty,
+                new BlockingProtectionSession()));
+
+        var result = await new SafetyLaunchCoordinator(platform)
+            .LaunchAsync(CreateRequest(requiredFlags: 0x201), CancellationToken.None);
+
+        Assert.False(result.Started);
+        Assert.Equal(0, platform.Process.ResumeCalls);
+        Assert.Equal(1, platform.Process.TerminateCalls);
+    }
+
+    [Theory]
+    [InlineData(0x7EUL)]
+    [InlineData(0xFFUL)]
+    [InlineData(0x17FUL)]
+    public async Task LaunchAsync_NonExactSimplifiedBitmap_NeverResumes(ulong flags)
+    {
+        var platform = new RecordingPlatform(
+            new ProtectionHandshake(true, flags, string.Empty, Session: null));
+
+        var result = await new SafetyLaunchCoordinator(platform)
+            .LaunchAsync(CreateRequest(requiredFlags: 0x7F), CancellationToken.None);
+
+        Assert.False(result.Started);
+        Assert.Equal(0, platform.Process.ResumeCalls);
+        Assert.Equal(1, platform.Process.TerminateCalls);
+    }
+
+    [Fact]
+    public async Task LaunchAsync_ExactSimplifiedBitmapWithMonitorSession_NeverResumes()
+    {
+        var platform = new RecordingPlatform(
+            new ProtectionHandshake(
+                true,
+                0x7F,
+                string.Empty,
+                new BlockingProtectionSession()));
+
+        var result = await new SafetyLaunchCoordinator(platform)
+            .LaunchAsync(CreateRequest(requiredFlags: 0x7F), CancellationToken.None);
+
+        Assert.False(result.Started);
+        Assert.Equal(0, platform.Process.ResumeCalls);
+        Assert.Equal(1, platform.Process.TerminateCalls);
+    }
+
+    [Fact]
     public async Task LaunchAsync_UnexpectedPreviousSuspendCountTerminatesWithoutWaiting()
     {
         var platform = new RecordingPlatform(FailurePoint.ResumeCount);
@@ -102,7 +200,7 @@ public sealed class SafetyLaunchCoordinatorTests
         Assert.Equal(1, platform.Process.TerminateCalls);
     }
 
-    private static SafetyLaunchRequest CreateRequest() => new(
+    private static SafetyLaunchRequest CreateRequest(ulong requiredFlags = 0x181) => new(
         @"C:\Local\runtime\DSRRandomizer.SuspendedFixture.exe",
         @"C:\Local\runtime",
         @"C:\Local\components\DSRRandomizer.Runtime.dll",
@@ -112,7 +210,7 @@ public sealed class SafetyLaunchCoordinatorTests
             0x8664,
             0x6344ca56,
             52015104)),
-        RequiredProtectionFlags: 0b11,
+        RequiredProtectionFlags: requiredFlags,
         DiagnosticMode: true);
 
     public enum FailurePoint
@@ -140,6 +238,15 @@ public sealed class SafetyLaunchCoordinatorTests
             Process = new RecordingProcess(failurePoint, cancellation);
         }
 
+        public RecordingPlatform(ProtectionHandshake handshake)
+        {
+            _failurePoint = FailurePoint.None;
+            Process = new RecordingProcess(
+                FailurePoint.None,
+                cancellation: null,
+                handshake);
+        }
+
         public RecordingProcess Process { get; }
 
         public Task<IProtectedProcess> CreateSuspendedAsync(
@@ -151,13 +258,15 @@ public sealed class SafetyLaunchCoordinatorTests
                 throw new SafetyLaunchException("SAFETY_CREATE_FAILED");
             }
 
+            Process.RequiredFlags = request.RequiredProtectionFlags;
             return Task.FromResult<IProtectedProcess>(Process);
         }
     }
 
     private sealed class RecordingProcess(
         FailurePoint failurePoint,
-        CancellationTokenSource? cancellation) : IProtectedProcess
+        CancellationTokenSource? cancellation,
+        ProtectionHandshake? handshake = null) : IProtectedProcess
     {
         public int ProcessId => 42;
 
@@ -170,6 +279,8 @@ public sealed class SafetyLaunchCoordinatorTests
         public int TerminateCalls { get; private set; }
 
         public int WaitForExitCalls { get; private set; }
+
+        public ulong RequiredFlags { get; set; }
 
         public void AssignKillOnCloseJob()
         {
@@ -193,12 +304,20 @@ public sealed class SafetyLaunchCoordinatorTests
                 throw new IOException("Simulated unexpected platform failure.");
             }
 
+            if (handshake is not null)
+            {
+                return Task.FromResult(handshake);
+            }
+
             return Task.FromResult(failurePoint == FailurePoint.Handshake
                 ? ProtectionHandshake.Failed("SAFETY_HANDSHAKE_FAILED")
                 : new ProtectionHandshake(
                     true,
-                    failurePoint == FailurePoint.IncompleteFlags ? 0b01UL : 0b11UL,
-                    string.Empty));
+                    failurePoint == FailurePoint.IncompleteFlags
+                        ? RequiredFlags & ~1UL
+                        : RequiredFlags,
+                    string.Empty,
+                    new BlockingProtectionSession()));
         }
 
         public uint ResumeMainThread()
@@ -219,6 +338,19 @@ public sealed class SafetyLaunchCoordinatorTests
             }
 
             return Task.FromResult(0);
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private sealed class BlockingProtectionSession : IProtectionSession
+    {
+        public async Task<ProtectionMonitorResult> MonitorAsync(
+            ulong expectedActiveFlags,
+            CancellationToken cancellationToken)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            throw new InvalidOperationException("The protection monitor completed unexpectedly.");
         }
 
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;

@@ -2,7 +2,6 @@
 
 #include <Windows.h>
 #include <ShlObj.h>
-#include <MinHook.h>
 
 #include <algorithm>
 #include <array>
@@ -18,6 +17,7 @@
 #include <utility>
 #include <vector>
 
+#include "hooks/MinHookCoordinator.h"
 #include "save/SavePathPolicy.h"
 
 namespace DSRRandomizer::Save {
@@ -26,21 +26,37 @@ namespace {
 using KnownFolderFunction = decltype(&SHGetKnownFolderPath);
 using LegacyFolderFunction = decltype(&SHGetFolderPathW);
 using CreateFileFunction = decltype(&CreateFileW);
+using CreateFileAnsiFunction = decltype(&CreateFileA);
 using DeleteFileFunction = decltype(&DeleteFileW);
+using DeleteFileAnsiFunction = decltype(&DeleteFileA);
 using MoveFileFunction = decltype(&MoveFileExW);
+using MoveFileSimpleFunction = decltype(&MoveFileW);
+using MoveFileAnsiFunction = decltype(&MoveFileA);
 using ReplaceFileFunction = decltype(&ReplaceFileW);
 using AttributesFunction = decltype(&GetFileAttributesExW);
+using AttributesAnsiFunction = decltype(&GetFileAttributesExA);
+using AttributesSimpleFunction = decltype(&GetFileAttributesW);
+using AttributesSimpleAnsiFunction = decltype(&GetFileAttributesA);
 using FindFirstFunction = decltype(&FindFirstFileExW);
+using FindFirstSimpleFunction = decltype(&FindFirstFileW);
 
 struct HookTrampolines {
     KnownFolderFunction knownFolder = nullptr;
     LegacyFolderFunction legacyFolder = nullptr;
     CreateFileFunction createFile = nullptr;
+    CreateFileAnsiFunction createFileAnsi = nullptr;
     DeleteFileFunction deleteFile = nullptr;
+    DeleteFileAnsiFunction deleteFileAnsi = nullptr;
     MoveFileFunction moveFile = nullptr;
+    MoveFileSimpleFunction moveFileSimple = nullptr;
+    MoveFileAnsiFunction moveFileAnsi = nullptr;
     ReplaceFileFunction replaceFile = nullptr;
     AttributesFunction attributes = nullptr;
+    AttributesAnsiFunction attributesAnsi = nullptr;
+    AttributesSimpleFunction attributesSimple = nullptr;
+    AttributesSimpleAnsiFunction attributesSimpleAnsi = nullptr;
     FindFirstFunction findFirst = nullptr;
+    FindFirstSimpleFunction findFirstSimple = nullptr;
 };
 
 struct StableIdentity {
@@ -48,6 +64,7 @@ struct StableIdentity {
     DWORD volumeSerial = 0;
     DWORD fileIndexHigh = 0;
     DWORD fileIndexLow = 0;
+    bool requirePrivateRegular = false;
 };
 
 struct HookContext {
@@ -64,6 +81,9 @@ struct HookContext {
     std::wstring physicalExternalSaveRoot;
     HookTrampolines trampolines;
     std::vector<StableIdentity> stableIdentities;
+    StableIdentity gameParamSourceIdentity;
+    StableIdentity gameParamTargetIdentity;
+    bool gameParamRedirectConfigured = false;
     std::atomic<bool> denyOnly{false};
     std::atomic<std::uint64_t> inFlight{0};
 };
@@ -71,8 +91,8 @@ struct HookContext {
 struct HookLifecycle {
     HookPlatform* platform = nullptr;
     std::shared_ptr<HookContext> context;
-    std::array<void*, 8> targets{};
-    std::array<bool, 8> created{};
+    std::array<void*, 16> targets{};
+    std::array<bool, 16> created{};
     bool initialized = false;
     bool mayBeEnabled = false;
 };
@@ -83,6 +103,7 @@ std::atomic<std::shared_ptr<HookContext>> activeContext;
 HookLifecycle lifecycle{};
 std::atomic<bool> hooksInstalled{false};
 std::array<std::atomic<std::uint64_t>, 4> auditCounters{};
+std::atomic<std::uint64_t> gameParamRedirectCount{};
 std::atomic<Testing::BeforeOriginalApiCallback> beforeOriginalApiCallback{};
 std::atomic<void*> beforeOriginalApiState{};
 
@@ -132,6 +153,36 @@ bool StartsWithOrdinalIgnoreCase(
     const std::wstring_view prefix) noexcept {
     return value.size() >= prefix.size()
         && EqualsOrdinalIgnoreCase(value.substr(0, prefix.size()), prefix);
+}
+
+bool AnsiPathToWide(const char* path, std::wstring& wide) {
+    if (path == nullptr) {
+        return false;
+    }
+    const auto required = MultiByteToWideChar(
+        CP_ACP,
+        0,
+        path,
+        -1,
+        nullptr,
+        0);
+    if (required <= 1) {
+        return false;
+    }
+    wide.resize(static_cast<std::size_t>(required));
+    const auto converted = MultiByteToWideChar(
+        CP_ACP,
+        0,
+        path,
+        -1,
+        wide.data(),
+        required);
+    if (converted != required) {
+        wide.clear();
+        return false;
+    }
+    wide.resize(static_cast<std::size_t>(required - 1));
+    return true;
 }
 
 bool IsBelow(
@@ -224,6 +275,74 @@ bool CanonicalizeLexical(
     }
     canonical.assign(buffer.data(), length);
     return IsAsciiDrivePath(canonical);
+}
+
+bool EndsWithOrdinalIgnoreCase(
+    const std::wstring_view value,
+    const std::wstring_view suffix) noexcept {
+    return value.size() >= suffix.size()
+        && EqualsOrdinalIgnoreCase(value.substr(value.size() - suffix.size()), suffix);
+}
+
+bool IsExactRelativeGameParamRequest(const std::wstring_view input) noexcept {
+    auto requested = input;
+    if (requested.size() >= 2
+        && requested.front() == L'.'
+        && (requested[1] == L'\\' || requested[1] == L'/')) {
+        requested.remove_prefix(2);
+    }
+    constexpr std::wstring_view expected =
+        L"overhaul\\GameParam.parambnd.dcx";
+    if (requested.size() != expected.size()) {
+        return false;
+    }
+    for (std::size_t index = 0; index < expected.size(); ++index) {
+        if (expected[index] == L'\\') {
+            if (requested[index] != L'\\' && requested[index] != L'/') {
+                return false;
+            }
+        }
+        else if (!EqualsOrdinalIgnoreCase(
+                     requested.substr(index, 1),
+                     expected.substr(index, 1))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool IsExactGameParamRequest(
+    const HookContext& context,
+    const wchar_t* const path) {
+    if (!context.gameParamRedirectConfigured || path == nullptr) {
+        return false;
+    }
+    const std::wstring_view requested(path);
+    if (IsExactRelativeGameParamRequest(requested)) {
+        return true;
+    }
+    std::wstring normalized(requested);
+    std::replace(normalized.begin(), normalized.end(), L'/', L'\\');
+    if (!IsAsciiDrivePath(normalized)) {
+        return false;
+    }
+    std::wstring canonical;
+    return CanonicalizeLexical(requested, canonical)
+        && EqualsOrdinalIgnoreCase(
+            canonical,
+            context.configuration.overhaulGameParamSource);
+}
+
+bool IsReadCompatibleGameParamOpen(
+    const DWORD desiredAccess,
+    const DWORD creation,
+    const DWORD flags) noexcept {
+    constexpr DWORD allowedAccess = GENERIC_READ | GENERIC_EXECUTE
+        | READ_CONTROL | SYNCHRONIZE | FILE_READ_DATA | FILE_READ_EA
+        | FILE_READ_ATTRIBUTES | FILE_EXECUTE;
+    return creation == OPEN_EXISTING
+        && (flags & FILE_FLAG_DELETE_ON_CLOSE) == 0
+        && (desiredAccess & ~allowedAccess) == 0;
 }
 
 HANDLE OpenWithoutFollowingReparse(
@@ -321,7 +440,8 @@ enum class IdentityCaptureResult { Captured, Missing, Unsafe };
 
 IdentityCaptureResult CaptureIdentity(
     const std::wstring& path,
-    StableIdentity& identity) {
+    StableIdentity& identity,
+    const bool requirePrivateRegular = false) {
     const HANDLE handle = OpenWithoutFollowingReparse(path, &CreateFileW);
     if (handle == INVALID_HANDLE_VALUE) {
         const auto error = GetLastError();
@@ -332,7 +452,11 @@ IdentityCaptureResult CaptureIdentity(
 
     BY_HANDLE_FILE_INFORMATION information{};
     const bool safe = HandleMatchesLexicalPath(handle, path)
-        && GetFileInformationByHandle(handle, &information);
+        && GetFileInformationByHandle(handle, &information)
+        && (!requirePrivateRegular
+            || ((information.dwFileAttributes
+                    & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0
+                && information.nNumberOfLinks == 1));
     CloseHandle(handle);
     if (!safe) {
         return IdentityCaptureResult::Unsafe;
@@ -342,6 +466,7 @@ IdentityCaptureResult CaptureIdentity(
         information.dwVolumeSerialNumber,
         information.nFileIndexHigh,
         information.nFileIndexLow,
+        requirePrivateRegular,
     };
     return IdentityCaptureResult::Captured;
 }
@@ -358,9 +483,28 @@ bool IdentityIsStable(
         && GetFileInformationByHandle(handle, &information)
         && information.dwVolumeSerialNumber == expected.volumeSerial
         && information.nFileIndexHigh == expected.fileIndexHigh
-        && information.nFileIndexLow == expected.fileIndexLow;
+        && information.nFileIndexLow == expected.fileIndexLow
+        && (!expected.requirePrivateRegular
+            || ((information.dwFileAttributes
+                    & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0
+                && information.nNumberOfLinks == 1));
     CloseHandle(handle);
     return stable;
+}
+
+bool HandleMatchesIdentity(
+    const HANDLE handle,
+    const StableIdentity& expected) {
+    BY_HANDLE_FILE_INFORMATION information{};
+    return HandleMatchesLexicalPath(handle, expected.path)
+        && GetFileInformationByHandle(handle, &information)
+        && information.dwVolumeSerialNumber == expected.volumeSerial
+        && information.nFileIndexHigh == expected.fileIndexHigh
+        && information.nFileIndexLow == expected.fileIndexLow
+        && (!expected.requirePrivateRegular
+            || ((information.dwFileAttributes
+                    & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0
+                && information.nNumberOfLinks == 1));
 }
 
 std::wstring ParentPath(const std::wstring_view path) {
@@ -429,6 +573,16 @@ bool StableIdentitiesMatch(const HookContext& context) {
         [&](const StableIdentity& identity) {
             return IdentityIsStable(identity, context.trampolines.createFile);
         });
+}
+
+bool GameParamIdentitiesMatch(const HookContext& context) {
+    return context.gameParamRedirectConfigured
+        && IdentityIsStable(
+            context.gameParamSourceIdentity,
+            context.trampolines.createFile)
+        && IdentityIsStable(
+            context.gameParamTargetIdentity,
+            context.trampolines.createFile);
 }
 
 const char* OperationName(const PathOperation operation) noexcept {
@@ -691,6 +845,61 @@ EvaluatedPath Denied(
     RecordAudit(context, operation, category);
     SetLastError(ERROR_ACCESS_DENIED);
     return {false, false, false, false, {}, {}};
+}
+
+bool EvaluateGameParamRedirect(
+    const HookContext& context,
+    const wchar_t* const path,
+    const PathOperation operation,
+    EvaluatedPath& evaluated) {
+    if (!IsExactGameParamRequest(context, path)) {
+        return false;
+    }
+    if (context.denyOnly.load(std::memory_order_acquire)
+        || !GameParamIdentitiesMatch(context)
+        || !InspectExistingComponents(
+            context.configuration.overhaulGameParamSource,
+            context.trampolines.createFile)
+        || !InspectExistingComponents(
+            context.configuration.overhaulGameParamTarget,
+            context.trampolines.createFile)) {
+        evaluated = Denied(context, operation, SaveAuditCategory::Unrelated);
+        return true;
+    }
+
+    std::wstring physicalTarget;
+    std::vector<EvaluatedPath::PinnedHandle> pins;
+    bool leafPinned = false;
+    if (!ResolvePhysicalPath(
+            context.configuration.overhaulGameParamTarget,
+            context.trampolines.createFile,
+            physicalTarget,
+            pins,
+            true,
+            &leafPinned)
+        || !leafPinned
+        || pins.empty()
+        || !HandleMatchesIdentity(
+            pins.back().Get(),
+            context.gameParamTargetIdentity)
+        || !EqualsOrdinalIgnoreCase(
+            physicalTarget,
+            context.configuration.overhaulGameParamTarget)) {
+        evaluated = Denied(context, operation, SaveAuditCategory::Unrelated);
+        return true;
+    }
+
+    RecordAudit(context, operation, SaveAuditCategory::Unrelated);
+    evaluated = {
+        true,
+        true,
+        true,
+        true,
+        context.configuration.overhaulGameParamTarget,
+        std::move(pins),
+        true,
+    };
+    return true;
 }
 
 EvaluatedPath EvaluatePath(
@@ -1237,11 +1446,33 @@ HANDLE WINAPI HookCreateFile(
             SetLastError(ERROR_ACCESS_DENIED);
             return INVALID_HANDLE_VALUE;
         }
-        auto evaluated = EvaluatePath(
+        const auto operation = OpenOperation(desiredAccess);
+        const std::wstring requested(fileName == nullptr ? L"" : fileName);
+        EvaluatedPath evaluated{};
+        const bool gameParamRequest = IsExactGameParamRequest(
             *context,
-            fileName,
-            OpenOperation(desiredAccess),
-            true);
+            requested.c_str());
+        if (gameParamRequest
+            && !IsReadCompatibleGameParamOpen(
+                desiredAccess,
+                creation,
+                flags)) {
+            evaluated = Denied(
+                *context,
+                operation,
+                SaveAuditCategory::Unrelated);
+        }
+        else if (!EvaluateGameParamRedirect(
+                     *context,
+                     requested.c_str(),
+                     operation,
+                     evaluated)) {
+            evaluated = EvaluatePath(
+                *context,
+                requested.c_str(),
+                operation,
+                true);
+        }
         if (!evaluated.allowed) {
             return INVALID_HANDLE_VALUE;
         }
@@ -1256,7 +1487,14 @@ HANDLE WINAPI HookCreateFile(
             flags,
             reopenedPinnedLeaf);
         if (reopenedPinnedLeaf) {
+            if (gameParamRequest && pinnedResult != INVALID_HANDLE_VALUE) {
+                gameParamRedirectCount.fetch_add(1, std::memory_order_relaxed);
+            }
             return pinnedResult;
+        }
+        if (gameParamRequest) {
+            SetLastError(ERROR_ACCESS_DENIED);
+            return INVALID_HANDLE_VALUE;
         }
         return context->trampolines.createFile(
             evaluated.effective.c_str(),
@@ -1271,6 +1509,29 @@ HANDLE WINAPI HookCreateFile(
         SetLastError(ERROR_ACCESS_DENIED);
         return INVALID_HANDLE_VALUE;
     }
+}
+
+HANDLE WINAPI HookCreateFileAnsi(
+    const LPCSTR fileName,
+    const DWORD desiredAccess,
+    const DWORD shareMode,
+    const LPSECURITY_ATTRIBUTES security,
+    const DWORD creation,
+    const DWORD flags,
+    const HANDLE templateFile) {
+    std::wstring wide;
+    if (!AnsiPathToWide(fileName, wide)) {
+        SetLastError(ERROR_ACCESS_DENIED);
+        return INVALID_HANDLE_VALUE;
+    }
+    return HookCreateFile(
+        wide.c_str(),
+        desiredAccess,
+        shareMode,
+        security,
+        creation,
+        flags,
+        templateFile);
 }
 
 BOOL WINAPI HookDeleteFile(const LPCWSTR fileName) {
@@ -1293,6 +1554,15 @@ BOOL WINAPI HookDeleteFile(const LPCWSTR fileName) {
         SetLastError(ERROR_ACCESS_DENIED);
         return FALSE;
     }
+}
+
+BOOL WINAPI HookDeleteFileAnsi(const LPCSTR fileName) {
+    std::wstring wide;
+    if (!AnsiPathToWide(fileName, wide)) {
+        SetLastError(ERROR_ACCESS_DENIED);
+        return FALSE;
+    }
+    return HookDeleteFile(wide.c_str());
 }
 
 BOOL WINAPI HookMoveFile(
@@ -1330,6 +1600,54 @@ BOOL WINAPI HookMoveFile(
         SetLastError(ERROR_ACCESS_DENIED);
         return FALSE;
     }
+}
+
+BOOL WINAPI HookMoveFileSimple(
+    const LPCWSTR existingName,
+    const LPCWSTR newName) {
+    try {
+        CallbackLease callback;
+        const auto& context = callback.Context();
+        if (context == nullptr || context->trampolines.moveFileSimple == nullptr
+            || newName == nullptr) {
+            SetLastError(ERROR_ACCESS_DENIED);
+            return FALSE;
+        }
+        const auto source = EvaluatePath(
+            *context,
+            existingName,
+            PathOperation::RenameSource);
+        if (!source.allowed) {
+            return FALSE;
+        }
+        const auto destination = EvaluatePath(
+            *context,
+            newName,
+            PathOperation::RenameDestination);
+        return destination.allowed
+                && MutationOperandsAreContained({&source, &destination})
+            ? context->trampolines.moveFileSimple(
+                source.effective.c_str(),
+                destination.effective.c_str())
+            : (SetLastError(ERROR_ACCESS_DENIED), FALSE);
+    }
+    catch (...) {
+        SetLastError(ERROR_ACCESS_DENIED);
+        return FALSE;
+    }
+}
+
+BOOL WINAPI HookMoveFileAnsi(
+    const LPCSTR existingName,
+    const LPCSTR newName) {
+    std::wstring wideExisting;
+    std::wstring wideNew;
+    if (!AnsiPathToWide(existingName, wideExisting)
+        || !AnsiPathToWide(newName, wideNew)) {
+        SetLastError(ERROR_ACCESS_DENIED);
+        return FALSE;
+    }
+    return HookMoveFileSimple(wideExisting.c_str(), wideNew.c_str());
 }
 
 BOOL WINAPI HookReplaceFile(
@@ -1407,22 +1725,99 @@ BOOL WINAPI HookAttributes(
             SetLastError(ERROR_ACCESS_DENIED);
             return FALSE;
         }
-        const auto evaluated = EvaluatePath(
+        EvaluatedPath evaluated{};
+        const bool gameParamRequest = EvaluateGameParamRedirect(
             *context,
             fileName,
             PathOperation::Attributes,
-            true);
-        return evaluated.allowed
-            ? context->trampolines.attributes(
-                evaluated.effective.c_str(),
-                infoLevel,
-                information)
-            : FALSE;
+            evaluated);
+        if (!gameParamRequest) {
+            evaluated = EvaluatePath(
+                *context,
+                fileName,
+                PathOperation::Attributes,
+                true);
+        }
+        if (!evaluated.allowed) {
+            return FALSE;
+        }
+        if (gameParamRequest) {
+            InvokeBeforeOriginalApiCallback();
+        }
+        const auto result = context->trampolines.attributes(
+            evaluated.effective.c_str(),
+            infoLevel,
+            information);
+        if (gameParamRequest && result) {
+            gameParamRedirectCount.fetch_add(1, std::memory_order_relaxed);
+        }
+        return result;
     }
     catch (...) {
         SetLastError(ERROR_ACCESS_DENIED);
         return FALSE;
     }
+}
+
+DWORD WINAPI HookAttributesSimple(const LPCWSTR fileName) {
+    try {
+        CallbackLease callback;
+        const auto& context = callback.Context();
+        if (context == nullptr || context->trampolines.attributesSimple == nullptr) {
+            SetLastError(ERROR_ACCESS_DENIED);
+            return INVALID_FILE_ATTRIBUTES;
+        }
+        EvaluatedPath evaluated{};
+        const bool gameParamRequest = EvaluateGameParamRedirect(
+            *context,
+            fileName,
+            PathOperation::Attributes,
+            evaluated);
+        if (!gameParamRequest) {
+            evaluated = EvaluatePath(
+                *context,
+                fileName,
+                PathOperation::Attributes,
+                true);
+        }
+        if (!evaluated.allowed) {
+            return INVALID_FILE_ATTRIBUTES;
+        }
+        if (gameParamRequest) {
+            InvokeBeforeOriginalApiCallback();
+        }
+        const auto result = context->trampolines.attributesSimple(
+            evaluated.effective.c_str());
+        if (gameParamRequest && result != INVALID_FILE_ATTRIBUTES) {
+            gameParamRedirectCount.fetch_add(1, std::memory_order_relaxed);
+        }
+        return result;
+    }
+    catch (...) {
+        SetLastError(ERROR_ACCESS_DENIED);
+        return INVALID_FILE_ATTRIBUTES;
+    }
+}
+
+BOOL WINAPI HookAttributesAnsi(
+    const LPCSTR fileName,
+    const GET_FILEEX_INFO_LEVELS infoLevel,
+    const LPVOID information) {
+    std::wstring wide;
+    if (!AnsiPathToWide(fileName, wide)) {
+        SetLastError(ERROR_ACCESS_DENIED);
+        return FALSE;
+    }
+    return HookAttributes(wide.c_str(), infoLevel, information);
+}
+
+DWORD WINAPI HookAttributesSimpleAnsi(const LPCSTR fileName) {
+    std::wstring wide;
+    if (!AnsiPathToWide(fileName, wide)) {
+        SetLastError(ERROR_ACCESS_DENIED);
+        return INVALID_FILE_ATTRIBUTES;
+    }
+    return HookAttributesSimple(wide.c_str());
 }
 
 HANDLE WINAPI HookFindFirst(
@@ -1469,6 +1864,39 @@ HANDLE WINAPI HookFindFirst(
     }
 }
 
+HANDLE WINAPI HookFindFirstSimple(
+    const LPCWSTR fileName,
+    const LPWIN32_FIND_DATAW findData) {
+    try {
+        CallbackLease callback;
+        const auto& context = callback.Context();
+        if (context == nullptr || context->trampolines.findFirstSimple == nullptr) {
+            SetLastError(ERROR_ACCESS_DENIED);
+            return INVALID_HANDLE_VALUE;
+        }
+        const auto evaluated = EvaluateEnumerationPath(*context, fileName);
+        if (!evaluated.allowed) {
+            return INVALID_HANDLE_VALUE;
+        }
+        const auto result = context->trampolines.findFirstSimple(
+            evaluated.effective.c_str(),
+            findData);
+        if (result != INVALID_HANDLE_VALUE && evaluated.redirected && findData != nullptr) {
+            if (wcscpy_s(findData->cFileName, MAX_PATH, L"DRAKS0005.sl2") != 0) {
+                FindClose(result);
+                SetLastError(ERROR_INSUFFICIENT_BUFFER);
+                return INVALID_HANDLE_VALUE;
+            }
+            findData->cAlternateFileName[0] = L'\0';
+        }
+        return result;
+    }
+    catch (...) {
+        SetLastError(ERROR_ACCESS_DENIED);
+        return INVALID_HANDLE_VALUE;
+    }
+}
+
 struct HookDefinition {
     const wchar_t* module;
     const char* procedure;
@@ -1476,7 +1904,7 @@ struct HookDefinition {
     void** original;
 };
 
-std::array<HookDefinition, 8> HookDefinitions(HookContext& context) {
+std::array<HookDefinition, 16> HookDefinitions(HookContext& context) {
     return {{
         {L"shell32.dll", "SHGetKnownFolderPath",
          reinterpret_cast<void*>(&HookKnownFolder),
@@ -1487,31 +1915,71 @@ std::array<HookDefinition, 8> HookDefinitions(HookContext& context) {
         {L"kernel32.dll", "CreateFileW",
          reinterpret_cast<void*>(&HookCreateFile),
          reinterpret_cast<void**>(&context.trampolines.createFile)},
+        {L"kernel32.dll", "CreateFileA",
+         reinterpret_cast<void*>(&HookCreateFileAnsi),
+         reinterpret_cast<void**>(&context.trampolines.createFileAnsi)},
         {L"kernel32.dll", "DeleteFileW",
          reinterpret_cast<void*>(&HookDeleteFile),
          reinterpret_cast<void**>(&context.trampolines.deleteFile)},
+        {L"kernel32.dll", "DeleteFileA",
+         reinterpret_cast<void*>(&HookDeleteFileAnsi),
+         reinterpret_cast<void**>(&context.trampolines.deleteFileAnsi)},
         {L"kernel32.dll", "MoveFileExW",
          reinterpret_cast<void*>(&HookMoveFile),
          reinterpret_cast<void**>(&context.trampolines.moveFile)},
+        {L"kernel32.dll", "MoveFileW",
+         reinterpret_cast<void*>(&HookMoveFileSimple),
+         reinterpret_cast<void**>(&context.trampolines.moveFileSimple)},
+        {L"kernel32.dll", "MoveFileA",
+         reinterpret_cast<void*>(&HookMoveFileAnsi),
+         reinterpret_cast<void**>(&context.trampolines.moveFileAnsi)},
         {L"kernel32.dll", "ReplaceFileW",
          reinterpret_cast<void*>(&HookReplaceFile),
          reinterpret_cast<void**>(&context.trampolines.replaceFile)},
         {L"kernel32.dll", "GetFileAttributesExW",
          reinterpret_cast<void*>(&HookAttributes),
          reinterpret_cast<void**>(&context.trampolines.attributes)},
+        {L"kernel32.dll", "GetFileAttributesExA",
+         reinterpret_cast<void*>(&HookAttributesAnsi),
+         reinterpret_cast<void**>(&context.trampolines.attributesAnsi)},
+        {L"kernel32.dll", "GetFileAttributesW",
+         reinterpret_cast<void*>(&HookAttributesSimple),
+         reinterpret_cast<void**>(&context.trampolines.attributesSimple)},
+        {L"kernel32.dll", "GetFileAttributesA",
+         reinterpret_cast<void*>(&HookAttributesSimpleAnsi),
+         reinterpret_cast<void**>(&context.trampolines.attributesSimpleAnsi)},
         {L"kernel32.dll", "FindFirstFileExW",
          reinterpret_cast<void*>(&HookFindFirst),
          reinterpret_cast<void**>(&context.trampolines.findFirst)},
+        {L"kernel32.dll", "FindFirstFileW",
+         reinterpret_cast<void*>(&HookFindFirstSimple),
+         reinterpret_cast<void**>(&context.trampolines.findFirstSimple)},
     }};
 }
 
 class MinHookPlatform final : public HookPlatform {
 public:
+    void BeginMutation() noexcept override {
+        if (mutationDepth_++ == 0) {
+            try {
+                mutationLease_ = std::make_unique<Hooks::MinHookMutationLease>();
+            }
+            catch (...) {
+                std::terminate();
+            }
+        }
+    }
+
+    void EndMutation() noexcept override {
+        if (mutationDepth_ != 0 && --mutationDepth_ == 0) {
+            mutationLease_.reset();
+        }
+    }
+
     bool Initialize() noexcept override {
         targetCount_ = 0;
-        const auto status = MH_Initialize();
-        ownsInitialization_ = status == MH_OK;
-        return ownsInitialization_ || status == MH_ERROR_ALREADY_INITIALIZED;
+        initialized_ = Hooks::AcquireMinHook();
+        return initialized_;
     }
 
     void* ResolveTarget(
@@ -1531,7 +1999,7 @@ public:
         void* detour,
         void** original) noexcept override {
         if (targetCount_ >= targets_.size()
-            || MH_CreateHook(target, detour, original) != MH_OK) {
+            || Hooks::CreateHook(target, detour, original) != MH_OK) {
             return false;
         }
         targets_[targetCount_++] = target;
@@ -1539,15 +2007,17 @@ public:
     }
 
     bool QueueEnable(void* target) noexcept override {
-        return MH_QueueEnableHook(target) == MH_OK;
+        return Hooks::QueueEnableHook(target) == MH_OK;
     }
 
-    bool ApplyQueued() noexcept override { return MH_ApplyQueued() == MH_OK; }
+    bool ApplyQueued() noexcept override {
+        return Hooks::ApplyQueuedHooks() == MH_OK;
+    }
 
     bool DisableAll() noexcept override {
         bool disabled = true;
         for (std::size_t index = 0; index < targetCount_; ++index) {
-            const auto status = MH_DisableHook(targets_[index]);
+            const auto status = Hooks::DisableHook(targets_[index]);
             disabled = (status == MH_OK
                     || status == MH_ERROR_DISABLED
                     || status == MH_ERROR_NOT_CREATED)
@@ -1557,7 +2027,7 @@ public:
     }
 
     bool RemoveHook(void* target) noexcept override {
-        const auto status = MH_RemoveHook(target);
+        const auto status = Hooks::RemoveHook(target);
         if (status != MH_OK && status != MH_ERROR_NOT_CREATED) {
             return false;
         }
@@ -1576,25 +2046,48 @@ public:
     }
 
     bool Uninitialize() noexcept override {
-        if (!ownsInitialization_) {
+        if (!initialized_) {
             return targetCount_ == 0;
         }
-        const auto status = MH_Uninitialize();
-        if (status != MH_OK && status != MH_ERROR_NOT_INITIALIZED) {
+        if (!Hooks::ReleaseMinHook()) {
             return false;
         }
-        ownsInitialization_ = false;
+        initialized_ = false;
         targetCount_ = 0;
         return true;
     }
 
 private:
-    bool ownsInitialization_ = false;
-    std::array<void*, 8> targets_{};
+    bool initialized_ = false;
+    std::array<void*, 16> targets_{};
     std::size_t targetCount_ = 0;
+    std::size_t mutationDepth_ = 0;
+    std::unique_ptr<Hooks::MinHookMutationLease> mutationLease_;
 };
 
 MinHookPlatform systemPlatform;
+
+class HookPlatformMutation final {
+public:
+    explicit HookPlatformMutation(HookPlatform* const platform) noexcept
+        : platform_(platform) {
+        if (platform_ != nullptr) {
+            platform_->BeginMutation();
+        }
+    }
+    ~HookPlatformMutation() {
+        Release();
+    }
+    void Release() noexcept {
+        if (platform_ != nullptr) {
+            platform_->EndMutation();
+            platform_ = nullptr;
+        }
+    }
+
+private:
+    HookPlatform* platform_;
+};
 
 bool ValidateConfiguration(
     const SaveHookConfiguration& configuration,
@@ -1604,23 +2097,104 @@ bool ValidateConfiguration(
     }
 
     SaveHookConfiguration canonical{};
+    canonical.protectFileIo = configuration.protectFileIo;
     canonical.diagnosticMode = configuration.diagnosticMode;
+    const bool hasGameParamSource =
+        !configuration.overhaulGameParamSource.empty();
+    const bool hasGameParamTarget =
+        !configuration.overhaulGameParamTarget.empty();
+    if (hasGameParamSource != hasGameParamTarget
+        || (hasGameParamSource && !configuration.protectFileIo)) {
+        return false;
+    }
     if (!CanonicalizeLexical(configuration.virtualDocuments, canonical.virtualDocuments)
-        || !CanonicalizeLexical(configuration.virtualLogicalSave, canonical.virtualLogicalSave)
+        || !EqualsOrdinalIgnoreCase(
+            configuration.virtualDocuments,
+            canonical.virtualDocuments)
+        || !InspectExistingComponents(canonical.virtualDocuments, &CreateFileW)) {
+        return false;
+    }
+
+    if (!configuration.protectFileIo) {
+        if (!configuration.virtualLogicalSave.empty()
+            || !configuration.realSaveRoot.empty()
+            || !configuration.externalSaveRoot.empty()
+            || !configuration.dedicatedRmm.empty()) {
+            return false;
+        }
+        auto candidate = std::make_shared<HookContext>(std::move(canonical));
+        std::vector<EvaluatedPath::PinnedHandle> validationPins;
+        if (!ResolvePhysicalPath(
+                candidate->configuration.virtualDocuments,
+                &CreateFileW,
+                candidate->physicalVirtualDocuments,
+                validationPins,
+                false)
+            || !AddStableIdentity(
+                *candidate,
+                candidate->configuration.virtualDocuments,
+                true)) {
+            return false;
+        }
+        context = std::move(candidate);
+        return true;
+    }
+
+    if (!CanonicalizeLexical(configuration.virtualLogicalSave, canonical.virtualLogicalSave)
         || !CanonicalizeLexical(configuration.realSaveRoot, canonical.realSaveRoot)
         || !CanonicalizeLexical(configuration.externalSaveRoot, canonical.externalSaveRoot)
         || !CanonicalizeLexical(configuration.dedicatedRmm, canonical.dedicatedRmm)) {
         return false;
     }
 
-    if (!EqualsOrdinalIgnoreCase(configuration.virtualDocuments, canonical.virtualDocuments)
-        || !EqualsOrdinalIgnoreCase(configuration.virtualLogicalSave, canonical.virtualLogicalSave)
+    if (hasGameParamSource) {
+        constexpr std::wstring_view sourceSuffix =
+            L"\\overhaul\\GameParam.parambnd.dcx";
+        constexpr std::wstring_view targetSuffix =
+            L"\\components\\rmm-bridge\\content\\overhaul\\GameParam.parambnd.dcx";
+        if (!CanonicalizeLexical(
+                configuration.overhaulGameParamSource,
+                canonical.overhaulGameParamSource)
+            || !CanonicalizeLexical(
+                configuration.overhaulGameParamTarget,
+                canonical.overhaulGameParamTarget)
+            || !EqualsOrdinalIgnoreCase(
+                configuration.overhaulGameParamSource,
+                canonical.overhaulGameParamSource)
+            || !EqualsOrdinalIgnoreCase(
+                configuration.overhaulGameParamTarget,
+                canonical.overhaulGameParamTarget)
+            || !EndsWithOrdinalIgnoreCase(
+                canonical.overhaulGameParamSource,
+                sourceSuffix)
+            || !EndsWithOrdinalIgnoreCase(
+                canonical.overhaulGameParamTarget,
+                targetSuffix)
+            || EqualsOrdinalIgnoreCase(
+                canonical.overhaulGameParamSource,
+                canonical.overhaulGameParamTarget)
+            || !InspectExistingComponents(
+                canonical.overhaulGameParamSource,
+                &CreateFileW)
+            || !InspectExistingComponents(
+                canonical.overhaulGameParamTarget,
+                &CreateFileW)
+            || !IsPrivateRegularFile(
+                canonical.overhaulGameParamSource,
+                &CreateFileW)
+            || !IsPrivateRegularFile(
+                canonical.overhaulGameParamTarget,
+                &CreateFileW)) {
+            return false;
+        }
+    }
+
+    if (!EqualsOrdinalIgnoreCase(configuration.virtualLogicalSave, canonical.virtualLogicalSave)
         || !EqualsOrdinalIgnoreCase(configuration.realSaveRoot, canonical.realSaveRoot)
         || !EqualsOrdinalIgnoreCase(configuration.externalSaveRoot, canonical.externalSaveRoot)
         || !EqualsOrdinalIgnoreCase(configuration.dedicatedRmm, canonical.dedicatedRmm)
         || !IsBelow(canonical.virtualLogicalSave, canonical.virtualDocuments)
         || !IsBelow(canonical.dedicatedRmm, canonical.externalSaveRoot)
-        || !InspectExistingComponents(canonical.virtualDocuments, &CreateFileW)
         || !InspectExistingComponents(canonical.virtualLogicalSave, &CreateFileW)
         || !InspectExistingComponents(canonical.realSaveRoot, &CreateFileW)
         || !InspectExistingComponents(canonical.externalSaveRoot, &CreateFileW)
@@ -1630,6 +2204,25 @@ bool ValidateConfiguration(
     }
 
     auto candidate = std::make_shared<HookContext>(std::move(canonical));
+    if (hasGameParamSource) {
+        if (CaptureIdentity(
+                candidate->configuration.overhaulGameParamSource,
+                candidate->gameParamSourceIdentity,
+                true) != IdentityCaptureResult::Captured
+            || CaptureIdentity(
+                candidate->configuration.overhaulGameParamTarget,
+                candidate->gameParamTargetIdentity,
+                true) != IdentityCaptureResult::Captured
+            || (candidate->gameParamSourceIdentity.volumeSerial
+                    == candidate->gameParamTargetIdentity.volumeSerial
+                && candidate->gameParamSourceIdentity.fileIndexHigh
+                    == candidate->gameParamTargetIdentity.fileIndexHigh
+                && candidate->gameParamSourceIdentity.fileIndexLow
+                    == candidate->gameParamTargetIdentity.fileIndexLow)) {
+            return false;
+        }
+        candidate->gameParamRedirectConfigured = true;
+    }
     std::vector<EvaluatedPath::PinnedHandle> validationPins;
     if (!ResolvePhysicalPath(
             candidate->configuration.virtualDocuments,
@@ -1685,13 +2278,20 @@ SaveHookCleanupStatus CleanupLocked() noexcept {
     }
 
     if (lifecycle.mayBeEnabled) {
-        if (!lifecycle.platform->DisableAll()) {
-            return SaveHookCleanupStatus::Incomplete;
+        {
+            HookPlatformMutation mutation(lifecycle.platform);
+            if (!lifecycle.platform->DisableAll()) {
+                return SaveHookCleanupStatus::Incomplete;
+            }
         }
         lifecycle.mayBeEnabled = false;
     }
 
     std::unique_lock callbackLock(callbackGate);
+    HookPlatformMutation mutation(lifecycle.platform);
+    if (!lifecycle.platform->DisableAll()) {
+        return SaveHookCleanupStatus::Incomplete;
+    }
     bool allRemoved = true;
     for (std::size_t index = lifecycle.created.size(); index > 0; --index) {
         const auto slot = index - 1;
@@ -1737,6 +2337,8 @@ SaveHookInstallStatus InstallSaveHooks(
         return SaveHookInstallStatus::InstallFailed;
     }
 
+    HookPlatformMutation mutation(&platform);
+
     try {
         std::shared_ptr<HookContext> context;
         if (!ValidateConfiguration(configuration, context)) {
@@ -1752,35 +2354,42 @@ SaveHookInstallStatus InstallSaveHooks(
         activeContext.store(context, std::memory_order_release);
 
         const auto definitions = HookDefinitions(*context);
-        for (std::size_t index = 0; index < definitions.size(); ++index) {
+        const auto definitionCount = context->configuration.protectFileIo
+            ? definitions.size()
+            : std::size_t{2};
+        for (std::size_t index = 0; index < definitionCount; ++index) {
             lifecycle.targets[index] = platform.ResolveTarget(
                 definitions[index].module,
                 definitions[index].procedure);
             if (lifecycle.targets[index] == nullptr) {
+                mutation.Release();
                 static_cast<void>(CleanupLocked());
                 return SaveHookInstallStatus::InstallFailed;
             }
         }
 
-        for (std::size_t index = 0; index < definitions.size(); ++index) {
+        for (std::size_t index = 0; index < definitionCount; ++index) {
             if (!platform.CreateHook(
                     lifecycle.targets[index],
                     definitions[index].detour,
                     definitions[index].original)) {
+                mutation.Release();
                 static_cast<void>(CleanupLocked());
                 return SaveHookInstallStatus::InstallFailed;
             }
             lifecycle.created[index] = true;
         }
 
-        for (const auto target : lifecycle.targets) {
-            if (!platform.QueueEnable(target)) {
+        for (std::size_t index = 0; index < definitionCount; ++index) {
+            if (!platform.QueueEnable(lifecycle.targets[index])) {
+                mutation.Release();
                 static_cast<void>(CleanupLocked());
                 return SaveHookInstallStatus::InstallFailed;
             }
         }
         lifecycle.mayBeEnabled = true;
         if (!platform.ApplyQueued()) {
+            mutation.Release();
             static_cast<void>(CleanupLocked());
             return SaveHookInstallStatus::InstallFailed;
         }
@@ -1789,6 +2398,7 @@ SaveHookInstallStatus InstallSaveHooks(
         return SaveHookInstallStatus::Success;
     }
     catch (...) {
+        mutation.Release();
         static_cast<void>(CleanupLocked());
         return SaveHookInstallStatus::InstallFailed;
     }
@@ -1814,6 +2424,10 @@ SaveAuditCounters CurrentSaveAuditCounters() noexcept {
         auditCounters[static_cast<std::size_t>(SaveAuditCategory::Unrelated)]
             .load(std::memory_order_relaxed),
     };
+}
+
+std::uint64_t CurrentGameParamRedirectCount() noexcept {
+    return gameParamRedirectCount.load(std::memory_order_relaxed);
 }
 
 namespace Testing {
@@ -1842,6 +2456,29 @@ void HoldSaveHookCallback(void* enteredEvent, void* releaseEvent) noexcept {
     CallbackLease callback;
     if (enteredEvent != nullptr) {
         SetEvent(static_cast<HANDLE>(enteredEvent));
+    }
+    if (releaseEvent != nullptr) {
+        WaitForSingleObject(static_cast<HANDLE>(releaseEvent), INFINITE);
+    }
+}
+
+void HoldSaveHookCallbackWhileWaitingForMutation(
+    void* const enteredEvent,
+    void* const allowMutationEvent,
+    void* const mutationAcquiredEvent,
+    void* const releaseEvent) noexcept {
+    CallbackLease callback;
+    if (enteredEvent != nullptr) {
+        SetEvent(static_cast<HANDLE>(enteredEvent));
+    }
+    if (allowMutationEvent != nullptr) {
+        WaitForSingleObject(
+            static_cast<HANDLE>(allowMutationEvent),
+            INFINITE);
+    }
+    Hooks::MinHookMutationLease mutation;
+    if (mutationAcquiredEvent != nullptr) {
+        SetEvent(static_cast<HANDLE>(mutationAcquiredEvent));
     }
     if (releaseEvent != nullptr) {
         WaitForSingleObject(static_cast<HANDLE>(releaseEvent), INFINITE);

@@ -2,8 +2,10 @@ using DSRRandomizer.Foundation.Installation;
 using DSRRandomizer.Foundation.Runtime;
 using DSRRandomizer.Foundation.Saves;
 using DSRRandomizer.Launcher.Logging;
+using DSRRandomizer.Launcher.Configuration;
 using DSRRandomizer.Launcher.Services;
 using DSRRandomizer.Launcher.ViewModels;
+using DSRRandomizer.Launcher.Safety;
 
 namespace DSRRandomizer.Launcher.Tests.ViewModels;
 
@@ -12,7 +14,55 @@ public sealed class MainWindowViewModelTests
     private const string SteamId = "12345678901234567";
 
     [Fact]
-    public async Task InitializeCommand_NativeFoundationStillKeepsPublicLaunchLocked()
+    public async Task SaveExternalRootCommand_PersistsSelectionAndRequiresRestart()
+    {
+        using var fixture = ExternalRootFixture.Create();
+        var viewModel = new MainWindowViewModel(
+            service: null,
+            new RecordingLogger(),
+            materialRoot: string.Empty,
+            fixture.Store,
+            materialOperationsAvailable: false)
+        {
+            ExternalRootPath = fixture.ExternalRoot
+        };
+
+        await viewModel.SaveExternalRootCommand.ExecuteAsync(null);
+
+        Assert.Equal(fixture.ExternalRoot, await fixture.Store.ReadAsync(CancellationToken.None));
+        Assert.Contains("restart", viewModel.Status, StringComparison.OrdinalIgnoreCase);
+        Assert.False(viewModel.CanInitialize);
+    }
+
+    [Fact]
+    public async Task SaveExternalRootCommand_ChangedRootDisablesAllMaterialCommandsUntilRestart()
+    {
+        using var fixture = ExternalRootFixture.Create();
+        var newRoot = Path.Combine(fixture.Container, "different-external");
+        Directory.CreateDirectory(newRoot);
+        var viewModel = new MainWindowViewModel(
+            new FakeLauncherService(),
+            new RecordingLogger(),
+            fixture.ExternalRoot,
+            fixture.Store)
+        {
+            GamePath = @"C:\NotTheSource",
+            ExternalRootPath = newRoot
+        };
+
+        Assert.True(viewModel.VerifyCommand.CanExecute(null));
+        Assert.True(viewModel.InitializeCommand.CanExecute(null));
+        Assert.True(viewModel.AreSaveControlsEnabled);
+        await viewModel.SaveExternalRootCommand.ExecuteAsync(null);
+
+        Assert.False(viewModel.VerifyCommand.CanExecute(null));
+        Assert.False(viewModel.InitializeCommand.CanExecute(null));
+        Assert.False(viewModel.AreSaveControlsEnabled);
+        Assert.Contains("restart", viewModel.Status, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task InitializeCommand_MarksModRuntimeReadyButStillRequiresSelectedProfile()
     {
         var service = new FakeLauncherService();
         var viewModel = CreateViewModel(service, new RecordingLogger());
@@ -22,10 +72,28 @@ public sealed class MainWindowViewModelTests
 
         Assert.False(viewModel.CanLaunch);
         Assert.Equal(
-            "External runtime is ready. Launch stays locked until dedicated-save and online-blocking safety is installed.",
+            "External mod runtime is ready. Select a SteamID to launch after placing Steam in Offline Mode.",
             viewModel.Status);
         Assert.False(viewModel.IsBusy);
         Assert.Equal(100, viewModel.ProgressPercent);
+    }
+
+    [Fact]
+    public async Task InitializeCommand_SingleProfileEnablesAutomaticBootstrapLaunchWithoutPreparing()
+    {
+        var service = new FakeLauncherService
+        {
+            SaveProfiles = [new SaveProfileCandidate(
+                SteamId,
+                @"C:\Documents\12345678901234567\DRAKS0005.sl2")]
+        };
+        var viewModel = CreateViewModel(service, new RecordingLogger());
+        viewModel.GamePath = @"C:\Steam\DSR";
+
+        await viewModel.InitializeCommand.ExecuteAsync(null);
+
+        Assert.True(viewModel.CanLaunch);
+        Assert.Contains("automatically", viewModel.Status, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -69,48 +137,26 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
-    public async Task PrepareSaveCommand_ZeroProfilesReportsMissingProfileWithoutPreparing()
+    public async Task LoadAsync_SingleNormalProfileEnablesLaunchWithoutPreparing()
     {
-        var service = new FakeLauncherService();
-        var viewModel = CreateViewModel(service, new RecordingLogger());
-
-        await viewModel.PrepareSaveCommand.ExecuteAsync(null);
-
-        Assert.Empty(viewModel.SaveProfiles);
-        Assert.Contains("no", viewModel.Status, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("profile", viewModel.Status, StringComparison.OrdinalIgnoreCase);
-        Assert.Empty(service.PrepareCalls);
-        Assert.False(viewModel.CanLaunch);
-    }
-
-    [Fact]
-    public async Task PrepareSaveCommand_OneProfileDisplaysExactSourceAndDestinationBeforeFirstCopy()
-    {
-        var source = Path.Combine("C:\\Documents", SteamId, "DRAKS0005.sl2");
+        var source = @"C:\Documents\12345678901234567\DRAKS0005.sl2";
         var service = new FakeLauncherService
         {
-            SaveProfiles = [new SaveProfileCandidate(SteamId, source)],
-            PrepareResult = DedicatedSaveResult.Fail(
-                SaveErrorCode.FirstCopyConfirmationRequired,
-                "First-copy confirmation is required.")
+            SaveProfiles = [new SaveProfileCandidate(SteamId, source)]
         };
-        var local = Path.Combine("C:\\Local", "DSR-Randomizer");
-        var viewModel = new MainWindowViewModel(service, new RecordingLogger(), local);
+        var viewModel = CreateViewModel(service, new RecordingLogger());
 
-        await viewModel.PrepareSaveCommand.ExecuteAsync(null);
+        await viewModel.LoadAsync();
 
+        Assert.True(viewModel.CanLaunch);
         Assert.Equal(SteamId, viewModel.SelectedSaveProfile?.SteamId);
         Assert.Equal(source, viewModel.SelectedSaveSourcePath);
-        Assert.Equal(
-            Path.Combine(local, "saves", SteamId, "DRAKS0005.rmm"),
-            viewModel.DedicatedSavePath);
-        Assert.Contains(source, viewModel.Status, StringComparison.Ordinal);
-        Assert.Contains(viewModel.DedicatedSavePath, viewModel.Status, StringComparison.Ordinal);
-        Assert.Equal((SteamId, false), Assert.Single(service.PrepareCalls));
+        Assert.Contains("automatically", viewModel.Status, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(".sl2", viewModel.Status, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
-    public async Task PrepareSaveCommand_MultipleProfilesRequiresExplicitSelection()
+    public async Task LoadAsync_MultipleProfilesEnablesLaunchImmediatelyAfterExplicitSelection()
     {
         var first = new SaveProfileCandidate(
             "12345678901234567",
@@ -121,112 +167,75 @@ public sealed class MainWindowViewModelTests
         var service = new FakeLauncherService { SaveProfiles = [first, second] };
         var viewModel = CreateViewModel(service, new RecordingLogger());
 
-        await viewModel.PrepareSaveCommand.ExecuteAsync(null);
+        await viewModel.LoadAsync();
 
         Assert.Equal(2, viewModel.SaveProfiles.Count);
         Assert.Null(viewModel.SelectedSaveProfile);
-        Assert.Contains("select", viewModel.Status, StringComparison.OrdinalIgnoreCase);
-        Assert.Empty(service.PrepareCalls);
-    }
-
-    [Fact]
-    public async Task PrepareSaveCommand_SelectedProfileAndConfirmationPrepareExactSteamId()
-    {
-        var first = new SaveProfileCandidate(
-            "12345678901234567",
-            @"C:\Documents\12345678901234567\DRAKS0005.sl2");
-        var second = new SaveProfileCandidate(
-            "76543210987654321",
-            @"C:\Documents\76543210987654321\DRAKS0005.sl2");
-        var service = new FakeLauncherService
-        {
-            SaveProfiles = [first, second],
-            PrepareResult = new DedicatedSaveResult(
-                true,
-                false,
-                @"C:\Local\saves\76543210987654321\DRAKS0005.rmm",
-                SaveErrorCode.None,
-                string.Empty)
-        };
-        var viewModel = CreateViewModel(service, new RecordingLogger());
-        await viewModel.PrepareSaveCommand.ExecuteAsync(null);
-        viewModel.SelectedSaveProfile = second;
-        viewModel.FirstCopyConfirmed = true;
-
-        await viewModel.PrepareSaveCommand.ExecuteAsync(null);
-
-        Assert.Equal((second.SteamId, true), Assert.Single(service.PrepareCalls));
-        Assert.Contains("created", viewModel.Status, StringComparison.OrdinalIgnoreCase);
         Assert.False(viewModel.CanLaunch);
+        viewModel.SelectedSaveProfile = second;
+
+        Assert.True(viewModel.CanLaunch);
     }
 
     [Fact]
-    public async Task PrepareSaveCommand_ExistingRmmReportsReuseAndKeepsLaunchDisabled()
+    public async Task LaunchCommand_ReadyRuntimeAndSelectedProfileCallsSharedLaunchService()
     {
-        var source = new SaveProfileCandidate(
+        var profile = new SaveProfileCandidate(
             SteamId,
             @"C:\Documents\12345678901234567\DRAKS0005.sl2");
-        var destination = @"C:\Local\saves\12345678901234567\DRAKS0005.rmm";
         var service = new FakeLauncherService
         {
-            SaveProfiles = [source],
-            PrepareResult = new DedicatedSaveResult(
-                true,
-                true,
-                destination,
-                SaveErrorCode.None,
-                string.Empty)
+            SaveProfiles = [profile],
+            LaunchResult = new SafetyLaunchResult(true, string.Empty, 0)
         };
         var viewModel = CreateViewModel(service, new RecordingLogger());
+        await viewModel.LoadAsync();
 
-        await viewModel.PrepareSaveCommand.ExecuteAsync(null);
+        Assert.True(viewModel.LaunchCommand.CanExecute(null));
+        await viewModel.LaunchCommand.ExecuteAsync(null);
 
-        Assert.Contains("existing DRAKS0005.rmm", viewModel.Status, StringComparison.OrdinalIgnoreCase);
-        Assert.Equal((SteamId, false), Assert.Single(service.PrepareCalls));
-        Assert.False(viewModel.CanLaunch);
+        Assert.Equal(SteamId, Assert.Single(service.LaunchCalls));
+        Assert.Contains("exited", viewModel.Status, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
-    public async Task PrepareSaveCommand_InFlightProfileChangeRendersOriginalSelectionSnapshot()
+    public async Task LoadAsync_ModReadyRuntimeAndValidExistingRmmEnablesLaunchWithoutPrepareCommand()
     {
-        var first = new SaveProfileCandidate(
-            "12345678901234567",
-            @"C:\Documents\12345678901234567\DRAKS0005.sl2");
-        var second = new SaveProfileCandidate(
-            "76543210987654321",
-            @"C:\Documents\76543210987654321\DRAKS0005.sl2");
-        var pendingResult = new TaskCompletionSource<DedicatedSaveResult>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
         var service = new FakeLauncherService
         {
-            SaveProfiles = [first, second],
-            PendingPrepareResult = pendingResult
+            SaveProfiles = [new SaveProfileCandidate(SteamId, string.Empty)]
         };
-        var local = @"C:\Local\DSR-Randomizer";
-        var viewModel = new MainWindowViewModel(service, new RecordingLogger(), local);
-        await viewModel.PrepareSaveCommand.ExecuteAsync(null);
-        viewModel.SelectedSaveProfile = first;
+        var viewModel = CreateViewModel(service, new RecordingLogger());
 
-        var preparation = viewModel.PrepareSaveCommand.ExecuteAsync(null);
-        await service.PrepareEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        Assert.True(viewModel.IsBusy);
-        Assert.False(viewModel.AreSaveControlsEnabled);
-        viewModel.SelectedSaveProfile = second;
-        viewModel.FirstCopyConfirmed = true;
-        pendingResult.SetResult(DedicatedSaveResult.Fail(
-            SaveErrorCode.FirstCopyConfirmationRequired,
-            "First-copy confirmation is required."));
-        await preparation;
+        await viewModel.LoadAsync();
 
-        Assert.Equal((first.SteamId, false), Assert.Single(service.PrepareCalls));
-        Assert.Contains(first.SourcePath, viewModel.Status, StringComparison.Ordinal);
-        Assert.Contains(
-            Path.Combine(local, "saves", first.SteamId, "DRAKS0005.rmm"),
-            viewModel.Status,
-            StringComparison.Ordinal);
-        Assert.DoesNotContain(second.SourcePath, viewModel.Status, StringComparison.Ordinal);
-        Assert.False(viewModel.IsBusy);
-        Assert.True(viewModel.AreSaveControlsEnabled);
+        Assert.True(viewModel.LaunchCommand.CanExecute(null));
+    }
+
+    [Fact]
+    public async Task LoadAsync_WhenRuntimeIsReady_ExposesItemAndEnemyRandomizerCommands()
+    {
+        var viewModel = CreateViewModel(new FakeLauncherService(), new RecordingLogger());
+
+        await viewModel.LoadAsync();
+
+        Assert.NotNull(viewModel.ItemRandomizerCommand);
+        Assert.NotNull(viewModel.EnemyRandomizerCommand);
+        Assert.True(viewModel.ItemRandomizerCommand.CanExecute(null));
+        Assert.True(viewModel.EnemyRandomizerCommand.CanExecute(null));
+    }
+
+    [Fact]
+    public async Task ItemAndEnemyRandomizerCommands_UpdateStatusWithLaunchResult()
+    {
+        var viewModel = CreateViewModel(new FakeLauncherService(), new RecordingLogger());
+        await viewModel.LoadAsync();
+
+        await viewModel.ItemRandomizerCommand.ExecuteAsync(null);
+        Assert.Contains("item", viewModel.Status, StringComparison.OrdinalIgnoreCase);
+
+        await viewModel.EnemyRandomizerCommand.ExecuteAsync(null);
+        Assert.Contains("enemy", viewModel.Status, StringComparison.OrdinalIgnoreCase);
     }
 
     private static MainWindowViewModel CreateViewModel(
@@ -238,16 +247,6 @@ public sealed class MainWindowViewModelTests
     {
         public IReadOnlyList<SaveProfileCandidate> SaveProfiles { get; init; } = [];
 
-        public DedicatedSaveResult PrepareResult { get; init; } =
-            DedicatedSaveResult.Fail(SaveErrorCode.SourceMissing, "not configured");
-
-        public List<(string SteamId, bool FirstCopyConfirmed)> PrepareCalls { get; } = [];
-
-        public TaskCompletionSource<DedicatedSaveResult>? PendingPrepareResult { get; init; }
-
-        public TaskCompletionSource PrepareEntered { get; } =
-            new(TaskCreationOptions.RunContinuationsAsynchronously);
-
         public VerificationResult VerificationResult { get; init; } = new(
             true,
             @"C:\Steam\DSR",
@@ -255,6 +254,11 @@ public sealed class MainWindowViewModelTests
             Array.Empty<string>());
 
         public Exception? RuntimeException { get; init; }
+
+        public SafetyLaunchResult LaunchResult { get; init; } =
+            SafetyLaunchResult.Failed("not configured");
+
+        public List<string> LaunchCalls { get; } = [];
 
         public Task<VerificationResult> VerifyAsync(
             string gamePath,
@@ -292,6 +296,9 @@ public sealed class MainWindowViewModelTests
                 @"C:\Local\runtime-test",
                 Array.Empty<string>()));
 
+        public Task<RuntimeReadinessResult> GetModdedLaunchReadinessAsync(
+            CancellationToken cancellationToken) => GetReadinessAsync(cancellationToken);
+
         public Task<IReadOnlyList<SaveProfileCandidate>> DiscoverSaveProfilesAsync(
             CancellationToken cancellationToken) =>
             Task.FromResult(SaveProfiles);
@@ -299,12 +306,25 @@ public sealed class MainWindowViewModelTests
         public Task<DedicatedSaveResult> PrepareDedicatedSaveAsync(
             string steamId,
             bool firstCopyConfirmed,
+            CancellationToken cancellationToken) =>
+            throw new InvalidOperationException(
+                "WPF must not explicitly prepare the dedicated save.");
+
+        public Task<SafetyLaunchResult> LaunchModdedAsync(
+            string steamId,
             CancellationToken cancellationToken)
         {
-            PrepareCalls.Add((steamId, firstCopyConfirmed));
-            PrepareEntered.TrySetResult();
-            return PendingPrepareResult?.Task ?? Task.FromResult(PrepareResult);
+            LaunchCalls.Add(steamId);
+            return Task.FromResult(LaunchResult);
         }
+
+        public Task<RandomizerToolLaunchResult> LaunchItemRandomizerAsync(
+            CancellationToken cancellationToken) =>
+            Task.FromResult(RandomizerToolLaunchResult.Success());
+
+        public Task<RandomizerToolLaunchResult> LaunchEnemyRandomizerAsync(
+            CancellationToken cancellationToken) =>
+            Task.FromResult(RandomizerToolLaunchResult.Success());
     }
 
     private sealed class RecordingLogger : IExternalLogger
@@ -316,5 +336,35 @@ public sealed class MainWindowViewModelTests
             Exceptions.Add(exception);
             return Task.CompletedTask;
         }
+    }
+
+    private sealed class ExternalRootFixture : IDisposable
+    {
+        private ExternalRootFixture(string container)
+        {
+            Container = container;
+            LocalRoot = Path.Combine(container, "local");
+            ExternalRoot = Path.Combine(container, "external");
+            Directory.CreateDirectory(LocalRoot);
+            Directory.CreateDirectory(ExternalRoot);
+            Store = new ExternalRootSelectionStore(LocalRoot);
+        }
+
+        public string Container { get; }
+
+        public string LocalRoot { get; }
+
+        public string ExternalRoot { get; }
+
+        public ExternalRootSelectionStore Store { get; }
+
+        public static ExternalRootFixture Create()
+        {
+            var container = Path.Combine(Path.GetTempPath(), $"dsr-external-root-view-model-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(container);
+            return new ExternalRootFixture(container);
+        }
+
+        public void Dispose() => Directory.Delete(Container, recursive: true);
     }
 }

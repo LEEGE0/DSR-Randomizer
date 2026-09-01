@@ -1,6 +1,8 @@
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.IO.Pipes;
+using System.Net;
+using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Security.AccessControl;
 using System.Security.Principal;
@@ -13,6 +15,96 @@ namespace DSRRandomizer.Launcher.Tests.Safety;
 
 public sealed class RemoteDllInjectorIntegrationTests
 {
+    private const ProtectionFlags MonitorFlags =
+        ProtectionFlags.Heartbeat | ProtectionFlags.HookIntegrity;
+
+    [Theory]
+    [InlineData(10U, "GAME_SERVICE_PROFILE_MISMATCH")]
+    [InlineData(11U, "GAME_SERVICE_HOOK_FAILED")]
+    [InlineData(12U, "PROTECTION_CLEANUP_FAILED")]
+    [InlineData(13U, "SAVE_CALLSITE_PROFILE_MISMATCH")]
+    [InlineData(7U, "SAFETY_INITIALIZER_FAILED")]
+    public void InitializerErrorCode_PreservesExactNativeFailure(
+        uint nativeStatus,
+        string expected)
+    {
+        Assert.Equal(expected, RemoteDllInjector.InitializerErrorCode(nativeStatus));
+    }
+
+    [Theory]
+    [InlineData(0x7FUL, true)]
+    [InlineData(0x7EUL, false)]
+    [InlineData(0xFFUL, false)]
+    [InlineData(0x17FUL, false)]
+    public void SimplifiedOfflineProtection_RequiresExactSevenBitBitmap(
+        ulong flags,
+        bool expected)
+    {
+        Assert.Equal(0x7FUL, SimplifiedOfflineProtection.RequiredFlags);
+        Assert.Equal(expected, SimplifiedOfflineProtection.IsExact(flags));
+    }
+
+    [Theory]
+    [InlineData(0x201UL, true)]
+    [InlineData(0x3UL, false)]
+    [InlineData(0x203UL, false)]
+    [InlineData(0x10000000201UL, false)]
+    public void DedicatedSaveProtection_RequiresExactCallsiteRedirectBitmap(
+        ulong flags,
+        bool expected)
+    {
+        Assert.Equal(0x201UL, DedicatedSaveProtection.RequiredFlags);
+        Assert.Equal(expected, DedicatedSaveProtection.IsExact(flags));
+    }
+
+    [Fact]
+    public async Task CompleteOneShotAsync_DisposesPipeAndReturnsNoSession()
+    {
+        await using var pipe = new ProtectionPipeServer(
+            RandomNumberGenerator.GetBytes(32),
+            TimeSpan.FromSeconds(1));
+        var handshake = new ProtectionHandshake(
+            true,
+            SimplifiedOfflineProtection.RequiredFlags,
+            string.Empty,
+            Session: pipe);
+
+        var result = await pipe.CompleteOneShotAsync(
+            handshake,
+            SimplifiedOfflineProtection.RequiredFlags);
+
+        Assert.True(result.Success);
+        Assert.Equal(SimplifiedOfflineProtection.RequiredFlags, result.ActiveFlags);
+        Assert.Null(result.Session);
+        await Assert.ThrowsAsync<ObjectDisposedException>(
+            () => pipe.WaitForHandshakeAsync(CancellationToken.None));
+    }
+
+    [Theory]
+    [InlineData(0x3UL)]
+    [InlineData(0x203UL)]
+    [InlineData(0x10000000201UL)]
+    public async Task CompleteOneShotAsync_RejectsNonExactDedicatedSaveFlags(
+        ulong activeFlags)
+    {
+        await using var pipe = new ProtectionPipeServer(
+            RandomNumberGenerator.GetBytes(32),
+            TimeSpan.FromSeconds(1));
+        var handshake = new ProtectionHandshake(
+            true,
+            activeFlags,
+            string.Empty,
+            Session: pipe);
+
+        var result = await pipe.CompleteOneShotAsync(
+            handshake,
+            DedicatedSaveProtection.RequiredFlags);
+
+        Assert.False(result.Success);
+        Assert.Equal("SAFETY_FLAGS_INCOMPLETE", result.ErrorCode);
+        Assert.Null(result.Session);
+    }
+
     [Fact]
     public void CreateInitBlock_MarshalsVersionedCanonicalSavePathsAtExactOffsets()
     {
@@ -36,9 +128,9 @@ public sealed class RemoteDllInjectorIntegrationTests
             configuration,
             @"\\.\pipe\fixture");
 
-        Assert.Equal(5428, block.Length);
+        Assert.Equal(5480, block.Length);
         Assert.Equal((ushort)2, BinaryPrimitives.ReadUInt16LittleEndian(block.AsSpan(4)));
-        Assert.Equal((ushort)5428, BinaryPrimitives.ReadUInt16LittleEndian(block.AsSpan(6)));
+        Assert.Equal((ushort)5480, BinaryPrimitives.ReadUInt16LittleEndian(block.AsSpan(6)));
         Assert.Equal(7UL, BinaryPrimitives.ReadUInt64LittleEndian(block.AsSpan(8)));
         Assert.Equal(@"\\.\pipe\fixture", ReadFixedWide(block, 52));
         Assert.Equal(configuration.SavePaths.VirtualDocuments, ReadFixedWide(block, 308));
@@ -46,10 +138,81 @@ public sealed class RemoteDllInjectorIntegrationTests
         Assert.Equal(configuration.SavePaths.RealSaveRoot, ReadFixedWide(block, 2356));
         Assert.Equal(configuration.SavePaths.ExternalSaveRoot, ReadFixedWide(block, 3380));
         Assert.Equal(configuration.SavePaths.DedicatedRmm, ReadFixedWide(block, 4404));
+        Assert.Equal(0U, BinaryPrimitives.ReadUInt32LittleEndian(block.AsSpan(5428)));
+        Assert.All(block[5432..], value => Assert.Equal(0, value));
     }
 
     [Fact]
-    public void CreateInitBlock_RequiresBothSaveFlagsAndCanonicalConfiguration()
+    public void CreateInitBlock_CallsiteRedirectMarshalsOnlyDedicatedRmm()
+    {
+        var configuration = GuardConfiguration.Create(
+            @"C:\fixture\DSRRandomizer.Runtime.dll",
+            ProtocolVersion: 2,
+            RequiredFlags: DedicatedSaveProtection.RequiredFlags,
+            DiagnosticMode: false) with
+        {
+            SavePaths = new GuardSavePathConfiguration(
+                @"C:\fixture\virtual-documents",
+                @"C:\fixture\virtual-documents\NBGI\DARK SOULS REMASTERED\12345678901234567\DRAKS0005.sl2",
+                @"C:\fixture\real-normal",
+                @"C:\fixture\external",
+                @"C:\fixture\external\DRAKS0005.rmm")
+        };
+
+        var block = RemoteDllInjector.CreateInitBlock(
+            configuration,
+            @"\\.\pipe\fixture");
+
+        Assert.Equal(0x201UL, BinaryPrimitives.ReadUInt64LittleEndian(block.AsSpan(8)));
+        Assert.Equal(string.Empty, ReadFixedWide(block, 308));
+        Assert.Equal(string.Empty, ReadFixedWide(block, 1332));
+        Assert.Equal(string.Empty, ReadFixedWide(block, 2356));
+        Assert.Equal(string.Empty, ReadFixedWide(block, 3380));
+        Assert.Equal(configuration.SavePaths.DedicatedRmm, ReadFixedWide(block, 4404));
+    }
+
+    [Fact]
+    public void CreateInitBlock_MarshalsExactWinsockEndpointsInProtocolV2Tail()
+    {
+        var configuration = GuardConfiguration.Create(
+            @"C:\fixture\DSRRandomizer.Runtime.dll",
+            ProtocolVersion: 2,
+            RequiredFlags: (ulong)(ProtectionFlags.Bootstrap | ProtectionFlags.Winsock),
+            DiagnosticMode: false) with
+        {
+            SocketEndpoints =
+            [
+                new GuardSocketEndpoint(
+                    GuardSocketTransport.Tcp,
+                    AddressFamily.InterNetwork,
+                    42000,
+                    IPAddress.Loopback),
+                new GuardSocketEndpoint(
+                    GuardSocketTransport.Udp,
+                    AddressFamily.InterNetworkV6,
+                    42001,
+                    IPAddress.IPv6Loopback)
+            ]
+        };
+
+        var block = RemoteDllInjector.CreateInitBlock(configuration, @"\\.\pipe\fixture");
+
+        Assert.Equal(2U, BinaryPrimitives.ReadUInt32LittleEndian(block.AsSpan(5428)));
+        Assert.Equal((ushort)1, BinaryPrimitives.ReadUInt16LittleEndian(block.AsSpan(5432)));
+        Assert.Equal((ushort)AddressFamily.InterNetwork,
+            BinaryPrimitives.ReadUInt16LittleEndian(block.AsSpan(5434)));
+        Assert.Equal((ushort)42000, BinaryPrimitives.ReadUInt16BigEndian(block.AsSpan(5436)));
+        Assert.Equal(IPAddress.Loopback.GetAddressBytes(), block.AsSpan(5440, 4).ToArray());
+        Assert.All(block.AsSpan(5444, 12).ToArray(), value => Assert.Equal(0, value));
+        Assert.Equal((ushort)2, BinaryPrimitives.ReadUInt16LittleEndian(block.AsSpan(5456)));
+        Assert.Equal((ushort)AddressFamily.InterNetworkV6,
+            BinaryPrimitives.ReadUInt16LittleEndian(block.AsSpan(5458)));
+        Assert.Equal((ushort)42001, BinaryPrimitives.ReadUInt16BigEndian(block.AsSpan(5460)));
+        Assert.Equal(IPAddress.IPv6Loopback.GetAddressBytes(), block.AsSpan(5464, 16).ToArray());
+    }
+
+    [Fact]
+    public void CreateInitBlock_RequiresPathsForKnownFolderAndRejectsFileIoWithoutKnownFolder()
     {
         var missingPaths = GuardConfiguration.Create(
             @"C:\fixture\DSRRandomizer.Runtime.dll",
@@ -84,7 +247,7 @@ public sealed class RemoteDllInjectorIntegrationTests
         var configuration = GuardConfiguration.Create(
             paths.GuardPath,
             ProtocolVersion: 2,
-            RequiredFlags: (ulong)ProtectionFlags.Bootstrap,
+            RequiredFlags: (ulong)(ProtectionFlags.Bootstrap | MonitorFlags),
             DiagnosticMode: true);
 
         var result = await new RemoteDllInjector().InitializeAsync(
@@ -93,7 +256,15 @@ public sealed class RemoteDllInjectorIntegrationTests
             CancellationToken.None);
 
         Assert.True(result.Success, result.ErrorCode);
-        Assert.Equal((ulong)ProtectionFlags.Bootstrap, result.ActiveFlags);
+        Assert.Equal((ulong)(ProtectionFlags.Bootstrap | MonitorFlags), result.ActiveFlags);
+        Assert.NotNull(result.Session);
+        var heartbeat = await ((IProtectionMessageSource)result.Session)
+            .ReadAsync(CancellationToken.None);
+        Assert.Equal(ProtectionMessageKind.Heartbeat, heartbeat.Kind);
+        Assert.Equal(1UL, heartbeat.Sequence);
+        Assert.Equal(result.ActiveFlags, heartbeat.ActiveFlags);
+        Assert.Equal(6, heartbeat.DeniedCounters.Count);
+        await result.Session.DisposeAsync();
         using var fixture = Process.GetProcessById(child.ProcessId);
         Assert.False(fixture.HasExited);
     }
@@ -106,7 +277,7 @@ public sealed class RemoteDllInjectorIntegrationTests
         var configuration = GuardConfiguration.Create(
             paths.GuardPath,
             ProtocolVersion: 2,
-            RequiredFlags: (ulong)ProtectionFlags.Bootstrap,
+            RequiredFlags: (ulong)(ProtectionFlags.Bootstrap | MonitorFlags),
             DiagnosticMode: true) with
         {
             InitializationNonce = RandomNumberGenerator.GetBytes(32)
@@ -169,7 +340,7 @@ public sealed class RemoteDllInjectorIntegrationTests
         var configuration = GuardConfiguration.Create(
             paths.GuardPath,
             ProtocolVersion: 99,
-            RequiredFlags: (ulong)ProtectionFlags.Bootstrap,
+            RequiredFlags: (ulong)(ProtectionFlags.Bootstrap | MonitorFlags),
             DiagnosticMode: true);
 
         var result = await new RemoteDllInjector().InitializeAsync(
@@ -241,7 +412,7 @@ public sealed class RemoteDllInjectorIntegrationTests
             Path.GetDirectoryName(paths.FixturePath)!,
             paths.GuardPath,
             SupportedProfile(),
-            RequiredProtectionFlags: (ulong)ProtectionFlags.Bootstrap,
+            RequiredProtectionFlags: (ulong)(ProtectionFlags.Bootstrap | MonitorFlags),
             DiagnosticMode: true);
 
         try
@@ -267,7 +438,7 @@ public sealed class RemoteDllInjectorIntegrationTests
                 Path.GetDirectoryName(fixturePath)!,
                 fixturePath,
                 SupportedProfile(),
-                RequiredProtectionFlags: (ulong)ProtectionFlags.Bootstrap,
+                RequiredProtectionFlags: (ulong)(ProtectionFlags.Bootstrap | MonitorFlags),
                 DiagnosticMode: true),
             CancellationToken.None);
         child.AssignKillOnCloseJob();

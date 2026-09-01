@@ -25,10 +25,10 @@ public static partial class SavePaths
     {
         if (string.IsNullOrWhiteSpace(steamId) || !SteamIdPattern().IsMatch(steamId))
         {
-            throw new ArgumentException("Steam ID must contain 16 to 20 decimal digits.", nameof(steamId));
+            throw new ArgumentException("Steam ID must contain 1 to 20 decimal digits.", nameof(steamId));
         }
     }
 
-    [GeneratedRegex("^[0-9]{16,20}$", RegexOptions.CultureInvariant)]
+    [GeneratedRegex("^[0-9]{1,20}$", RegexOptions.CultureInvariant)]
     private static partial Regex SteamIdPattern();
 }

@@ -1,36 +1,68 @@
-# DSR Randomizer
+# DSR for MOD
 
-DSR Randomizer is a planned Dark Souls Remastered mod with deterministic item and boss permutations, weighted regular-enemy placement, automatic equipment on pickup, an isolated save, and a dedicated offline launcher.
+DSR for MOD creates an isolated Dark Souls Remastered mod runtime beneath a recipient-selected external root. It protects the Steam installation and normal save as inputs and launches only the verified copied game.
 
-The project is currently building `v0.1.0-alpha.1`, the external-runtime isolation foundation. The approved architecture is documented in [`docs/superpowers/specs/2026-08-24-dsr-randomizer-design.md`](docs/superpowers/specs/2026-08-24-dsr-randomizer-design.md).
+`v0.1.0-alpha.2` is a Windows x64 redistributable alpha. Start with the recipient-facing Korean guide in [`INSTALL_KO.md`](INSTALL_KO.md). The approved release design is recorded in [`docs/superpowers/specs/2026-08-31-redistributable-release-design.md`](docs/superpowers/specs/2026-08-31-redistributable-release-design.md).
 
-## Safety promise
+## Redistribution boundary
 
-The mod treats the user's original Dark Souls Remastered installation and existing Overhaul installation as read-only inputs. It builds and modifies only a separate local runtime outside the Steam installation.
+The one file intended for redistribution is `DSR-for-MOD-v0.1.0-alpha.2-redistributable.zip`. It contains exactly three root entries: the deterministic corresponding-source ZIP, the exact 12-path Windows x64 binary ZIP, and `SHA256SUMS.txt`, which binds both inner ZIPs. Keep those three extracted files together. The inner binary ZIP contains the project launcher; native offline/save guard and checksum; pinned compatibility profile; project-owned RMM bridge DLL and self-contained bridge host; a strict bridge deployment manifest; and the license, notices, changelog, overview, and Korean guide. Package validation rejects any extra or missing binary path and any mismatched pinned artifact. The inner source ZIP contains the committed corresponding source, including the actual pinned SoulsFormatsNEXT, ZstdNet 1.4.5, and Zstandard 1.4.5 source trees.
 
-The foundation launcher copies only explicitly recognized stock files. Installed `d3d11.dll`, `d3d11_mod.ini`, the `overhaul` directory, `DSRQuickSummonCompanion.dll`, logs, crash dumps, credentials, and other unlisted root content are excluded.
+The archive does **not** contain, download, or install:
 
-## Alpha status
+- Dark Souls Remastered executables, assets, or copied game data;
+- `.sl2` or `.rmm` saves, Steam IDs, profiles, logs, staging, seeds, or spoilers;
+- Item Randomizer or Enemy Randomizer;
+- the Enemy Randomizer package's compatible Mod Engine fork; or
+- `DS1HeapPatch.dll`.
 
-`v0.1.0-alpha.1` requires Windows x64, a Steam Dark Souls Remastered installation, and approximately 9 GB of additional free disk space. It can verify the selected installation and create a complete independent runtime under `%LOCALAPPDATA%\DSR-Randomizer`.
+Recipients must own Dark Souls Remastered and obtain the two randomizers from their official distribution pages: [Item Randomizer releases](https://github.com/HotPocketRemix/DarkSoulsItemRandomizer/releases) and [Enemy Randomizer files](https://www.nexusmods.com/darksoulsremastered/mods/922?tab=files). Their files remain recipient-controlled beneath the active copied runtime and are never added to this project's distributable archive.
 
-This alpha deliberately cannot start the game. Dedicated-save redirection and official-online blocking are not implemented yet, so the launch control remains locked. It is an isolation foundation, not a playable randomizer release.
+## Safety and launch model
 
-Foundation commands:
+Runtime construction copies all and only verified stock-catalog entries into `<external-root>\runtimes\runtime-<id>`. Installed `d3d11.dll`, `d3d11_mod.ini`, Overhaul content, companion DLLs, credentials, logs, dumps, and any other unlisted source content are excluded. The original Steam installation and installed Overhaul remain read-only.
+
+The packaged native guard and compatibility profile are checked against hashes embedded in the launcher. For the randomizer path, `Launch modded copy` first installs or repairs only the packaged project-owned bridge and host at `<external-root>\components\rmm-bridge`, validates their strict four-property manifest and hashes, and retains verified leases through Mod Engine startup. It then creates a bridged configuration from the recipient-supplied Enemy Randomizer layout. Missing, altered, or unsafe bridge artifacts fail closed before the recipient-supplied Mod Engine starts.
+
+Steam Offline Mode is a user-managed prerequisite. The launcher does not inspect Steam state, block networking, change Steam settings, modify the firewall, or disable adapters. Use the DSR for MOD launch button after running Item Randomizer first and Enemy Randomizer last; do not use Enemy Randomizer's `Launch DS1` button for this integrated workflow.
+
+The modded copy uses only `<external-root>\saves\<SteamID>\DRAKS0005.rmm`. A valid existing `.rmm` is reused without opening the normal save. If it is absent, launch performs a read-only, verified, atomic bootstrap from the explicitly selected normal `DRAKS0005.sl2`. The normal `.sl2` is never written.
+
+## Commands
 
 ```text
-DSRRandomizer.Launcher.exe --verify <game-path>
-DSRRandomizer.Launcher.exe --initialize-runtime <game-path>
-DSRRandomizer.Launcher.exe --status
-DSRRandomizer.Launcher.exe --validate-package <directory>
+DSRForMod.Launcher.exe --set-root <external-root>
+DSRForMod.Launcher.exe --verify <game-path>
+DSRForMod.Launcher.exe --initialize-runtime <game-path>
+DSRForMod.Launcher.exe --prepare-save <SteamID>
+DSRForMod.Launcher.exe --launch <SteamID>
+DSRForMod.Launcher.exe --status
+DSRForMod.Launcher.exe --validate-package <directory>
 ```
 
-The graphical launcher provides installation verification and external-runtime creation without exposing original-game or Overhaul launch buttons.
+## Release verification
+
+The `0.1.0-alpha.2` release path builds in unique, reparse-safe work directories, cleans only verified work descendants, validates staging and a fresh binary-ZIP extraction, and constructs both inner ZIPs privately. Before building and again after binary staging, it requires committed `HEAD`, no tracked or nonignored untracked main-tree changes, and every recursive submodule initialized, clean, and exactly at its gitlink. The source archive overlays the exact pinned SoulsFormatsNEXT, ZstdNet, and Zstandard contents, uses sorted fixed-timestamp entries, and excludes Git metadata, build outputs, artifacts, and private working data. Known reviewed profile/account markers are rejected in plain, JSON-escaped, forward-slash/URI, UTF-8, UTF-16LE, and UTF-16BE forms.
+
+After all binary, source, dependency, notice, rebuild, and privacy gates pass, the builder creates a deterministic outer ZIP with exactly the source ZIP, binary ZIP, and strict LF-only `SHA256SUMS.txt`. The publisher leases that exact gated outer file, acquires the canonical output-root lock, and durably writes a same-filesystem pending file through one Windows handle that denies write/delete sharing. After the last pre-commit test hook, it rechecks that exact pending handle for a regular, non-reparse, single-link identity, expected SHA-256, and exact outer semantics. `SetFileInformationByHandle(FileRenameInfo)` then atomically renames that already validated object over the canonical name; successful return from that native call is recorded immediately and is the only commit point. Any earlier failure leaves the existing canonical byte-exact or preserves first-publish absence. After commit there is no backup, rollback candidate, failed-canonical rename, transaction directory, or journal. Before the final success observation, the publisher explicitly closes and clears the staged-source lease, publication lock, output-root lease, and every non-final owned wrapper; failures there are committed-new failures and cannot produce success. With only the canonical handle left, it computes SHA-256 and validates the outer archive, resolves the exact canonical path, and makes a final same-handle point-in-time observation of regular/non-reparse state and `NumberOfLinks == 1`. Delayed hard-link attempts during the scan or at the former resource-unwind seams are present before that observation and fail closed by removing the canonical link rather than being accepted.
+
+This stable-handle protocol validates mutations observable up to that final observation; it does not make the independent link-count query and later managed handle close atomic. An uncooperative process running as the same OS user can create a hard link or otherwise mutate filesystem namespace/content after the observation, including during the observation-to-close instruction interval or after publication, because it has the same filesystem authority. That behavior is outside the publisher's threat model. The output-root lock serializes cooperative official publisher instances only and is not an OS security boundary against arbitrary same-user processes. Do not run another process that can modify `artifacts` during build or publication. Immediately before transfer, recompute the reported outer SHA-256 and transfer those verified bytes; the immutable transferred bytes and hash, not a perpetually protected local pathname, are the deliverable. A competing official publisher that encounters the held lock receives `PUBLICATION_IN_PROGRESS` and must retry. The single outer archive structurally prevents a mixed binary/source set. No external checksum sidecar is created for the outer ZIP; release records display its SHA-256 separately. Legacy cleanup accepts only a validated release version and internally derives the exact former binary/source ZIP and sidecar names; it removes them only when they are safe regular single-link files. The package validator safely locks and verifies release artifacts even when a staged file path exceeds the legacy Windows 260-character limit. The Release host contains no private absolute PDB path. Its parsed .NET v6 bundle manifest and embedded dependency manifest contain neither DrSwizzler nor BouncyCastle; the retained ZstdNet/libzstd notices are reproduced in full. The final gate covers 447 managed tests and 15 native tests. Generated archives remain build artifacts and are not source-controlled.
+
+## Building from the included corresponding-source ZIP
+
+Extract the outer redistributable first and keep `SHA256SUMS.txt` beside both inner ZIPs. On Windows, extract the inner source ZIP to a reasonably short directory near a drive root or system temporary root. Deeply nested extraction paths can reach legacy MSBuild path-length behavior before compilation begins. From the extracted versioned directory, restore and build the relevant host with:
+
+```powershell
+dotnet restore src/DSRRandomizer.RmmBridgeHost/DSRRandomizer.RmmBridgeHost.csproj
+dotnet build src/DSRRandomizer.RmmBridgeHost/DSRRandomizer.RmmBridgeHost.csproj -c Release --no-restore -nr:false
+```
+
+The exact upstream rebuild inputs are included under `third_party/SoulsFormatsNEXT`, `third_party/ZstdNet`, and `third_party/zstd`, including their license, project/build, managed wrapper, and native library sources. `SOURCE_REVISIONS.json` identifies the exact committed main revision and all three submodule revisions represented by the archive. The source ZIP intentionally excludes `.git`; use the official upstream URLs and pinned revisions in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) when repository history or upstream-specific build instructions are needed.
 
 ## License
 
 SPDX-License-Identifier: GPL-3.0-only
 
-Copyright (C) 2026 DSR Randomizer contributors.
+Copyright (C) 2026 DSR for MOD contributors.
 
-Dark Souls and Dark Souls Remastered are trademarks of their respective owners. This project does not include or redistribute game executables, assets, saves, credentials, or locally extracted game data. See [`LICENSE`](LICENSE) and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+Dark Souls and Dark Souls Remastered are trademarks of their respective owners. See [`LICENSE`](LICENSE) and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). Convey the complete authoritative outer redistributable, which physically contains the exact binary/source pair and their hash manifest, unless another GPL-3.0-compliant distribution method is used.

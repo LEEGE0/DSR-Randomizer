@@ -19,6 +19,17 @@ public sealed class SaveContractsTests
     }
 
     [Fact]
+    public void DedicatedPath_AcceptsNineDigitNumericSaveFolder()
+    {
+        var path = SavePaths.GetDedicatedSave(
+            @"C:\Local\DSR",
+            "123456789",
+            CreateBoundary());
+
+        Assert.Equal(@"C:\Local\DSR\saves\123456789\DRAKS0005.rmm", path);
+    }
+
+    [Fact]
     public void DedicatedPath_PublicApiRequiresWriteBoundary()
     {
         var uncheckedResolver = typeof(SavePaths).GetMethod(

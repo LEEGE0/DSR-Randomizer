@@ -2,6 +2,7 @@ using DSRRandomizer.Foundation.Installation;
 using DSRRandomizer.Foundation.Runtime;
 using DSRRandomizer.Foundation.Saves;
 using DSRRandomizer.Launcher.Services;
+using DSRRandomizer.Launcher.Safety;
 using System.Text.Json;
 
 namespace DSRRandomizer.Launcher.Tests;
@@ -9,18 +10,106 @@ namespace DSRRandomizer.Launcher.Tests;
 public sealed class LauncherApplicationTests
 {
     [Fact]
-    public async Task RunAsync_LaunchArgumentIsRejected()
+    public async Task RunAsync_MaterialOperationWithoutExternalRootReturnsStableSelectionError()
     {
         var output = new StringWriter();
         var application = new LauncherApplication(
-            new FakeLauncherService(),
+            service: null,
             output,
-            new StringWriter());
+            new StringWriter(),
+            externalRootSelected: false);
+
+        var exitCode = await application.RunAsync(new[] { "--status" }, CancellationToken.None);
+
+        Assert.Equal(8, exitCode);
+        using var document = JsonDocument.Parse(output.ToString());
+        Assert.Equal(
+            "EXTERNAL_ROOT_NOT_SELECTED",
+            document.RootElement.GetProperty("errorCode").GetString());
+    }
+
+    [Fact]
+    public async Task RunAsync_LaunchWithoutExternalRootReturnsStableSelectionError()
+    {
+        var output = new StringWriter();
+        var application = new LauncherApplication(
+            service: null,
+            output,
+            new StringWriter(),
+            externalRootSelected: false);
 
         var exitCode = await application.RunAsync(new[] { "--launch" }, CancellationToken.None);
 
-        Assert.Equal(2, exitCode);
-        Assert.Contains("unsupported", output.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(8, exitCode);
+        using var document = JsonDocument.Parse(output.ToString());
+        Assert.Equal(
+            "EXTERNAL_ROOT_NOT_SELECTED",
+            document.RootElement.GetProperty("errorCode").GetString());
+    }
+
+    [Theory]
+    [InlineData("{malformed")]
+    [InlineData("{\"schemaVersion\":1,\"root\":\"C:\\\\missing-external-root\"}")]
+    public async Task RunWithLocalDataRoot_SetRootRepairsBrokenPreviousPointer(string previousPointer)
+    {
+        using var fixture = ProgramFixture.Create();
+        await File.WriteAllTextAsync(Path.Combine(fixture.LocalRoot, "external-root.json"), previousPointer);
+        var output = new StringWriter();
+
+        var exitCode = Program.RunWithLocalDataRoot(
+            new[] { "--set-root", fixture.ValidExternalRoot },
+            fixture.LocalRoot,
+            output,
+            new StringWriter());
+
+        Assert.Equal(0, exitCode);
+        Assert.Equal(
+            fixture.ValidExternalRoot,
+            await new DSRRandomizer.Launcher.Configuration.ExternalRootSelectionStore(fixture.LocalRoot)
+                .ReadAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task RunAsync_LaunchWithSteamIdCallsSharedService()
+    {
+        var output = new StringWriter();
+        var service = new FakeLauncherService
+        {
+            LaunchResult = new SafetyLaunchResult(true, string.Empty, 0)
+        };
+        var application = new LauncherApplication(
+            service,
+            output,
+            new StringWriter());
+
+        var exitCode = await application.RunAsync(
+            new[] { "--launch", "12345678901234567" },
+            CancellationToken.None);
+
+        Assert.Equal(0, exitCode);
+        Assert.Equal("12345678901234567", Assert.Single(service.LaunchCalls));
+        using var document = JsonDocument.Parse(output.ToString());
+        Assert.True(document.RootElement.GetProperty("success").GetBoolean());
+    }
+
+    [Fact]
+    public async Task RunAsync_LaunchAcceptsNineDigitNumericSaveFolder()
+    {
+        var service = new FakeLauncherService
+        {
+            LaunchResult = new SafetyLaunchResult(true, string.Empty, 0)
+        };
+        var application = new LauncherApplication(
+            service,
+            new StringWriter(),
+            new StringWriter());
+
+        var exitCode = await application.RunAsync(
+            new[] { "--launch", "123456789" },
+            CancellationToken.None);
+
+        Assert.Equal(0, exitCode);
+        Assert.Equal("123456789", Assert.Single(service.LaunchCalls));
     }
 
     [Fact]
@@ -144,11 +233,19 @@ public sealed class LauncherApplicationTests
     }
 
     [Fact]
-    public void ProductLaunch_RemainsLockedAfterNativeFoundation()
+    public void ProductLaunch_WithoutSelectedExternalRootReturnsSelectionError()
     {
-        var exitCode = Program.Main(new[] { "--launch" });
+        using var fixture = ProgramFixture.Create();
+        var output = new StringWriter();
 
-        Assert.Equal(2, exitCode);
+        var exitCode = Program.RunWithLocalDataRoot(
+            new[] { "--launch" },
+            fixture.LocalRoot,
+            output,
+            new StringWriter());
+
+        Assert.Equal(8, exitCode);
+        Assert.Contains("EXTERNAL_ROOT_NOT_SELECTED", output.ToString(), StringComparison.Ordinal);
     }
 
     private sealed class FakeLauncherService : ILauncherService
@@ -162,6 +259,11 @@ public sealed class LauncherApplicationTests
 
         public RuntimeReadinessResult ReadinessResult { get; init; } =
             new(true, @"C:\Local\runtime", Array.Empty<string>());
+
+        public SafetyLaunchResult LaunchResult { get; init; } =
+            SafetyLaunchResult.Failed("not configured");
+
+        public List<string> LaunchCalls { get; } = [];
 
         public Task<VerificationResult> VerifyAsync(
             string gamePath,
@@ -182,6 +284,10 @@ public sealed class LauncherApplicationTests
             CancellationToken cancellationToken) =>
             Task.FromResult(ReadinessResult);
 
+        public Task<RuntimeReadinessResult> GetModdedLaunchReadinessAsync(
+            CancellationToken cancellationToken) =>
+            Task.FromResult(ReadinessResult);
+
         public Task<IReadOnlyList<SaveProfileCandidate>> DiscoverSaveProfilesAsync(
             CancellationToken cancellationToken) =>
             Task.FromResult<IReadOnlyList<SaveProfileCandidate>>([]);
@@ -199,5 +305,48 @@ public sealed class LauncherApplicationTests
 
             return Task.FromResult(PrepareResult);
         }
+
+        public Task<SafetyLaunchResult> LaunchModdedAsync(
+            string steamId,
+            CancellationToken cancellationToken)
+        {
+            LaunchCalls.Add(steamId);
+            return Task.FromResult(LaunchResult);
+        }
+
+        public Task<RandomizerToolLaunchResult> LaunchItemRandomizerAsync(
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public Task<RandomizerToolLaunchResult> LaunchEnemyRandomizerAsync(
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+    }
+
+    private sealed class ProgramFixture : IDisposable
+    {
+        private ProgramFixture(string container)
+        {
+            Container = container;
+            LocalRoot = Path.Combine(container, "local");
+            ValidExternalRoot = Path.Combine(container, "external");
+            Directory.CreateDirectory(LocalRoot);
+            Directory.CreateDirectory(ValidExternalRoot);
+        }
+
+        public string Container { get; }
+
+        public string LocalRoot { get; }
+
+        public string ValidExternalRoot { get; }
+
+        public static ProgramFixture Create()
+        {
+            var container = Path.Combine(Path.GetTempPath(), $"dsr-program-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(container);
+            return new ProgramFixture(container);
+        }
+
+        public void Dispose() => Directory.Delete(Container, recursive: true);
     }
 }

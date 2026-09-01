@@ -11,6 +11,8 @@ public sealed record LocalDataLayout(
     string Config,
     string Logs)
 {
+    public const string ModsDirectoryName = "Mods";
+
     public static LocalDataLayout Create(string localDataRoot, WriteBoundary boundary)
     {
         ArgumentNullException.ThrowIfNull(boundary);

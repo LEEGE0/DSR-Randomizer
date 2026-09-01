@@ -8,6 +8,27 @@ namespace DSRRandomizer.Launcher.Tests.Safety;
 public sealed class WindowsJobObjectIntegrationTests
 {
     [Fact]
+    public void CreateGuardConfiguration_CopiesExactSavePathsWithoutSocketEndpoints()
+    {
+        var savePaths = new GuardSavePathConfiguration(
+            @"C:\fixture\virtual-documents",
+            @"C:\fixture\virtual-documents\NBGI\DARK SOULS REMASTERED\12345678901234567\DRAKS0005.sl2",
+            @"C:\fixture\normal",
+            @"C:\fixture\external",
+            @"C:\fixture\external\DRAKS0005.rmm");
+        var request = CreateRequest(FindFixturePath()) with
+        {
+            RequiredProtectionFlags = DedicatedSaveProtection.RequiredFlags,
+            SavePaths = savePaths
+        };
+
+        var configuration = WindowsProtectedProcessPlatform.CreateGuardConfiguration(request);
+
+        Assert.Same(savePaths, configuration.SavePaths);
+        Assert.Empty(configuration.SocketEndpoints);
+    }
+
+    [Fact]
     public async Task Dispose_KillsSuspendedFixtureAssignedToJob()
     {
         var fixturePath = FindFixturePath();

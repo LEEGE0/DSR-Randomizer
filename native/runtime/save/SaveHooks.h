@@ -36,12 +36,18 @@ struct SaveHookConfiguration {
     std::wstring realSaveRoot;
     std::wstring externalSaveRoot;
     std::wstring dedicatedRmm;
+    bool protectFileIo;
     bool diagnosticMode;
+    std::wstring overhaulGameParamSource;
+    std::wstring overhaulGameParamTarget;
 };
 
 class HookPlatform {
 public:
     virtual ~HookPlatform() = default;
+
+    virtual void BeginMutation() noexcept {}
+    virtual void EndMutation() noexcept {}
 
     virtual bool Initialize() noexcept = 0;
     virtual void* ResolveTarget(
@@ -66,6 +72,7 @@ public:
 [[nodiscard]] SaveHookCleanupStatus UninstallSaveHooks() noexcept;
 [[nodiscard]] bool SaveHooksAreInstalled() noexcept;
 [[nodiscard]] SaveAuditCounters CurrentSaveAuditCounters() noexcept;
+[[nodiscard]] std::uint64_t CurrentGameParamRedirectCount() noexcept;
 
 namespace Testing {
 
@@ -83,6 +90,11 @@ void SetBeforeOriginalApiCallback(
     BeforeOriginalApiCallback callback,
     void* state) noexcept;
 void HoldSaveHookCallback(void* enteredEvent, void* releaseEvent) noexcept;
+void HoldSaveHookCallbackWhileWaitingForMutation(
+    void* enteredEvent,
+    void* allowMutationEvent,
+    void* mutationAcquiredEvent,
+    void* releaseEvent) noexcept;
 
 }  // namespace Testing
 

@@ -2,16 +2,24 @@ namespace DSRRandomizer.Foundation.Packaging;
 
 public sealed class ReleaseContentGuard
 {
+    private static readonly string[] RequiredPaths =
+    [
+        "DSRForMod.Launcher.exe",
+        "README.md",
+        "INSTALL_KO.md",
+        "LICENSE",
+        "CHANGELOG.md",
+        "THIRD_PARTY_NOTICES.md",
+        "config/compatibility-profiles.json",
+        "native/DSRRandomizer.Runtime.dll",
+        "native/DSRRandomizer.Runtime.dll.sha256",
+        "components/rmm-bridge/DSRRandomizer.RmmBridge.dll",
+        "components/rmm-bridge/DSRRandomizer.RmmBridgeHost.exe",
+        "components/rmm-bridge/deployment-manifest.json"
+    ];
+
     private static readonly HashSet<string> AllowedPaths = new(
-        new[]
-        {
-            "DSRRandomizer.Launcher.exe",
-            "DSRRandomizer.Launcher.pdb",
-            "README.md",
-            "LICENSE",
-            "THIRD_PARTY_NOTICES.md",
-            "CHANGELOG.md"
-        },
+        RequiredPaths,
         StringComparer.OrdinalIgnoreCase);
 
     public IReadOnlyList<string> Validate(IEnumerable<string> relativePaths)
@@ -31,7 +39,6 @@ public sealed class ReleaseContentGuard
             if (duplicatePaths.Contains(originalPath)
                 || string.IsNullOrWhiteSpace(normalized)
                 || Path.IsPathRooted(originalPath)
-                || normalized.Contains('/', StringComparison.Ordinal)
                 || normalized is "." or ".."
                 || !AllowedPaths.Contains(normalized))
             {
@@ -39,9 +46,20 @@ public sealed class ReleaseContentGuard
             }
         }
 
+        var present = paths
+            .Select(Normalize)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var requiredPath in RequiredPaths)
+        {
+            if (!present.Contains(requiredPath))
+            {
+                prohibited.Add($"missing:{requiredPath}");
+            }
+        }
+
         return prohibited;
     }
 
     private static string Normalize(string path) =>
-        path?.Replace('\\', '/').Trim() ?? string.Empty;
+        path?.Replace('\\', '/') ?? string.Empty;
 }

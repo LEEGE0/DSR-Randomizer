@@ -80,7 +80,7 @@ public sealed partial class SaveSelectionStore
     {
         if (string.IsNullOrWhiteSpace(selection.SteamId) || !SteamIdPattern().IsMatch(selection.SteamId))
         {
-            throw new ArgumentException("Steam ID must contain 16 to 20 decimal digits.", nameof(selection));
+            throw new ArgumentException("Steam ID must contain 1 to 20 decimal digits.", nameof(selection));
         }
 
         if (string.IsNullOrWhiteSpace(selection.SourcePath))
@@ -100,6 +100,6 @@ public sealed partial class SaveSelectionStore
         return new SaveProfileCandidate(selection.SteamId, canonicalSourcePath);
     }
 
-    [GeneratedRegex("^[0-9]{16,20}$", RegexOptions.CultureInvariant)]
+    [GeneratedRegex("^[0-9]{1,20}$", RegexOptions.CultureInvariant)]
     private static partial Regex SteamIdPattern();
 }

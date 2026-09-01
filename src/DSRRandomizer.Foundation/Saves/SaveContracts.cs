@@ -20,6 +20,10 @@ public sealed record DedicatedSaveResult(
     SaveErrorCode ErrorCode,
     string Message)
 {
+    public string? SaveIdentity { get; init; }
+
+    public string? MetadataIdentity { get; init; }
+
     public static DedicatedSaveResult Fail(SaveErrorCode code, string message = "") =>
         new(false, false, null, code, message);
 }

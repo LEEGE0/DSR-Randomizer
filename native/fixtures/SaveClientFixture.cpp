@@ -147,6 +147,56 @@ bool ReadExact(const std::wstring_view path, const std::string_view expected) {
         && std::string_view(buffer.data(), read) == expected;
 }
 
+bool ReadExactAnsi(const std::wstring_view path, const std::string_view expected) {
+    const int required = WideCharToMultiByte(
+        CP_ACP,
+        0,
+        path.data(),
+        static_cast<int>(path.size()),
+        nullptr,
+        0,
+        nullptr,
+        nullptr);
+    if (required <= 0) {
+        return false;
+    }
+    std::string narrow(static_cast<std::size_t>(required), '\0');
+    if (WideCharToMultiByte(
+            CP_ACP,
+            0,
+            path.data(),
+            static_cast<int>(path.size()),
+            narrow.data(),
+            required,
+            nullptr,
+            nullptr) != required) {
+        return false;
+    }
+    const HANDLE file = CreateFileA(
+        narrow.c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    std::array<char, 64> buffer{};
+    DWORD read = 0;
+    const BOOL readSucceeded = ReadFile(
+        file,
+        buffer.data(),
+        static_cast<DWORD>(buffer.size()),
+        &read,
+        nullptr);
+    CloseHandle(file);
+    return readSucceeded
+        && read == expected.size()
+        && std::string_view(buffer.data(), read) == expected;
+}
+
 int ExclusiveOpenResult(const std::wstring_view path) {
     const HANDLE exclusive = CreateFileW(
         std::wstring(path).c_str(),
@@ -468,6 +518,22 @@ bool CleanupGuardedApiFiles(
     return cleaned;
 }
 
+bool MoveFileOutsideHooks(
+    const std::wstring& source,
+    const std::wstring& destination) {
+    using MoveFileExFunction = BOOL (WINAPI*)(LPCWSTR, LPCWSTR, DWORD);
+    const auto kernelBase = GetModuleHandleW(L"KernelBase.dll");
+    const auto moveFileEx = kernelBase == nullptr
+        ? nullptr
+        : reinterpret_cast<MoveFileExFunction>(
+            GetProcAddress(kernelBase, "MoveFileExW"));
+    return moveFileEx != nullptr
+        && moveFileEx(
+            source.c_str(),
+            destination.c_str(),
+            MOVEFILE_REPLACE_EXISTING);
+}
+
 int VerifyGuardedReparseFailures(
     const std::wstring& virtualDocuments,
     const std::wstring& logicalSave,
@@ -486,8 +552,8 @@ int VerifyGuardedReparseFailures(
     if (!CreateDirectoryIfMissing(virtualTarget)
         || !CreateDirectoryIfMissing(virtualScratch)
         || !CreateJunction(stagedVirtual, virtualTarget)
-        || !MoveFileW(virtualDocuments.c_str(), savedVirtual.c_str())
-        || !MoveFileW(stagedVirtual.c_str(), virtualDocuments.c_str())) {
+        || !MoveFileOutsideHooks(virtualDocuments, savedVirtual)
+        || !MoveFileOutsideHooks(stagedVirtual, virtualDocuments)) {
         return 50;
     }
     const bool virtualDenied = GuardedFileApisAreDenied(
@@ -498,7 +564,7 @@ int VerifyGuardedReparseFailures(
         || !CleanupGuardedApiFiles(virtualTarget, virtualScratch)
         || !RemoveDirectoryW(virtualTarget.c_str())
         || !RemoveDirectoryW(virtualScratch.c_str())
-        || !MoveFileW(savedVirtual.c_str(), virtualDocuments.c_str())) {
+        || !MoveFileOutsideHooks(savedVirtual, virtualDocuments)) {
         return 51;
     }
     if (!virtualDenied) {
@@ -512,8 +578,8 @@ int VerifyGuardedReparseFailures(
     if (!CreateDirectoryIfMissing(realTarget)
         || !CreateDirectoryIfMissing(realScratch)
         || !CreateJunction(stagedReal, realTarget)
-        || !MoveFileW(realRoot.c_str(), savedReal.c_str())
-        || !MoveFileW(stagedReal.c_str(), realRoot.c_str())) {
+        || !MoveFileOutsideHooks(realRoot, savedReal)
+        || !MoveFileOutsideHooks(stagedReal, realRoot)) {
         return 53;
     }
     const bool realDenied = GuardedFileApisAreDenied(
@@ -524,7 +590,7 @@ int VerifyGuardedReparseFailures(
         || !CleanupGuardedApiFiles(realTarget, realScratch)
         || !RemoveDirectoryW(realTarget.c_str())
         || !RemoveDirectoryW(realScratch.c_str())
-        || !MoveFileW(savedReal.c_str(), realRoot.c_str())) {
+        || !MoveFileOutsideHooks(savedReal, realRoot)) {
         return 54;
     }
     if (!realDenied) {
@@ -538,7 +604,7 @@ int VerifyGuardedReparseFailures(
     if (!CreateDirectoryIfMissing(finalTarget)
         || !WriteExact(finalReplacement, "final-replacement")
         || !CreateJunction(stagedFinal, finalTarget)
-        || !MoveFileW(stagedFinal.c_str(), logicalSave.c_str())) {
+        || !MoveFileOutsideHooks(stagedFinal, logicalSave)) {
         return 56;
     }
     const bool finalOpenDenied = IsAccessDeniedOpenDirectory(logicalSave);
@@ -572,7 +638,7 @@ int VerifyGuardedReparseFailures(
     if (!CreateDirectoryIfMissing(danglingTarget)
         || !WriteExact(danglingReplacement, "dangling-replacement")
         || !CreateJunction(stagedDangling, danglingTarget)
-        || !MoveFileW(stagedDangling.c_str(), logicalSave.c_str())
+        || !MoveFileOutsideHooks(stagedDangling, logicalSave)
         || !RemoveDirectoryW(danglingTarget.c_str())) {
         return 59;
     }
@@ -659,17 +725,21 @@ int RunFileOperations(
 
     const auto externalOriginal = escapeTarget + L"\\external-original";
     const auto stagedExternal = escapeTarget + L"\\external-link-stage";
-    if (!CreateJunction(stagedExternal, escapeTarget)
-        || !MoveFileW(externalRoot.c_str(), externalOriginal.c_str())
-        || !MoveFileW(stagedExternal.c_str(), externalRoot.c_str())) {
+    if (!CreateJunction(stagedExternal, escapeTarget)) {
         return 33;
     }
-    const bool escapeWasDenied = IsAccessDeniedCreate(logicalSave);
-    if (!RemoveDirectoryW(externalRoot.c_str())
-        || !MoveFileW(externalOriginal.c_str(), externalRoot.c_str())) {
+    SetLastError(ERROR_SUCCESS);
+    const bool guardedRootMoveWasDenied = !MoveFileW(
+        externalRoot.c_str(),
+        externalOriginal.c_str())
+        && GetLastError() == ERROR_ACCESS_DENIED;
+    if (!RemoveDirectoryW(stagedExternal.c_str())) {
         return 34;
     }
-    if (!escapeWasDenied) {
+    const auto externalAttributes = GetFileAttributesW(externalRoot.c_str());
+    if (!guardedRootMoveWasDenied
+        || externalAttributes == INVALID_FILE_ATTRIBUTES
+        || (externalAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
         return 35;
     }
 
@@ -698,6 +768,28 @@ int RunFileOperations(
     }
     if (!ReadExact(logicalSave, kSentinel)) {
         return 76;
+    }
+    if (!ReadExactAnsi(logicalSave, kSentinel)) {
+        return 88;
+    }
+    if (GetFileAttributesW(logicalSave.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        return 84;
+    }
+    WIN32_FIND_DATAW directFindData{};
+    const HANDLE directFind = FindFirstFileW(
+        logicalSave.c_str(),
+        &directFindData);
+    if (directFind == INVALID_HANDLE_VALUE) {
+        return 85;
+    }
+    FindClose(directFind);
+    if (std::wstring_view(directFindData.cFileName) != L"DRAKS0005.sl2") {
+        return 86;
+    }
+    const auto directMoved = externalRoot + L"\\direct-move-stage.tmp";
+    if (!MoveFileW(logicalSave.c_str(), directMoved.c_str())
+        || !MoveFileW(directMoved.c_str(), logicalSave.c_str())) {
+        return 87;
     }
     if (!OpenAlwaysReports(logicalSave, ERROR_ALREADY_EXISTS)) {
         return 82;
@@ -895,7 +987,11 @@ int wmain(int argc, wchar_t* argv[]) {
         | static_cast<std::uint64_t>(
             DSRRandomizer::ProtectionFlags::SaveKnownFolder)
         | static_cast<std::uint64_t>(
-            DSRRandomizer::ProtectionFlags::SaveFileIo);
+            DSRRandomizer::ProtectionFlags::SaveFileIo)
+        | static_cast<std::uint64_t>(
+            DSRRandomizer::ProtectionFlags::Heartbeat)
+        | static_cast<std::uint64_t>(
+            DSRRandomizer::ProtectionFlags::HookIntegrity);
     if (!CopyWide(
             block.pipeName,
             DSRRandomizer::kProtectionPipeNameCharacters,

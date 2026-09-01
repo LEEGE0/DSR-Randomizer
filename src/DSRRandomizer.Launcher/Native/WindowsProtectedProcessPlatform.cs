@@ -96,7 +96,7 @@ public sealed class WindowsProtectedProcessPlatform : IProtectedProcessPlatform
         return job;
     }
 
-    private static string CreateMinimalEnvironmentBlock()
+    internal static string CreateMinimalEnvironmentBlock()
     {
         var allowedNames = new[]
         {
@@ -117,8 +117,13 @@ public sealed class WindowsProtectedProcessPlatform : IProtectedProcessPlatform
         var entries = allowedNames
             .Select(name => (Name: name, Value: Environment.GetEnvironmentVariable(name)))
             .Where(entry => !string.IsNullOrEmpty(entry.Value))
-            .OrderBy(entry => entry.Name, StringComparer.OrdinalIgnoreCase)
-            .Select(entry => $"{entry.Name}={entry.Value}");
+            .Select(entry => $"{entry.Name}={entry.Value}")
+            .Concat(
+            [
+                "SteamAppId=570940",
+                "SteamGameId=570940"
+            ])
+            .OrderBy(entry => entry, StringComparer.OrdinalIgnoreCase);
         return string.Join('\0', entries) + "\0";
     }
 
@@ -181,11 +186,7 @@ public sealed class WindowsProtectedProcessPlatform : IProtectedProcessPlatform
             CancellationToken cancellationToken) =>
             new RemoteDllInjector().InitializeAsync(
                 this,
-                GuardConfiguration.Create(
-                    request.GuardDllPath,
-                    request.Profile.ProtocolVersion,
-                    request.RequiredProtectionFlags,
-                    request.DiagnosticMode),
+                CreateGuardConfiguration(request),
                 cancellationToken);
 
         public uint ResumeMainThread()
@@ -259,4 +260,15 @@ public sealed class WindowsProtectedProcessPlatform : IProtectedProcessPlatform
         private void ThrowIfDisposed() =>
             ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
     }
+
+    internal static GuardConfiguration CreateGuardConfiguration(
+        SafetyLaunchRequest request) =>
+        GuardConfiguration.Create(
+            request.GuardDllPath,
+            request.Profile.ProtocolVersion,
+            request.RequiredProtectionFlags,
+            request.DiagnosticMode) with
+        {
+            SavePaths = request.SavePaths
+        };
 }

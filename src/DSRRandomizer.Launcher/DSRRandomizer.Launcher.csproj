@@ -2,6 +2,7 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
+    <AssemblyName>DSRForMod.Launcher</AssemblyName>
     <StartupObject>DSRRandomizer.Launcher.Program</StartupObject>
     <UseWPF>true</UseWPF>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
@@ -16,9 +17,88 @@
     <DebugSymbols>false</DebugSymbols>
   </PropertyGroup>
 
+  <PropertyGroup>
+    <PinnedGuardPath>$(MSBuildProjectDirectory)\..\..\native\out\build\windows-x64-release\native\runtime\Release\DSRRandomizer.Runtime.dll</PinnedGuardPath>
+    <PinnedProfilePath>$(MSBuildProjectDirectory)\..\..\config\compatibility-profiles.json</PinnedProfilePath>
+    <PinnedBridgePath>$(MSBuildProjectDirectory)\..\..\native\out\build\windows-x64-release\native\runtime\Release\DSRRandomizer.RmmBridge.dll</PinnedBridgePath>
+    <PinnedBridgeHostPath>$(MSBuildProjectDirectory)\..\DSRRandomizer.RmmBridgeHost\bin\$(Configuration)\net8.0-windows\win-x64\DSRRandomizer.RmmBridgeHost.exe</PinnedBridgeHostPath>
+  </PropertyGroup>
+
+  <Target Name="GenerateLaunchArtifactIdentities" BeforeTargets="GetAssemblyAttributes">
+    <Error Condition="!Exists('$(PinnedGuardPath)')"
+           Text="The Release native guard must be built before compiling the launcher: $(PinnedGuardPath)" />
+    <Error Condition="!Exists('$(PinnedProfilePath)')"
+           Text="The compatibility profile is missing: $(PinnedProfilePath)" />
+    <Error Condition="!Exists('$(PinnedBridgePath)')"
+           Text="The Release native bridge must be built before compiling the launcher: $(PinnedBridgePath)" />
+    <Error Condition="!Exists('$(PinnedBridgeHostPath)')"
+           Text="The Release bridge host must be built before compiling the launcher: $(PinnedBridgeHostPath)" />
+    <ItemGroup>
+      <_PinnedGuard Include="$(PinnedGuardPath)" />
+      <_PinnedProfile Include="$(PinnedProfilePath)" />
+      <_PinnedBridge Include="$(PinnedBridgePath)" />
+      <_PinnedBridgeHost Include="$(PinnedBridgeHostPath)" />
+    </ItemGroup>
+    <GetFileHash Files="@(_PinnedGuard)" Algorithm="SHA256" HashEncoding="hex">
+      <Output TaskParameter="Items" ItemName="_PinnedGuardHash" />
+    </GetFileHash>
+    <GetFileHash Files="@(_PinnedProfile)" Algorithm="SHA256" HashEncoding="hex">
+      <Output TaskParameter="Items" ItemName="_PinnedProfileHash" />
+    </GetFileHash>
+    <GetFileHash Files="@(_PinnedBridge)" Algorithm="SHA256" HashEncoding="hex">
+      <Output TaskParameter="Items" ItemName="_PinnedBridgeHash" />
+    </GetFileHash>
+    <GetFileHash Files="@(_PinnedBridgeHost)" Algorithm="SHA256" HashEncoding="hex">
+      <Output TaskParameter="Items" ItemName="_PinnedBridgeHostHash" />
+    </GetFileHash>
+    <ItemGroup>
+      <AssemblyMetadata Include="DSRRandomizer.GuardSha256"
+                        Value="%(_PinnedGuardHash.FileHash)" />
+      <AssemblyMetadata Include="DSRRandomizer.ProfileSha256"
+                        Value="%(_PinnedProfileHash.FileHash)" />
+      <AssemblyMetadata Include="DSRRandomizer.RmmBridgeSha256"
+                        Value="%(_PinnedBridgeHash.FileHash)" />
+      <AssemblyMetadata Include="DSRRandomizer.RmmBridgeHostSha256"
+                        Value="%(_PinnedBridgeHostHash.FileHash)" />
+    </ItemGroup>
+  </Target>
+
   <ItemGroup>
     <PackageReference Include="System.IO.Pipes.AccessControl" Version="5.0.0" />
     <ProjectReference Include="..\DSRRandomizer.Foundation\DSRRandomizer.Foundation.csproj" />
+    <ProjectReference Include="..\DSRRandomizer.RmmBridgeHost\DSRRandomizer.RmmBridgeHost.csproj"
+                      ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="$(PinnedProfilePath)">
+      <Link>config\compatibility-profiles.json</Link>
+      <TargetPath>config\compatibility-profiles.json</TargetPath>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>Always</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+    </Content>
+    <Content Include="$(PinnedGuardPath)">
+      <Link>native\DSRRandomizer.Runtime.dll</Link>
+      <TargetPath>native\DSRRandomizer.Runtime.dll</TargetPath>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>Always</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+    </Content>
+    <Content Include="$(PinnedBridgePath)">
+      <Link>components\rmm-bridge\DSRRandomizer.RmmBridge.dll</Link>
+      <TargetPath>components\rmm-bridge\DSRRandomizer.RmmBridge.dll</TargetPath>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>Always</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+    </Content>
+    <Content Include="$(PinnedBridgeHostPath)">
+      <Link>components\rmm-bridge\DSRRandomizer.RmmBridgeHost.exe</Link>
+      <TargetPath>components\rmm-bridge\DSRRandomizer.RmmBridgeHost.exe</TargetPath>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>Always</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+    </Content>
   </ItemGroup>
 
 </Project>

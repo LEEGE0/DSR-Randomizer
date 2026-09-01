@@ -1,0 +1,47 @@
+#pragma once
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <string_view>
+
+#include "game/GameServiceGuard.h"
+
+namespace DSRRandomizer::Game::Generated {
+
+inline constexpr std::string_view kProfileDocumentSha256 =
+    "@PROFILE_DOCUMENT_SHA256@";
+
+struct Target {
+    const wchar_t* moduleName;
+    std::uintptr_t rva;
+    std::array<std::uint8_t, 32> fingerprintSha256;
+    std::size_t patchLength;
+    InternalTargetAction action;
+};
+
+inline constexpr wchar_t kExecutableModule[] = L"@PROFILE_EXECUTABLE_MODULE@";
+inline constexpr std::uint64_t kExecutableLength = @PROFILE_EXECUTABLE_LENGTH@ULL;
+inline constexpr std::array<std::uint8_t, 32> kExecutableSha256{
+    @PROFILE_EXECUTABLE_SHA256@};
+inline constexpr std::uint16_t kMachine = @PROFILE_MACHINE@;
+inline constexpr std::uint32_t kTimestamp = @PROFILE_TIMESTAMP@U;
+inline constexpr std::uint32_t kSizeOfImage = @PROFILE_IMAGE_SIZE@U;
+inline constexpr wchar_t kSteamModule[] = L"@PROFILE_STEAM_MODULE@";
+inline constexpr std::uint64_t kSteamLength = @PROFILE_STEAM_LENGTH@ULL;
+inline constexpr std::array<std::uint8_t, 32> kSteamSha256{
+    @PROFILE_STEAM_SHA256@};
+inline constexpr std::uint16_t kSteamMachine = @PROFILE_STEAM_MACHINE@;
+inline constexpr std::uint32_t kSteamTimestamp = @PROFILE_STEAM_TIMESTAMP@U;
+inline constexpr std::uint32_t kSteamSizeOfImage = @PROFILE_STEAM_IMAGE_SIZE@U;
+inline constexpr bool kSteamAllowDeferred = @PROFILE_STEAM_ALLOW_DEFERRED@;
+inline constexpr std::array<std::string_view, @PROFILE_STEAM_INTERFACE_COUNT@>
+    kSteamDeclaredInterfaces{{
+@PROFILE_STEAM_INTERFACES@}};
+inline constexpr std::array<std::string_view, @PROFILE_STEAM_EXPORT_COUNT@>
+    kSteamProtectedFactoryExports{{
+@PROFILE_STEAM_EXPORTS@}};
+inline constexpr std::array<Target, @PROFILE_TARGET_COUNT@> kTargets{{
+@PROFILE_TARGETS@}};
+
+}  // namespace DSRRandomizer::Game::Generated

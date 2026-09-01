@@ -273,6 +273,17 @@ public sealed class DedicatedSaveService
 
     public async Task<DedicatedSaveSessionResult> BeginSessionAsync(
         string steamId,
+        CancellationToken cancellationToken) =>
+        await BeginSessionAsync(
+            steamId,
+            expectedSaveIdentity: null,
+            expectedMetadataIdentity: null,
+            cancellationToken);
+
+    public async Task<DedicatedSaveSessionResult> BeginSessionAsync(
+        string steamId,
+        string? expectedSaveIdentity,
+        string? expectedMetadataIdentity,
         CancellationToken cancellationToken)
     {
         lock (_sessionLeaseGate)
@@ -329,6 +340,28 @@ public sealed class DedicatedSaveService
             if (!prepared.Ready)
             {
                 return new DedicatedSaveSessionResult(prepared, null);
+            }
+
+            if (expectedSaveIdentity is not null
+                || expectedMetadataIdentity is not null)
+            {
+                if (string.IsNullOrWhiteSpace(expectedSaveIdentity)
+                    || string.IsNullOrWhiteSpace(expectedMetadataIdentity)
+                    || !string.Equals(
+                        prepared.SaveIdentity,
+                        expectedSaveIdentity,
+                        StringComparison.Ordinal)
+                    || !string.Equals(
+                        prepared.MetadataIdentity,
+                        expectedMetadataIdentity,
+                        StringComparison.Ordinal))
+                {
+                    return new DedicatedSaveSessionResult(
+                        DedicatedSaveResult.Fail(
+                            SaveErrorCode.ExistingSaveInvalid,
+                            "The prepared dedicated save or metadata changed before session start."),
+                        null);
+                }
             }
 
             retainedLease.Verify();
@@ -619,7 +652,11 @@ public sealed class DedicatedSaveService
                     throw new CopyVerificationException("Published save failed verification.");
                 }
 
-                return Ready(locations.DedicatedPath, reused: false);
+                return Ready(
+                    locations.DedicatedPath,
+                    reused: false,
+                    published.Identity,
+                    publishedMetadata.Identity);
             }
             catch (OperationCanceledException)
             {
@@ -748,7 +785,18 @@ public sealed class DedicatedSaveService
                     "Dedicated save or metadata is not a regular external file.");
             }
 
-            var metadata = await ReadMetadataAsync(locations.MetadataPath, cancellationToken);
+            await using var metadataStream = _files.Open(
+                locations.MetadataPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read);
+            var metadataSnapshot = await _files.IdentityAndHashAsync(
+                metadataStream,
+                cancellationToken);
+            var metadata = await JsonSerializer.DeserializeAsync<DedicatedSaveMetadata>(
+                metadataStream,
+                JsonOptions,
+                cancellationToken);
             if (!MetadataShapeIsValid(metadata, locations.SteamId))
             {
                 return DedicatedSaveResult.Fail(
@@ -771,7 +819,11 @@ public sealed class DedicatedSaveService
                     "Dedicated save content does not match metadata.");
             }
 
-            return Ready(locations.DedicatedPath, reused: true);
+            return Ready(
+                locations.DedicatedPath,
+                reused: true,
+                snapshot.Identity,
+                metadataSnapshot.Identity);
         }
         catch (UnauthorizedAccessException exception)
         {
@@ -1110,8 +1162,16 @@ public sealed class DedicatedSaveService
         expected.Length == actual.Length
         && expected.Sha256.Equals(actual.Sha256, StringComparison.OrdinalIgnoreCase);
 
-    private static DedicatedSaveResult Ready(string path, bool reused) =>
-        new(true, reused, path, SaveErrorCode.None, string.Empty);
+    private static DedicatedSaveResult Ready(
+        string path,
+        bool reused,
+        string? saveIdentity = null,
+        string? metadataIdentity = null) =>
+        new(true, reused, path, SaveErrorCode.None, string.Empty)
+        {
+            SaveIdentity = saveIdentity,
+            MetadataIdentity = metadataIdentity
+        };
 
     private void SafeDelete(OwnedFile? ownedFile)
     {

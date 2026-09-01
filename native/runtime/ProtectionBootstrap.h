@@ -7,6 +7,10 @@
 
 namespace DSRRandomizer {
 
+namespace Modules {
+struct DeferredModuleGateConfiguration;
+}
+
 enum class InitStatus : std::uint32_t {
     Success = 0,
     InvalidArgument = 1,
@@ -15,6 +19,13 @@ enum class InitStatus : std::uint32_t {
     SupervisorUnavailable = 4,
     SupervisorReportFailed = 5,
     SaveHookInstallFailed = 6,
+    WinsockHookInstallFailed = 7,
+    SteamConfigurationUnavailable = 8,
+    DeferredModuleGateInstallFailed = 9,
+    GameServiceProfileMismatch = 10,
+    GameServiceHookFailed = 11,
+    ProtectionCleanupFailed = 12,
+    SaveCallsiteProfileMismatch = 13,
 };
 
 InitStatus InitializeProtection(ProtectionInitBlock* block) noexcept;
@@ -27,10 +38,15 @@ using RequiredPathReader = bool(*)(
     const wchar_t*,
     std::size_t,
     std::wstring&);
+using SteamConfigurationProvider = bool(*)(
+    Modules::DeferredModuleGateConfiguration&) noexcept;
 
 InitStatus InitializeWithPathReader(
     ProtectionInitBlock* block,
     RequiredPathReader reader) noexcept;
+InitStatus InitializeWithSteamConfigurationProvider(
+    ProtectionInitBlock* block,
+    SteamConfigurationProvider provider) noexcept;
 
 }  // namespace Testing
 

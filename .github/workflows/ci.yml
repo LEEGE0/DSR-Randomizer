@@ -12,6 +12,8 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x
@@ -28,12 +30,9 @@ jobs:
             native/out/build/windows-x64-release/native/Release/DSRRandomizer.SuspendedFixture.exe
             native/out/build/windows-x64-release/native/runtime/Release/DSRRandomizer.Runtime.dll
           retention-days: 7
-      - run: dotnet publish src/DSRRandomizer.Launcher/DSRRandomizer.Launcher.csproj -c Release -r win-x64 --self-contained true -o artifacts/publish
       - shell: pwsh
-        run: ./packaging/package.ps1 -Version 0.1.0-alpha.1 -PublishPath artifacts/publish -OutputPath artifacts
+        run: ./packaging/build-release.ps1 -Version 0.1.0-alpha.2 -OutputPath artifacts
       - uses: actions/upload-artifact@v4
         with:
-          name: DSR-Randomizer-win-x64
-          path: |
-            artifacts/*.zip
-            artifacts/*.sha256
+          name: DSR-for-MOD-redistributable
+          path: artifacts/DSR-for-MOD-*-redistributable.zip

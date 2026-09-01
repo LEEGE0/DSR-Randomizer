@@ -1,24 +1,28 @@
 using System.IO;
 using System.Text.Json;
 using DSRRandomizer.Foundation.Packaging;
+using DSRRandomizer.Launcher.Safety;
 using DSRRandomizer.Launcher.Services;
 
 namespace DSRRandomizer.Launcher;
 
 public sealed class LauncherApplication
 {
-    private readonly ILauncherService _service;
+    private readonly ILauncherService? _service;
     private readonly TextWriter _output;
     private readonly TextWriter _error;
+    private readonly bool _externalRootSelected;
 
     public LauncherApplication(
-        ILauncherService service,
+        ILauncherService? service,
         TextWriter output,
-        TextWriter error)
+        TextWriter error,
+        bool externalRootSelected = true)
     {
         _service = service;
         _output = output;
         _error = error;
+        _externalRootSelected = externalRootSelected;
     }
 
     public async Task<int> RunAsync(string[] args, CancellationToken cancellationToken)
@@ -40,6 +44,10 @@ public sealed class LauncherApplication
 
             var paths = EnumeratePackagePaths(packagePath);
             var prohibited = new ReleaseContentGuard().Validate(paths);
+            if (prohibited.Count == 0)
+            {
+                prohibited = ReleaseArtifactIdentityValidator.Validate(packagePath);
+            }
             await WriteJsonAsync(new
             {
                 success = prohibited.Count == 0,
@@ -48,31 +56,56 @@ public sealed class LauncherApplication
             return prohibited.Count == 0 ? 0 : 6;
         }
 
-        if (args is ["--launch"])
+        if (!_externalRootSelected)
         {
             await WriteJsonAsync(new
             {
                 success = false,
-                error = "Game launch is unsupported until dedicated-save and online-blocking safety is installed."
+                errorCode = "EXTERNAL_ROOT_NOT_SELECTED",
+                error = "Select an external material root with --set-root before running this command."
             });
-            return 2;
+            return 8;
         }
 
-        if (args is ["--prepare-save", var steamId])
+        if (args is ["--launch", var launchSteamId])
         {
-            if (steamId.Length is < 16 or > 20 || !steamId.All(char.IsAsciiDigit))
+            if (!IsSteamId(launchSteamId))
             {
                 await WriteJsonAsync(new
                 {
                     success = false,
-                    error = "SteamID must contain exactly 16 to 20 decimal digits."
+                    error = "SteamID must contain 1 to 20 decimal digits."
+                });
+                return 2;
+            }
+
+            var result = await Service.LaunchModdedAsync(
+                launchSteamId,
+                cancellationToken);
+            await WriteJsonAsync(new
+            {
+                success = result.Started,
+                errorCode = result.ErrorCode,
+                exitCode = result.ExitCode
+            });
+            return result.Started ? 0 : 9;
+        }
+
+        if (args is ["--prepare-save", var steamId])
+        {
+            if (!IsSteamId(steamId))
+            {
+                await WriteJsonAsync(new
+                {
+                    success = false,
+                    error = "SteamID must contain 1 to 20 decimal digits."
                 });
                 return 2;
             }
 
             try
             {
-                var result = await _service.PrepareDedicatedSaveAsync(
+                var result = await Service.PrepareDedicatedSaveAsync(
                     steamId,
                     firstCopyConfirmed: false,
                     cancellationToken);
@@ -100,7 +133,7 @@ public sealed class LauncherApplication
 
         if (args is ["--verify", var gamePath])
         {
-            var result = await _service.VerifyAsync(gamePath, cancellationToken);
+            var result = await Service.VerifyAsync(gamePath, cancellationToken);
             await WriteJsonAsync(result);
             return result.IsValid ? 0 : 3;
         }
@@ -109,7 +142,7 @@ public sealed class LauncherApplication
         {
             try
             {
-                var verification = await _service.VerifyAsync(
+                var verification = await Service.VerifyAsync(
                     installationPath,
                     cancellationToken);
                 if (!verification.IsValid)
@@ -118,7 +151,7 @@ public sealed class LauncherApplication
                     return 3;
                 }
 
-                var manifest = await _service.InitializeRuntimeAsync(
+                var manifest = await Service.InitializeRuntimeAsync(
                     installationPath,
                     progress: null,
                     cancellationToken);
@@ -147,7 +180,7 @@ public sealed class LauncherApplication
 
         if (args is ["--status"])
         {
-            var readiness = await _service.GetReadinessAsync(cancellationToken);
+            var readiness = await Service.GetReadinessAsync(cancellationToken);
             await WriteJsonAsync(readiness);
             return readiness.IsReady ? 0 : 5;
         }
@@ -155,7 +188,7 @@ public sealed class LauncherApplication
         await WriteJsonAsync(new
         {
             success = false,
-            error = "Invalid arguments. Supported commands: --verify <game-path>, --initialize-runtime <game-path>, --prepare-save <SteamID>, --status."
+            error = "Invalid arguments. Supported commands: --set-root <external-root>, --verify <game-path>, --initialize-runtime <game-path>, --prepare-save <SteamID>, --launch <SteamID>, --status."
         });
         return 2;
     }
@@ -163,25 +196,32 @@ public sealed class LauncherApplication
     private Task WriteJsonAsync<T>(T value) =>
         _output.WriteLineAsync(JsonSerializer.Serialize(value));
 
+    private ILauncherService Service => _service ?? throw new InvalidOperationException(
+        "EXTERNAL_ROOT_NOT_SELECTED");
+
+    private static bool IsSteamId(string value) =>
+        value.Length is >= 1 and <= 20 && value.All(char.IsAsciiDigit);
+
     private static IReadOnlyList<string> EnumeratePackagePaths(string packageRoot)
     {
         var root = Path.GetFullPath(packageRoot);
         var paths = new List<string>();
-        var pending = new Stack<string>();
-        pending.Push(root);
-        while (pending.TryPop(out var directory))
+        var pending = new Stack<(string Directory, string RelativePath)>();
+        pending.Push((root, string.Empty));
+        while (pending.TryPop(out var current))
         {
-            foreach (var entry in new DirectoryInfo(directory).EnumerateFileSystemInfos())
+            foreach (var entry in new DirectoryInfo(current.Directory).EnumerateFileSystemInfos())
             {
-                var relativePath = Path.GetRelativePath(root, entry.FullName)
-                    .Replace(Path.DirectorySeparatorChar, '/');
+                var relativePath = string.IsNullOrEmpty(current.RelativePath)
+                    ? entry.Name
+                    : $"{current.RelativePath}/{entry.Name}";
                 if ((entry.Attributes & FileAttributes.ReparsePoint) != 0)
                 {
                     paths.Add($"reparse-point:{relativePath}");
                 }
                 else if ((entry.Attributes & FileAttributes.Directory) != 0)
                 {
-                    pending.Push(entry.FullName);
+                    pending.Push((entry.FullName, relativePath));
                 }
                 else
                 {

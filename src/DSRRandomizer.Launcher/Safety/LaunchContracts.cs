@@ -1,4 +1,5 @@
 using DSRRandomizer.Foundation.Safety;
+using DSRRandomizer.Launcher.Native;
 
 namespace DSRRandomizer.Launcher.Safety;
 
@@ -9,15 +10,29 @@ public sealed record SafetyLaunchRequest(
     CompatibilityProfile Profile,
     ulong RequiredProtectionFlags,
     bool DiagnosticMode,
-    IReadOnlyList<string>? Arguments = null);
+    IReadOnlyList<string>? Arguments = null,
+    GuardSavePathConfiguration? SavePaths = null);
 
 public sealed record ProtectionHandshake(
     bool Success,
     ulong ActiveFlags,
-    string ErrorCode)
+    string ErrorCode,
+    IProtectionSession? Session = null)
 {
     public static ProtectionHandshake Failed(string errorCode) =>
         new(false, 0, errorCode);
+}
+
+public interface IProtectionSession : IAsyncDisposable
+{
+    Task<ProtectionMonitorResult> MonitorAsync(
+        ulong expectedActiveFlags,
+        CancellationToken cancellationToken);
+}
+
+public sealed record ProtectionMonitorResult(string ErrorCode)
+{
+    public static ProtectionMonitorResult Failed(string errorCode) => new(errorCode);
 }
 
 public sealed record SafetyLaunchResult(

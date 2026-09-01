@@ -32,6 +32,28 @@ public sealed class RuntimeBuilderTests
     }
 
     [Fact]
+    public async Task BuildAsync_CopiesOnlyVerifiedCatalogEntries()
+    {
+        using var fixture = RuntimeBuilderFixture.Create();
+        fixture.WriteUnlistedSource("map/MapStudio/unlisted-mod-file.dcx", "not in catalog");
+
+        var manifest = await fixture.Builder.BuildAsync(
+            fixture.SourceRoot,
+            fixture.Catalog,
+            progress: null,
+            CancellationToken.None);
+
+        Assert.False(File.Exists(Path.Combine(
+            manifest.RuntimePath,
+            "map",
+            "MapStudio",
+            "unlisted-mod-file.dcx")));
+        Assert.DoesNotContain(manifest.Files, entry => entry.RelativePath.Equals(
+            "map/MapStudio/unlisted-mod-file.dcx",
+            StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public async Task BuildAsync_CopyFailurePreservesCurrentPointerAndExistingRuntime()
     {
         using var fixture = RuntimeBuilderFixture.Create(
@@ -187,6 +209,9 @@ public sealed class RuntimeBuilderTests
             Path.Combine(SourceRoot, relativePath.Replace('/', Path.DirectorySeparatorChar));
 
         public string RuntimePath(string runtimeId) => Path.Combine(Layout.Runtimes, runtimeId);
+
+        public void WriteUnlistedSource(string relativePath, string content) =>
+            WriteSource(relativePath, content);
 
         public async Task SetActiveRuntimeAsync(string runtimeId)
         {
