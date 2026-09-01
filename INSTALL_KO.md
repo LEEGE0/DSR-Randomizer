@@ -25,7 +25,7 @@ Enemy Randomizer 압축은 받은 구조 그대로 보관하십시오. 그 패�
 1. Windows x64 PC에서 Steam 정품 Dark Souls Remastered를 설치하고 Steam의 파일 무결성 검사를 완료합니다.
 2. 게임 복사본을 둘 새 로컬 폴더를 만듭니다. 이 폴더가 `<external-root>`이며, Steam 설치 폴더와 서로 겹치지 않아야 합니다. 네트워크/UNC 경로, 심볼릭 링크, 정션, 재분석 지점은 사용하지 마십시오.
 3. `<external-root>`에는 약 9 GB 이상의 여유 공간을 준비합니다. 세이브, 로그, 생성 결과도 모두 이 루트 아래에 쌓입니다.
-4. 받은 외부 ZIP의 파일명이 정확히 `DSR-for-MOD-v0.1.0-alpha.2-redistributable.zip`인지 확인합니다. 배포자가 외부 ZIP의 SHA-256을 별도로 알려 주었다면 `Get-FileHash` 결과와 먼저 비교합니다. 외부 ZIP에는 별도 `.sha256` sidecar가 없습니다.
+4. 받은 외부 ZIP의 파일명이 정확히 `DSR-for-MOD-v0.1.0-alpha.2-redistributable.zip`인지 확인합니다. 배포자가 외부 ZIP의 SHA-256을 별도로 알려 주었다면 `Get-FileHash` 결과와 먼저 비교합니다. 배포자는 전달 직전에 외부 ZIP의 SHA-256을 다시 계산해서 알려 주어야 합니다. 외부 ZIP에는 별도 `.sha256` sidecar가 없습니다.
 5. 외부 ZIP을 빈 폴더에 한 번 풀면 다음 세 파일만 나와야 합니다. 내부 ZIP을 옮기거나 이름을 바꾸지 마십시오.
 
    ```text
@@ -136,4 +136,4 @@ Steam의 Dark Souls Remastered 설치 폴더와 정상 세이브 폴더는 제�
 - `DarkSoulsRemastered.exe`와 Steam 게임 데이터/에셋, 복사 런타임 전체
 - Item Randomizer, Enemy Randomizer, 호환 Mod Engine 포크, `DS1HeapPatch.dll`
 
-공유할 수 있는 것은 프로젝트가 만든 원본 `DSR-for-MOD-v0.1.0-alpha.2-redistributable.zip` 한 파일뿐입니다. 이 파일에는 바이너리, 정확한 대응 소스, `SHA256SUMS.txt`가 물리적으로 함께 들어 있습니다. 내부 바이너리 ZIP만 떼어 보내거나 자신의 외부 루트/초기화된 런타임을 다시 압축해 전달하지 마십시오.
+공유할 수 있는 것은 프로젝트가 만든 원본 `DSR-for-MOD-v0.1.0-alpha.2-redistributable.zip` 한 파일뿐입니다. 이 파일에는 바이너리, 정확한 대응 소스, `SHA256SUMS.txt`가 물리적으로 함께 들어 있습니다. 내부 바이너리 ZIP만 떼어 보내거나 자신의 외부 루트/초기화된 런타임을 다시 압축해 전달하지 마십시오. 빌드와 게시 중에는 `artifacts`를 바꾸는 다른 프로세스를 실행하지 말고, 전달 직전에 외부 ZIP의 SHA-256을 다시 계산하십시오. 배포 대상은 계속 보호된 로컬 경로가 아니라 그때 검증한 ZIP 바이트와 해시입니다. 동일 Windows 사용자 권한의 다른 프로세스는 최종 검사 직후나 게시 뒤에도 파일 시스템을 변경할 수 있으므로 게시 잠금은 그러한 프로세스에 대한 보안 경계가 아닙니다.
